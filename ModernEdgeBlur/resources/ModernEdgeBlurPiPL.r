@@ -9,7 +9,7 @@
 #define	MAJOR_VERSION	1
 #define	MINOR_VERSION	1
 #define	BUG_VERSION		0
-#define	STAGE_VERSION	1	// PF_Stage_DEVELOP — must match ModernEdgeBlur.h
+#define	STAGE_VERSION	0	// PF_Stage_DEVELOP (enum value 0) — must match ModernEdgeBlur.h
 #define	BUILD_VERSION	11
 
 #ifndef AE_OS_WIN
@@ -59,12 +59,17 @@ resource 'PiPL' (16000) {
 			0
 		},
 		/* [10] */
+		// MUST match what GlobalSetup() sets at runtime, or AE rejects with
+		// "global outflags mismatch". See ModernEdgeBlur.cpp GlobalSetup.
+		// out_flags  = DEEP_COLOR_AWARE | PIX_INDEPENDENT | USE_OUTPUT_EXTENT
+		//            = 0x02000000 | 0x400 | 0x40 = 0x02000440
 		AE_Effect_Global_OutFlags {
-		0x02000000 //50332160
-
+		0x02000440
 		},
+		// out_flags2 = FLOAT_COLOR_AWARE | SUPPORTS_SMART_RENDER | SUPPORTS_THREADED_RENDERING
+		//            = 0x1000 | 0x400 | 0x08000000 = 0x08001400
 		AE_Effect_Global_OutFlags_2 {
-		0x00000000
+		0x08001400
 		},
 		/* [11] */
 		AE_Effect_Match_Name {

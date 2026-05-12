@@ -56,6 +56,8 @@ typedef short int			int16;
 #include "AE_GeneralPlug.h"
 #include "AEFX_ChannelDepthTpl.h"
 #include "AEGP_SuiteHandler.h"
+#include "AEFX_SuiteHelper.h"
+#include "Smart_Utils.h"
 
 #include "ModernEdgeBlur_Strings.h"
 

@@ -37,6 +37,8 @@ set(SOURCES
     ${SRC_DIR}/ModernEdgeBlur_Strings.cpp
     ${SDK_ROOT}/Util/AEGP_SuiteHandler.cpp
     ${SDK_ROOT}/Util/MissingSuiteError.cpp
+    ${SDK_ROOT}/Util/AEFX_SuiteHelper.c
+    ${SDK_ROOT}/Util/Smart_Utils.cpp
 )
 
 set(HEADERS
@@ -66,7 +68,7 @@ add_custom_command(
             /D "MAJOR_VERSION=${VERSION_MAJOR}" 
             /D "MINOR_VERSION=${VERSION_MINOR}" 
             /D "BUG_VERSION=${VERSION_PATCH}" 
-            /D "STAGE_VERSION=1"
+            /D "STAGE_VERSION=0"
             /D "BUILD_VERSION=${VERSION_BUILD}"
             /EP "${PIPL_SOURCE}" > "${PIPL_PREPROCESSED}"
     DEPENDS ${PIPL_SOURCE} ${SRC_DIR}/ModernEdgeBlur.h

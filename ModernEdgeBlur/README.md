@@ -35,4 +35,4 @@ The plugin appears in AE under **Effect → MM → Modern Edge Blur**.
 
 ## Versioning
 
-Versions are defined in [src/ModernEdgeBlur.h](src/ModernEdgeBlur.h) and must be kept in sync with [resources/ModernEdgeBlurPiPL.r](resources/ModernEdgeBlurPiPL.r). A mismatch produces AE error 8800b at load time. The `STAGE_VERSION` define is especially load-bearing: `PF_Stage_DEVELOP` = 1, `PF_Stage_RELEASE` = 4.
+Versions are defined in [src/ModernEdgeBlur.h](src/ModernEdgeBlur.h) and must be kept in sync with [resources/ModernEdgeBlurPiPL.r](resources/ModernEdgeBlurPiPL.r). A mismatch produces AE error 8800b at load time. The `STAGE_VERSION` define is especially load-bearing — the C++ side uses the `PF_Stage_*` enum and the PiPL .r file uses literal integers. The enum values are: `PF_Stage_DEVELOP = 0`, `PF_Stage_ALPHA = 1`, `PF_Stage_BETA = 2`, `PF_Stage_RELEASE = 3` (the STAGE field is only 2 bits wide).
