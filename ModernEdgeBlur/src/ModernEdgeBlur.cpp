@@ -19,30 +19,9 @@
 /*                                                                 */
 /*******************************************************************/
 
-/*	Skeleton.cpp	
+/*	ModernEdgeBlur.cpp	*/
 
-	This is a compiling husk of a project. Fill it in with interesting
-	pixel processing code.
-	
-	Revision History
-
-	Version		Change													Engineer	Date
-	=======		======													========	======
-	1.0			(seemed like a good idea at the time)					bbb			6/1/2002
-
-	1.0			Okay, I'm leaving the version at 1.0,					bbb			2/15/2006
-				for obvious reasons; you're going to 
-				copy these files directly! This is the
-				first XCode version, though.
-
-	1.0			Let's simplify this barebones sample					zal			11/11/2010
-
-	1.0			Added new entry point									zal			9/18/2017
-	1.1			Added 'Support URL' to PiPL and entry point				cjr			3/31/2023
-
-*/
-
-#include "Skeleton.h"
+#include "ModernEdgeBlur.h"
 
 static PF_Err 
 About (	
@@ -55,10 +34,12 @@ About (
 	
 	suites.ANSICallbacksSuite1()->sprintf(
         out_data->return_msg,
-        "%s v%d.%d\r%s",
+        "%s v%d.%d.%d.%d\r%s",
         STR(StrID_Name),
         MAJOR_VERSION,
         MINOR_VERSION,
+        BUG_VERSION,
+        BUILD_VERSION,
         STR(StrID_Description));
         
 	return PF_Err_NONE;
@@ -95,11 +76,11 @@ ParamsSetup (
 	AEFX_CLR_STRUCT(def);
 
 	PF_ADD_FLOAT_SLIDERX(	"Edge Radius", 
-							SKELETON_EDGE_RADIUS_MIN, 
-							SKELETON_EDGE_RADIUS_MAX, 
-							SKELETON_EDGE_RADIUS_MIN, 
-							SKELETON_EDGE_RADIUS_MAX, 
-							SKELETON_EDGE_RADIUS_DFLT,
+							EDGE_BLUR_EDGE_RADIUS_MIN, 
+							EDGE_BLUR_EDGE_RADIUS_MAX, 
+							EDGE_BLUR_EDGE_RADIUS_MIN, 
+							EDGE_BLUR_EDGE_RADIUS_MAX, 
+							EDGE_BLUR_EDGE_RADIUS_DFLT,
 							PF_Precision_HUNDREDTHS,
 							0,
 							0,
@@ -108,11 +89,11 @@ ParamsSetup (
 	AEFX_CLR_STRUCT(def);
 
 	PF_ADD_FLOAT_SLIDERX(	"Edge Offset", 
-							SKELETON_EDGE_OFFSET_MIN, 
-							SKELETON_EDGE_OFFSET_MAX, 
-							SKELETON_EDGE_OFFSET_MIN, 
-							SKELETON_EDGE_OFFSET_MAX, 
-							SKELETON_EDGE_OFFSET_DFLT,
+							EDGE_BLUR_EDGE_OFFSET_MIN, 
+							EDGE_BLUR_EDGE_OFFSET_MAX, 
+							EDGE_BLUR_EDGE_OFFSET_MIN, 
+							EDGE_BLUR_EDGE_OFFSET_MAX, 
+							EDGE_BLUR_EDGE_OFFSET_DFLT,
 							PF_Precision_HUNDREDTHS,
 							0,
 							0,
@@ -121,11 +102,11 @@ ParamsSetup (
 	AEFX_CLR_STRUCT(def);
 
 	PF_ADD_FLOAT_SLIDERX(	"Blur Amount", 
-							SKELETON_BLUR_AMOUNT_MIN, 
-							SKELETON_BLUR_AMOUNT_MAX, 
-							SKELETON_BLUR_AMOUNT_MIN, 
-							SKELETON_BLUR_AMOUNT_MAX, 
-							SKELETON_BLUR_AMOUNT_DFLT,
+							EDGE_BLUR_BLUR_AMOUNT_MIN, 
+							EDGE_BLUR_BLUR_AMOUNT_MAX, 
+							EDGE_BLUR_BLUR_AMOUNT_MIN, 
+							EDGE_BLUR_BLUR_AMOUNT_MAX, 
+							EDGE_BLUR_BLUR_AMOUNT_DFLT,
 							PF_Precision_HUNDREDTHS,
 							0,
 							0,
@@ -135,7 +116,7 @@ ParamsSetup (
 
 	PF_ADD_POPUP(	"Blur Type",
 					2,
-					1,
+					BLUR_TYPE_BOX + 1,
 					"Box|Gaussian",
 					BLUR_TYPE_DISK_ID);
 
@@ -156,17 +137,17 @@ ParamsSetup (
 	AEFX_CLR_STRUCT(def);
 
 	PF_ADD_FLOAT_SLIDERX(	"Dilation Amount", 
-							SKELETON_DILATE_AMT_MIN, 
-							SKELETON_DILATE_AMT_MAX, 
-							SKELETON_DILATE_AMT_MIN, 
-							SKELETON_DILATE_AMT_MAX, 
-							SKELETON_DILATE_AMT_DFLT,
+							EDGE_BLUR_DILATE_AMT_MIN, 
+							EDGE_BLUR_DILATE_AMT_MAX, 
+							EDGE_BLUR_DILATE_AMT_MIN, 
+							EDGE_BLUR_DILATE_AMT_MAX, 
+							EDGE_BLUR_DILATE_AMT_DFLT,
 							PF_Precision_HUNDREDTHS,
 							0,
 							0,
 							DILATE_AMT_DISK_ID);
 	
-	out_data->num_params = SKELETON_NUM_PARAMS;
+	out_data->num_params = EDGE_BLUR_NUM_PARAMS;
 
 	return err;
 }
@@ -215,24 +196,22 @@ EdgeBlurFunc16 (
 	EdgeBlurInfo	*ebiP = reinterpret_cast<EdgeBlurInfo*>(refcon);
 					
 	if (ebiP){
-		// Calculate edge weight for this pixel
-		PF_FpLong edge_weight = CalculateEdgeWeight(
-			inP->alpha,
-			PF_MAX_CHAN16,
-			ebiP->edge_radiusF,
-			ebiP->edge_offsetF);
+		// Step 1: Edge Detection Heat Map
+		// Edge pixels are semi-transparent (alpha between 1 and max-1)
+		A_u_short alpha = inP->alpha;
 		
-		// For now, just pass through with edge detection
-		// Full blur implementation will be added in subsequent steps
-		outP->alpha = inP->alpha;
-		outP->red = inP->red;
-		outP->green = inP->green;
-		outP->blue = inP->blue;
-		
-		// Visual debug: tint edges red based on weight
-		if (edge_weight > 0.0) {
-			A_long tint = (A_long)(edge_weight * PF_MAX_CHAN16 * 0.3);
-			outP->red = MIN(outP->red + tint, PF_MAX_CHAN16);
+		if (alpha > 0 && alpha < PF_MAX_CHAN16) {
+			// This is an edge pixel - output WHITE
+			outP->alpha = PF_MAX_CHAN16;
+			outP->red = PF_MAX_CHAN16;
+			outP->green = PF_MAX_CHAN16;
+			outP->blue = PF_MAX_CHAN16;
+		} else {
+			// Fully transparent or fully opaque - output BLACK
+			outP->alpha = PF_MAX_CHAN16;
+			outP->red = 0;
+			outP->green = 0;
+			outP->blue = 0;
 		}
 	}
 
@@ -251,24 +230,22 @@ EdgeBlurFunc8 (
 	EdgeBlurInfo	*ebiP = reinterpret_cast<EdgeBlurInfo*>(refcon);
 					
 	if (ebiP){
-		// Calculate edge weight for this pixel
-		PF_FpLong edge_weight = CalculateEdgeWeight(
-			inP->alpha,
-			PF_MAX_CHAN8,
-			ebiP->edge_radiusF,
-			ebiP->edge_offsetF);
+		// Step 1: Edge Detection Heat Map
+		// Edge pixels are semi-transparent (alpha between 1 and 254)
+		A_u_char alpha = inP->alpha;
 		
-		// For now, just pass through with edge detection
-		// Full blur implementation will be added in subsequent steps
-		outP->alpha = inP->alpha;
-		outP->red = inP->red;
-		outP->green = inP->green;
-		outP->blue = inP->blue;
-		
-		// Visual debug: tint edges red based on weight
-		if (edge_weight > 0.0) {
-			A_long tint = (A_long)(edge_weight * PF_MAX_CHAN8 * 0.3);
-			outP->red = MIN(outP->red + tint, PF_MAX_CHAN8);
+		if (alpha > 0 && alpha < PF_MAX_CHAN8) {
+			// This is an edge pixel - output WHITE
+			outP->alpha = PF_MAX_CHAN8;
+			outP->red = PF_MAX_CHAN8;
+			outP->green = PF_MAX_CHAN8;
+			outP->blue = PF_MAX_CHAN8;
+		} else {
+			// Fully transparent or fully opaque - output BLACK
+			outP->alpha = PF_MAX_CHAN8;
+			outP->red = 0;
+			outP->green = 0;
+			outP->blue = 0;
 		}
 	}
 
@@ -293,19 +270,19 @@ Render (
 	linesL = output->extent_hint.bottom - output->extent_hint.top;
 	
 	// Gather parameters
-	ebiP.edge_radiusF	= params[SKELETON_EDGE_RADIUS]->u.fs_d.value;
-	ebiP.edge_offsetF	= params[SKELETON_EDGE_OFFSET]->u.fs_d.value;
-	ebiP.blur_amountF	= params[SKELETON_BLUR_AMOUNT]->u.fs_d.value;
-	ebiP.blur_type		= params[SKELETON_BLUR_TYPE]->u.pd.value - 1; // Convert to 0-based
-	ebiP.sub_pixel		= params[SKELETON_SUB_PIXEL]->u.bd.value;
-	ebiP.dilate_en		= params[SKELETON_DILATE_EN]->u.bd.value;
-	ebiP.dilate_amtF	= params[SKELETON_DILATE_AMT]->u.fs_d.value;
+	ebiP.edge_radiusF	= params[EDGE_BLUR_EDGE_RADIUS]->u.fs_d.value;
+	ebiP.edge_offsetF	= params[EDGE_BLUR_EDGE_OFFSET]->u.fs_d.value;
+	ebiP.blur_amountF	= params[EDGE_BLUR_BLUR_AMOUNT]->u.fs_d.value;
+	ebiP.blur_type		= params[EDGE_BLUR_BLUR_TYPE]->u.pd.value - 1; // Convert to 0-based
+	ebiP.sub_pixel		= params[EDGE_BLUR_SUB_PIXEL]->u.bd.value;
+	ebiP.dilate_en		= params[EDGE_BLUR_DILATE_EN]->u.bd.value;
+	ebiP.dilate_amtF	= params[EDGE_BLUR_DILATE_AMT]->u.fs_d.value;
 	
 	if (PF_WORLD_IS_DEEP(output)){
 		ERR(suites.Iterate16Suite2()->iterate(	in_data,
 												0,								// progress base
 												linesL,							// progress final
-												&params[SKELETON_INPUT]->u.ld,	// src 
+												&params[EDGE_BLUR_INPUT]->u.ld,	// src
 												NULL,							// area - null for all pixels
 												(void*)&ebiP,					// refcon - your custom data pointer
 												EdgeBlurFunc16,					// pixel function pointer
@@ -314,7 +291,7 @@ Render (
 		ERR(suites.Iterate8Suite2()->iterate(	in_data,
 												0,								// progress base
 												linesL,							// progress final
-												&params[SKELETON_INPUT]->u.ld,	// src 
+												&params[EDGE_BLUR_INPUT]->u.ld,	// src 
 												NULL,							// area - null for all pixels
 												(void*)&ebiP,					// refcon - your custom data pointer
 												EdgeBlurFunc8,					// pixel function pointer
@@ -339,11 +316,11 @@ PF_Err PluginDataEntryFunction2(
 		inPtr,
 		inPluginDataCallBackPtr,
 		"Modern Edge Blur", // Name
-		"ADBE Modern Edge Blur", // Match Name
-		"Sample Plug-ins", // Category
+		"MM Modern Edge Blur", // Match Name
+		"MM", // Category
 		AE_RESERVED_INFO, // Reserved Info
 		"EffectMain",	// Entry point
-		"https://www.adobe.com");	// support URL
+		"");	// support URL
 
 	return result;
 }

@@ -20,13 +20,13 @@
 /*******************************************************************/
 
 /*
-	Skeleton.h
+	ModernEdgeBlur.h
 */
 
 #pragma once
 
-#ifndef SKELETON_H
-#define SKELETON_H
+#ifndef MODERN_EDGE_BLUR_H
+#define MODERN_EDGE_BLUR_H
 
 typedef unsigned char		u_char;
 typedef unsigned short		u_short;
@@ -36,7 +36,7 @@ typedef short int			int16;
 #define PF_TABLE_BITS	12
 #define PF_TABLE_SZ_16	4096
 
-#define PF_DEEP_COLOR_AWARE 1	// make sure we get 16bpc pixels; 
+#define PF_DEEP_COLOR_AWARE 1	// make sure we get 16bpc pixels;
 								// AE_Effect.h checks for this.
 
 #include "AEConfig.h"
@@ -57,7 +57,7 @@ typedef short int			int16;
 #include "AEFX_ChannelDepthTpl.h"
 #include "AEGP_SuiteHandler.h"
 
-#include "Skeleton_Strings.h"
+#include "ModernEdgeBlur_Strings.h"
 
 /* Versioning information */
 
@@ -65,37 +65,37 @@ typedef short int			int16;
 #define	MINOR_VERSION	1
 #define	BUG_VERSION		0
 #define	STAGE_VERSION	PF_Stage_DEVELOP
-#define	BUILD_VERSION	1
+#define	BUILD_VERSION	11
 
 
 /* Parameter defaults */
 
-#define	SKELETON_EDGE_RADIUS_MIN		0.0
-#define	SKELETON_EDGE_RADIUS_MAX		20.0
-#define	SKELETON_EDGE_RADIUS_DFLT		3.0
+#define	EDGE_BLUR_EDGE_RADIUS_MIN		0.0
+#define	EDGE_BLUR_EDGE_RADIUS_MAX		20.0
+#define	EDGE_BLUR_EDGE_RADIUS_DFLT		3.0
 
-#define	SKELETON_EDGE_OFFSET_MIN		-10.0
-#define	SKELETON_EDGE_OFFSET_MAX		10.0
-#define	SKELETON_EDGE_OFFSET_DFLT		0.0
+#define	EDGE_BLUR_EDGE_OFFSET_MIN		-10.0
+#define	EDGE_BLUR_EDGE_OFFSET_MAX		10.0
+#define	EDGE_BLUR_EDGE_OFFSET_DFLT		0.0
 
-#define	SKELETON_BLUR_AMOUNT_MIN		0.0
-#define	SKELETON_BLUR_AMOUNT_MAX		50.0
-#define	SKELETON_BLUR_AMOUNT_DFLT		5.0
+#define	EDGE_BLUR_BLUR_AMOUNT_MIN		0.0
+#define	EDGE_BLUR_BLUR_AMOUNT_MAX		50.0
+#define	EDGE_BLUR_BLUR_AMOUNT_DFLT		5.0
 
-#define	SKELETON_DILATE_AMT_MIN			0.0
-#define	SKELETON_DILATE_AMT_MAX			10.0
-#define	SKELETON_DILATE_AMT_DFLT		2.0
+#define	EDGE_BLUR_DILATE_AMT_MIN		0.0
+#define	EDGE_BLUR_DILATE_AMT_MAX		10.0
+#define	EDGE_BLUR_DILATE_AMT_DFLT		2.0
 
 enum {
-	SKELETON_INPUT = 0,
-	SKELETON_EDGE_RADIUS,
-	SKELETON_EDGE_OFFSET,
-	SKELETON_BLUR_AMOUNT,
-	SKELETON_BLUR_TYPE,
-	SKELETON_SUB_PIXEL,
-	SKELETON_DILATE_EN,
-	SKELETON_DILATE_AMT,
-	SKELETON_NUM_PARAMS
+	EDGE_BLUR_INPUT = 0,
+	EDGE_BLUR_EDGE_RADIUS,
+	EDGE_BLUR_EDGE_OFFSET,
+	EDGE_BLUR_BLUR_AMOUNT,
+	EDGE_BLUR_BLUR_TYPE,
+	EDGE_BLUR_SUB_PIXEL,
+	EDGE_BLUR_DILATE_EN,
+	EDGE_BLUR_DILATE_AMT,
+	EDGE_BLUR_NUM_PARAMS
 };
 
 enum {
@@ -138,4 +138,4 @@ extern "C" {
 
 }
 
-#endif // SKELETON_H
+#endif // MODERN_EDGE_BLUR_H
