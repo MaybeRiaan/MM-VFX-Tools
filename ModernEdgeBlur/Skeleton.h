@@ -70,25 +70,58 @@ typedef short int			int16;
 
 /* Parameter defaults */
 
-#define	SKELETON_GAIN_MIN		0
-#define	SKELETON_GAIN_MAX		100
-#define	SKELETON_GAIN_DFLT		10
+#define	SKELETON_EDGE_RADIUS_MIN		0.0
+#define	SKELETON_EDGE_RADIUS_MAX		20.0
+#define	SKELETON_EDGE_RADIUS_DFLT		3.0
+
+#define	SKELETON_EDGE_OFFSET_MIN		-10.0
+#define	SKELETON_EDGE_OFFSET_MAX		10.0
+#define	SKELETON_EDGE_OFFSET_DFLT		0.0
+
+#define	SKELETON_BLUR_AMOUNT_MIN		0.0
+#define	SKELETON_BLUR_AMOUNT_MAX		50.0
+#define	SKELETON_BLUR_AMOUNT_DFLT		5.0
+
+#define	SKELETON_DILATE_AMT_MIN			0.0
+#define	SKELETON_DILATE_AMT_MAX			10.0
+#define	SKELETON_DILATE_AMT_DFLT		2.0
 
 enum {
 	SKELETON_INPUT = 0,
-	SKELETON_GAIN,
-	SKELETON_COLOR,
+	SKELETON_EDGE_RADIUS,
+	SKELETON_EDGE_OFFSET,
+	SKELETON_BLUR_AMOUNT,
+	SKELETON_BLUR_TYPE,
+	SKELETON_SUB_PIXEL,
+	SKELETON_DILATE_EN,
+	SKELETON_DILATE_AMT,
 	SKELETON_NUM_PARAMS
 };
 
 enum {
-	GAIN_DISK_ID = 1,
-	COLOR_DISK_ID,
+	EDGE_RADIUS_DISK_ID = 1,
+	EDGE_OFFSET_DISK_ID,
+	BLUR_AMOUNT_DISK_ID,
+	BLUR_TYPE_DISK_ID,
+	SUB_PIXEL_DISK_ID,
+	DILATE_EN_DISK_ID,
+	DILATE_AMT_DISK_ID
 };
 
-typedef struct GainInfo{
-	PF_FpLong	gainF;
-} GainInfo, *GainInfoP, **GainInfoH;
+enum {
+	BLUR_TYPE_BOX = 0,
+	BLUR_TYPE_GAUSSIAN
+};
+
+typedef struct EdgeBlurInfo{
+	PF_FpLong	edge_radiusF;
+	PF_FpLong	edge_offsetF;
+	PF_FpLong	blur_amountF;
+	A_long		blur_type;
+	PF_Boolean	sub_pixel;
+	PF_Boolean	dilate_en;
+	PF_FpLong	dilate_amtF;
+} EdgeBlurInfo, *EdgeBlurInfoP, **EdgeBlurInfoH;
 
 
 extern "C" {

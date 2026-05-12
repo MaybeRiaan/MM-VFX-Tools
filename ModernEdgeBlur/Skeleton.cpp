@@ -94,81 +94,182 @@ ParamsSetup (
 
 	AEFX_CLR_STRUCT(def);
 
-	PF_ADD_FLOAT_SLIDERX(	STR(StrID_Gain_Param_Name), 
-							SKELETON_GAIN_MIN, 
-							SKELETON_GAIN_MAX, 
-							SKELETON_GAIN_MIN, 
-							SKELETON_GAIN_MAX, 
-							SKELETON_GAIN_DFLT,
+	PF_ADD_FLOAT_SLIDERX(	"Edge Radius", 
+							SKELETON_EDGE_RADIUS_MIN, 
+							SKELETON_EDGE_RADIUS_MAX, 
+							SKELETON_EDGE_RADIUS_MIN, 
+							SKELETON_EDGE_RADIUS_MAX, 
+							SKELETON_EDGE_RADIUS_DFLT,
 							PF_Precision_HUNDREDTHS,
 							0,
 							0,
-							GAIN_DISK_ID);
+							EDGE_RADIUS_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
 
-	PF_ADD_COLOR(	STR(StrID_Color_Param_Name), 
-					PF_HALF_CHAN8,
-					PF_MAX_CHAN8,
-					PF_MAX_CHAN8,
-					COLOR_DISK_ID);
+	PF_ADD_FLOAT_SLIDERX(	"Edge Offset", 
+							SKELETON_EDGE_OFFSET_MIN, 
+							SKELETON_EDGE_OFFSET_MAX, 
+							SKELETON_EDGE_OFFSET_MIN, 
+							SKELETON_EDGE_OFFSET_MAX, 
+							SKELETON_EDGE_OFFSET_DFLT,
+							PF_Precision_HUNDREDTHS,
+							0,
+							0,
+							EDGE_OFFSET_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+
+	PF_ADD_FLOAT_SLIDERX(	"Blur Amount", 
+							SKELETON_BLUR_AMOUNT_MIN, 
+							SKELETON_BLUR_AMOUNT_MAX, 
+							SKELETON_BLUR_AMOUNT_MIN, 
+							SKELETON_BLUR_AMOUNT_MAX, 
+							SKELETON_BLUR_AMOUNT_DFLT,
+							PF_Precision_HUNDREDTHS,
+							0,
+							0,
+							BLUR_AMOUNT_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+
+	PF_ADD_POPUP(	"Blur Type",
+					2,
+					1,
+					"Box|Gaussian",
+					BLUR_TYPE_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+
+	PF_ADD_CHECKBOXX(	"Sub-Pixel Quality",
+						FALSE,
+						0,
+						SUB_PIXEL_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+
+	PF_ADD_CHECKBOXX(	"Enable Color Dilation",
+						FALSE,
+						0,
+						DILATE_EN_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+
+	PF_ADD_FLOAT_SLIDERX(	"Dilation Amount", 
+							SKELETON_DILATE_AMT_MIN, 
+							SKELETON_DILATE_AMT_MAX, 
+							SKELETON_DILATE_AMT_MIN, 
+							SKELETON_DILATE_AMT_MAX, 
+							SKELETON_DILATE_AMT_DFLT,
+							PF_Precision_HUNDREDTHS,
+							0,
+							0,
+							DILATE_AMT_DISK_ID);
 	
 	out_data->num_params = SKELETON_NUM_PARAMS;
 
 	return err;
 }
 
+// Helper: Calculate edge weight based on alpha value
+static PF_FpLong
+CalculateEdgeWeight(
+	A_long		alpha,
+	A_long		max_val,
+	PF_FpLong	edge_radius,
+	PF_FpLong	edge_offset)
+{
+	// Edge detection: alpha between 1 and max-1 indicates edge
+	if (alpha <= 0 || alpha >= max_val) {
+		return 0.0; // Fully transparent or opaque = no edge
+	}
+	
+	// Normalize alpha to 0.0-1.0
+	PF_FpLong alpha_norm = (PF_FpLong)alpha / (PF_FpLong)max_val;
+	
+	// Calculate distance from edge center (0.5)
+	PF_FpLong dist_from_center = fabs(alpha_norm - 0.5);
+	
+	// Apply offset
+	dist_from_center -= (edge_offset / 100.0);
+	
+	// Calculate weight based on radius
+	PF_FpLong weight = 0.0;
+	if (edge_radius > 0.0) {
+		weight = 1.0 - (dist_from_center / (edge_radius / 100.0));
+		weight = MAX(0.0, MIN(1.0, weight));
+	}
+	
+	return weight;
+}
+
 static PF_Err
-MySimpleGainFunc16 (
+EdgeBlurFunc16 (
 	void		*refcon, 
 	A_long		xL, 
 	A_long		yL, 
 	PF_Pixel16	*inP, 
 	PF_Pixel16	*outP)
 {
-	PF_Err		err = PF_Err_NONE;
-
-	GainInfo	*giP	= reinterpret_cast<GainInfo*>(refcon);
-	PF_FpLong	tempF	= 0;
+	PF_Err			err = PF_Err_NONE;
+	EdgeBlurInfo	*ebiP = reinterpret_cast<EdgeBlurInfo*>(refcon);
 					
-	if (giP){
-		tempF = giP->gainF * PF_MAX_CHAN16 / 100.0;
-		if (tempF > PF_MAX_CHAN16){
-			tempF = PF_MAX_CHAN16;
-		};
-
-		outP->alpha		=	inP->alpha;
-		outP->red		=	MIN((inP->red	+ (A_u_char) tempF), PF_MAX_CHAN16);
-		outP->green		=	MIN((inP->green	+ (A_u_char) tempF), PF_MAX_CHAN16);
-		outP->blue		=	MIN((inP->blue	+ (A_u_char) tempF), PF_MAX_CHAN16);
+	if (ebiP){
+		// Calculate edge weight for this pixel
+		PF_FpLong edge_weight = CalculateEdgeWeight(
+			inP->alpha,
+			PF_MAX_CHAN16,
+			ebiP->edge_radiusF,
+			ebiP->edge_offsetF);
+		
+		// For now, just pass through with edge detection
+		// Full blur implementation will be added in subsequent steps
+		outP->alpha = inP->alpha;
+		outP->red = inP->red;
+		outP->green = inP->green;
+		outP->blue = inP->blue;
+		
+		// Visual debug: tint edges red based on weight
+		if (edge_weight > 0.0) {
+			A_long tint = (A_long)(edge_weight * PF_MAX_CHAN16 * 0.3);
+			outP->red = MIN(outP->red + tint, PF_MAX_CHAN16);
+		}
 	}
 
 	return err;
 }
 
 static PF_Err
-MySimpleGainFunc8 (
+EdgeBlurFunc8 (
 	void		*refcon, 
 	A_long		xL, 
 	A_long		yL, 
 	PF_Pixel8	*inP, 
 	PF_Pixel8	*outP)
 {
-	PF_Err		err = PF_Err_NONE;
-
-	GainInfo	*giP	= reinterpret_cast<GainInfo*>(refcon);
-	PF_FpLong	tempF	= 0;
+	PF_Err			err = PF_Err_NONE;
+	EdgeBlurInfo	*ebiP = reinterpret_cast<EdgeBlurInfo*>(refcon);
 					
-	if (giP){
-		tempF = giP->gainF * PF_MAX_CHAN8 / 100.0;
-		if (tempF > PF_MAX_CHAN8){
-			tempF = PF_MAX_CHAN8;
-		};
-
-		outP->alpha		=	inP->alpha;
-		outP->red		=	MIN((inP->red	+ (A_u_char) tempF), PF_MAX_CHAN8);
-		outP->green		=	MIN((inP->green	+ (A_u_char) tempF), PF_MAX_CHAN8);
-		outP->blue		=	MIN((inP->blue	+ (A_u_char) tempF), PF_MAX_CHAN8);
+	if (ebiP){
+		// Calculate edge weight for this pixel
+		PF_FpLong edge_weight = CalculateEdgeWeight(
+			inP->alpha,
+			PF_MAX_CHAN8,
+			ebiP->edge_radiusF,
+			ebiP->edge_offsetF);
+		
+		// For now, just pass through with edge detection
+		// Full blur implementation will be added in subsequent steps
+		outP->alpha = inP->alpha;
+		outP->red = inP->red;
+		outP->green = inP->green;
+		outP->blue = inP->blue;
+		
+		// Visual debug: tint edges red based on weight
+		if (edge_weight > 0.0) {
+			A_long tint = (A_long)(edge_weight * PF_MAX_CHAN8 * 0.3);
+			outP->red = MIN(outP->red + tint, PF_MAX_CHAN8);
+		}
 	}
 
 	return err;
@@ -184,13 +285,21 @@ Render (
 	PF_Err				err		= PF_Err_NONE;
 	AEGP_SuiteHandler	suites(in_data->pica_basicP);
 
-	/*	Put interesting code here. */
-	GainInfo			giP;
-	AEFX_CLR_STRUCT(giP);
+	/*	Edge Blur Processing */
+	EdgeBlurInfo		ebiP;
+	AEFX_CLR_STRUCT(ebiP);
 	A_long				linesL	= 0;
 
-	linesL 		= output->extent_hint.bottom - output->extent_hint.top;
-	giP.gainF 	= params[SKELETON_GAIN]->u.fs_d.value;
+	linesL = output->extent_hint.bottom - output->extent_hint.top;
+	
+	// Gather parameters
+	ebiP.edge_radiusF	= params[SKELETON_EDGE_RADIUS]->u.fs_d.value;
+	ebiP.edge_offsetF	= params[SKELETON_EDGE_OFFSET]->u.fs_d.value;
+	ebiP.blur_amountF	= params[SKELETON_BLUR_AMOUNT]->u.fs_d.value;
+	ebiP.blur_type		= params[SKELETON_BLUR_TYPE]->u.pd.value - 1; // Convert to 0-based
+	ebiP.sub_pixel		= params[SKELETON_SUB_PIXEL]->u.bd.value;
+	ebiP.dilate_en		= params[SKELETON_DILATE_EN]->u.bd.value;
+	ebiP.dilate_amtF	= params[SKELETON_DILATE_AMT]->u.fs_d.value;
 	
 	if (PF_WORLD_IS_DEEP(output)){
 		ERR(suites.Iterate16Suite2()->iterate(	in_data,
@@ -198,8 +307,8 @@ Render (
 												linesL,							// progress final
 												&params[SKELETON_INPUT]->u.ld,	// src 
 												NULL,							// area - null for all pixels
-												(void*)&giP,					// refcon - your custom data pointer
-												MySimpleGainFunc16,				// pixel function pointer
+												(void*)&ebiP,					// refcon - your custom data pointer
+												EdgeBlurFunc16,					// pixel function pointer
 												output));
 	} else {
 		ERR(suites.Iterate8Suite2()->iterate(	in_data,
@@ -207,8 +316,8 @@ Render (
 												linesL,							// progress final
 												&params[SKELETON_INPUT]->u.ld,	// src 
 												NULL,							// area - null for all pixels
-												(void*)&giP,					// refcon - your custom data pointer
-												MySimpleGainFunc8,				// pixel function pointer
+												(void*)&ebiP,					// refcon - your custom data pointer
+												EdgeBlurFunc8,					// pixel function pointer
 												output));	
 	}
 
@@ -229,8 +338,8 @@ PF_Err PluginDataEntryFunction2(
 	result = PF_REGISTER_EFFECT_EXT2(
 		inPtr,
 		inPluginDataCallBackPtr,
-		"Skeleton", // Name
-		"ADBE Skeleton", // Match Name
+		"Modern Edge Blur", // Name
+		"ADBE Modern Edge Blur", // Match Name
 		"Sample Plug-ins", // Category
 		AE_RESERVED_INFO, // Reserved Info
 		"EffectMain",	// Entry point
