@@ -94,7 +94,6 @@ enum {
 	EDGE_BLUR_EDGE_OFFSET,
 	EDGE_BLUR_BLUR_AMOUNT,
 	EDGE_BLUR_BLUR_TYPE,
-	EDGE_BLUR_SUB_PIXEL,
 	EDGE_BLUR_DILATE_EN,
 	EDGE_BLUR_DILATE_AMT,
 	EDGE_BLUR_NUM_PARAMS
@@ -105,7 +104,6 @@ enum {
 	EDGE_OFFSET_DISK_ID,
 	BLUR_AMOUNT_DISK_ID,
 	BLUR_TYPE_DISK_ID,
-	SUB_PIXEL_DISK_ID,
 	DILATE_EN_DISK_ID,
 	DILATE_AMT_DISK_ID
 };
@@ -120,7 +118,6 @@ typedef struct EdgeBlurInfo{
 	PF_FpLong	edge_offsetF;
 	PF_FpLong	blur_amountF;
 	A_long		blur_type;
-	PF_Boolean	sub_pixel;
 	PF_Boolean	dilate_en;
 	PF_FpLong	dilate_amtF;
 } EdgeBlurInfo, *EdgeBlurInfoP, **EdgeBlurInfoH;

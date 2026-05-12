@@ -111,12 +111,6 @@ ParamsSetup(
 					BLUR_TYPE_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_CHECKBOXX(	"Sub-Pixel Quality",
-						FALSE,
-						0,
-						SUB_PIXEL_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
 	PF_ADD_CHECKBOXX(	"Enable Color Dilation",
 						FALSE,
 						0,
@@ -263,7 +257,6 @@ ReadParams(
 	CHECKOUT_FLOAT(EDGE_BLUR_EDGE_OFFSET, edge_offsetF);
 	CHECKOUT_FLOAT(EDGE_BLUR_BLUR_AMOUNT, blur_amountF);
 	CHECKOUT_POPUP(EDGE_BLUR_BLUR_TYPE,   blur_type);
-	CHECKOUT_BOOL (EDGE_BLUR_SUB_PIXEL,   sub_pixel);
 	CHECKOUT_BOOL (EDGE_BLUR_DILATE_EN,   dilate_en);
 	CHECKOUT_FLOAT(EDGE_BLUR_DILATE_AMT,  dilate_amtF);
 
