@@ -124,14 +124,17 @@ if(WIN32)
     )
 endif()
 
-# Post-build: Copy to After Effects plugins folder
+# Post-build: Copy to After Effects plugins folder.
+# The AE plug-ins directory has been granted write permission for the current
+# user via icacls, so no elevation is needed here.
 set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins")
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E echo "Copying plugin to After Effects..."
+    COMMAND ${CMAKE_COMMAND} -E echo "Installing plugin to After Effects..."
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:${PROJECT_NAME}>"
         "${AE_PLUGINS_DIR}/ModernEdgeBlur.aex"
     COMMENT "Installing plugin to After Effects plugins folder"
+    VERBATIM
 )
 
 # Print build info
