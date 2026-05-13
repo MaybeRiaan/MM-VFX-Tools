@@ -73,7 +73,7 @@ typedef short int			int16;
 /* Parameter defaults */
 
 #define	EDGE_BLUR_EDGE_RADIUS_MIN		0.0
-#define	EDGE_BLUR_EDGE_RADIUS_MAX		20.0
+#define	EDGE_BLUR_EDGE_RADIUS_MAX		50.0
 #define	EDGE_BLUR_EDGE_RADIUS_DFLT		3.0
 
 #define	EDGE_BLUR_BLUR_AMOUNT_MIN		0.0

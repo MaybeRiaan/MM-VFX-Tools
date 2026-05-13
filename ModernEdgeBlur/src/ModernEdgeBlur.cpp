@@ -372,10 +372,10 @@ EdgeBlurFunc8(
 	const float  w   = info->edge_weight_map[idx];
 	const float  inv = 1.0f - w;
 	const float *b   = info->blurred_rgba + idx * 4;
-	outP->alpha = (A_u_char)((inP->alpha / (float)PF_MAX_CHAN8 * w + b[0] * inv)   * PF_MAX_CHAN8 + 0.5f);
-	outP->red   = (A_u_char)((inP->red   / (float)PF_MAX_CHAN8 * w + b[1] * inv)   * PF_MAX_CHAN8 + 0.5f);
-	outP->green = (A_u_char)((inP->green / (float)PF_MAX_CHAN8 * w + b[2] * inv)   * PF_MAX_CHAN8 + 0.5f);
-	outP->blue  = (A_u_char)((inP->blue  / (float)PF_MAX_CHAN8 * w + b[3] * inv)   * PF_MAX_CHAN8 + 0.5f);
+	outP->alpha = (A_u_char)(b[0] * PF_MAX_CHAN8 + 0.5f);
+	outP->red   = (A_u_char)((inP->red   / (float)PF_MAX_CHAN8 * w + b[1] * inv) * PF_MAX_CHAN8 + 0.5f);
+	outP->green = (A_u_char)((inP->green / (float)PF_MAX_CHAN8 * w + b[2] * inv) * PF_MAX_CHAN8 + 0.5f);
+	outP->blue  = (A_u_char)((inP->blue  / (float)PF_MAX_CHAN8 * w + b[3] * inv) * PF_MAX_CHAN8 + 0.5f);
 	return PF_Err_NONE;
 }
 
@@ -393,7 +393,7 @@ EdgeBlurFunc16(
 	const float  w   = info->edge_weight_map[idx];
 	const float  inv = 1.0f - w;
 	const float *b   = info->blurred_rgba + idx * 4;
-	outP->alpha = (A_u_short)((inP->alpha / (float)PF_MAX_CHAN16 * w + b[0] * inv) * PF_MAX_CHAN16 + 0.5f);
+	outP->alpha = (A_u_short)(b[0] * PF_MAX_CHAN16 + 0.5f);
 	outP->red   = (A_u_short)((inP->red   / (float)PF_MAX_CHAN16 * w + b[1] * inv) * PF_MAX_CHAN16 + 0.5f);
 	outP->green = (A_u_short)((inP->green / (float)PF_MAX_CHAN16 * w + b[2] * inv) * PF_MAX_CHAN16 + 0.5f);
 	outP->blue  = (A_u_short)((inP->blue  / (float)PF_MAX_CHAN16 * w + b[3] * inv) * PF_MAX_CHAN16 + 0.5f);
@@ -414,7 +414,7 @@ EdgeBlurFuncFloat(
 	const float  w   = info->edge_weight_map[idx];
 	const float  inv = 1.0f - w;
 	const float *b   = info->blurred_rgba + idx * 4;
-	outP->alpha = inP->alpha * w + b[0] * inv;
+	outP->alpha = b[0];
 	outP->red   = inP->red   * w + b[1] * inv;
 	outP->green = inP->green * w + b[2] * inv;
 	outP->blue  = inP->blue  * w + b[3] * inv;
@@ -564,6 +564,7 @@ SmartRender(
 			const A_long W  = input_world->width;
 			const A_long H  = input_world->height;
 			const A_long kr = std::max((A_long)1, (A_long)std::round(info.params.blur_amountF));
+
 			BoxBlurRGBA(blurred_rgba, W, H, kr);
 		}
 	}
