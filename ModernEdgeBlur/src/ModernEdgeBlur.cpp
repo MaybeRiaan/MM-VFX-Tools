@@ -4,16 +4,23 @@
 #include "ModernEdgeBlur.h"
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 #include <vector>
+
+#ifndef MODERN_EDGE_BLUR_THREADED
+#define MODERN_EDGE_BLUR_THREADED 1
+#endif
 
 // Per-render data passed to iterate callbacks via refcon. Stack-allocated
 // inside SmartRender so each frame thread gets its own — MFR-safe.
 struct EdgeBlurRenderInfo {
-	EdgeBlurInfo	params;
-	A_long			input_width;
-	A_long			input_height;
-	const float		*edge_weight_map;	// [H * W], row-major, 0..1
-	const float		*blurred_rgba;		// [H * W * 4], ARGB float, box-blurred input
+	EdgeBlurInfo		params;
+	A_long				input_width;
+	A_long				input_height;
+	const float			*edge_weight_map;	// [H * W], row-major, 0..1
+	const float			*blurred_rgba;		// [H * W * 4], ARGB float — 32-bit path only
+	const PF_EffectWorld *blurred_world8;	// native 8-bit blurred world — 8-bit path only
+	const PF_EffectWorld *blurred_world16;	// native 16-bit blurred world — 16-bit path only
 };
 
 
@@ -162,68 +169,186 @@ SampleAlphaFloat(const PF_EffectWorld *world, A_long x, A_long y)
 }
 
 
-// Single-pass separable box blur — internal, called by BoxBlurFloat3.
-static void
-BoxBlurFloatOnce(float *buf, A_long width, A_long height, A_long kernel_radius)
+// Build a normalized 1D Gaussian kernel for the given radius.
+// sigma = radius / 2.0 so that ~2 sigma covers the full radius.
+// All three bit-depth paths call this so the kernel shape is identical.
+static std::vector<float>
+MakeGaussianKernel(float radius)
 {
-	if (kernel_radius <= 0 || width <= 0 || height <= 0) return;
-
-	std::vector<float> tmp(width > height ? width : height);
-
-	// Horizontal pass
-	for (A_long y = 0; y < height; ++y) {
-		float *row = buf + y * width;
-		// Initialise window for x=0: samples [0-kernel_radius .. 0+kernel_radius], clamped.
-		double sum = 0.0;
-		A_long count = 2 * kernel_radius + 1;
-		for (A_long k = -kernel_radius; k <= kernel_radius; ++k) {
-			A_long sx = std::max((A_long)0, std::min(width - 1, k));  // x=0, so sample at k
-			sum += row[sx];
-		}
-		for (A_long x = 0; x < width; ++x) {
-			tmp[x] = (float)(sum / count);
-			// Slide window: remove left sample, add right sample (both clamped).
-			A_long xl = x - kernel_radius;
-			A_long xr = x + kernel_radius + 1;
-			sum -= row[std::max((A_long)0, xl)];
-			sum += row[std::min(width - 1, xr)];
-		}
-		for (A_long x = 0; x < width; ++x) row[x] = tmp[x];
+	const float sigma  = std::max(radius / 2.0f, 0.5f);
+	const int   half   = (int)std::ceil(radius);
+	const int   size   = 2 * half + 1;
+	std::vector<float> k(size);
+	float sum = 0.0f;
+	for (int i = 0; i < size; ++i) {
+		float x = (float)(i - half);
+		k[i] = std::exp(-(x * x) / (2.0f * sigma * sigma));
+		sum += k[i];
 	}
-
-	// Vertical pass
-	for (A_long x = 0; x < width; ++x) {
-		for (A_long y = 0; y < height; ++y) tmp[y] = buf[y * width + x];
-
-		double sum = 0.0;
-		A_long count = 2 * kernel_radius + 1;
-		for (A_long k = -kernel_radius; k <= kernel_radius; ++k) {
-			A_long sy = std::max((A_long)0, std::min(height - 1, k));  // y=0
-			sum += tmp[sy];
-		}
-		for (A_long y = 0; y < height; ++y) {
-			buf[y * width + x] = (float)(sum / count);
-			A_long yt = y - kernel_radius;
-			A_long yb = y + kernel_radius + 1;
-			sum -= tmp[std::max((A_long)0, yt)];
-			sum += tmp[std::min(height - 1, yb)];
-		}
-	}
+	for (float &v : k) v /= sum;
+	return k;
 }
 
 
-// 3-pass box blur approximating a Gaussian. Each pass uses radius/3 so the
-// combined spread matches the requested radius with circular-kernel quality.
-static void
-BoxBlurFloat(float *buf, A_long width, A_long height, A_long kernel_radius)
+// ---------------------------------------------------------------------------
+// iterate_generic infrastructure for parallel separable blur.
+//
+// Two passes (H, V) share one POD refcon and one scratch pool. Each AE worker
+// gets a `stride`-sized float slot indexed by thread_indexL. stride = max(W,H)
+// so the same slot works for either pass. H-pass blocks before V-pass begins,
+// so no aliasing.
+//
+// Callbacks are extern "C" + static: C linkage guarantees __cdecl under MSVC
+// even if project-wide convention flags ever change; static keeps them out of
+// the export table.
+// ---------------------------------------------------------------------------
+
+struct MEB_BlurRefcon {
+	float       *buf;
+	A_long       W;
+	A_long       H;
+	const float *kdata;
+	int          half;
+	float       *scratch_base;   // n_workers * stride floats
+	A_long       stride;         // = max(W, H)
+};
+
+struct MEB_ProbeRefcon {
+	std::atomic<A_long> n_workers;
+};
+
+extern "C" {
+
+static PF_Err
+MEB_ProbeCB(void *refconPV, A_long thread_indexL, A_long /*i*/, A_long iterationsL)
 {
-	if (kernel_radius <= 0) return;
-	// Distribute radius across 3 passes: r0=r1=(radius/3), r2=remainder.
-	const A_long r0 = kernel_radius / 3;
-	const A_long r2 = kernel_radius - 2 * r0;
-	BoxBlurFloatOnce(buf, width, height, r0);
-	BoxBlurFloatOnce(buf, width, height, r0);
-	BoxBlurFloatOnce(buf, width, height, r2);
+	// AE substitutes the real worker count in `iterationsL` when called with
+	// PF_Iterations_ONCE_PER_PROCESSOR. Record once from thread 0.
+	if (thread_indexL == 0) {
+		static_cast<MEB_ProbeRefcon*>(refconPV)->n_workers.store(iterationsL);
+	}
+	return PF_Err_NONE;
+}
+
+static PF_Err
+MEB_HBlurRow(void *refconPV, A_long thread_indexL, A_long i, A_long /*iterationsL*/)
+{
+	const MEB_BlurRefcon *rc = static_cast<const MEB_BlurRefcon*>(refconPV);
+	const A_long W    = rc->W;
+	const int    half = rc->half;
+	float       *row  = rc->buf + i * W;
+	float       *tmp  = rc->scratch_base + thread_indexL * rc->stride;
+
+	for (A_long x = 0; x < W; ++x) {
+		float acc = 0.0f;
+		for (int t = -half; t <= half; ++t) {
+			A_long sx = std::min(W - 1, std::max((A_long)0, x + (A_long)t));
+			acc += row[sx] * rc->kdata[t + half];
+		}
+		tmp[x] = acc;
+	}
+	for (A_long x = 0; x < W; ++x) row[x] = tmp[x];
+	return PF_Err_NONE;
+}
+
+static PF_Err
+MEB_VBlurCol(void *refconPV, A_long thread_indexL, A_long i, A_long /*iterationsL*/)
+{
+	const MEB_BlurRefcon *rc = static_cast<const MEB_BlurRefcon*>(refconPV);
+	const A_long W    = rc->W;
+	const A_long H    = rc->H;
+	const int    half = rc->half;
+	float       *tmp  = rc->scratch_base + thread_indexL * rc->stride;
+
+	for (A_long y = 0; y < H; ++y) tmp[y] = rc->buf[y * W + i];
+	for (A_long y = 0; y < H; ++y) {
+		float acc = 0.0f;
+		for (int t = -half; t <= half; ++t) {
+			A_long sy = std::min(H - 1, std::max((A_long)0, y + (A_long)t));
+			acc += tmp[sy] * rc->kdata[t + half];
+		}
+		rc->buf[y * W + i] = acc;
+	}
+	return PF_Err_NONE;
+}
+
+} // extern "C"
+
+
+// Separable Gaussian blur on a float plane (one channel, row-major).
+// Threaded via iterate_generic when MODERN_EDGE_BLUR_THREADED=1 and the AE
+// callback is available; falls back to the serial implementation otherwise.
+static void
+GaussBlurFloat(float *buf, A_long W, A_long H, const std::vector<float> &k, PF_InData *in_data)
+{
+	if (k.empty() || W <= 0 || H <= 0) return;
+	const int half = (int)(k.size() / 2);
+
+#if MODERN_EDGE_BLUR_THREADED
+	if (in_data && in_data->utils && in_data->utils->iterate_generic) {
+		// Probe worker count. AE swaps PF_Iterations_ONCE_PER_PROCESSOR for the
+		// real worker count in the callback's iterationsL.
+		MEB_ProbeRefcon probe;
+		probe.n_workers.store(0);
+		PF_Err perr = in_data->utils->iterate_generic(
+			PF_Iterations_ONCE_PER_PROCESSOR, &probe, MEB_ProbeCB);
+
+		A_long n_workers = probe.n_workers.load();
+		if (perr == PF_Err_NONE && n_workers > 0) {
+			if (n_workers > 256) n_workers = 256;   // defensive clamp
+
+			const A_long stride = std::max(W, H);
+			std::vector<float> scratch((size_t)n_workers * (size_t)stride);
+
+			MEB_BlurRefcon rc;
+			rc.buf          = buf;
+			rc.W            = W;
+			rc.H            = H;
+			rc.kdata        = k.data();
+			rc.half         = half;
+			rc.scratch_base = scratch.data();
+			rc.stride       = stride;
+
+			PF_Err herr = in_data->utils->iterate_generic(H, &rc, MEB_HBlurRow);
+			if (herr == PF_Err_NONE) {
+				PF_Err verr = in_data->utils->iterate_generic(W, &rc, MEB_VBlurCol);
+				if (verr == PF_Err_NONE) return;
+			}
+			// On failure of either pass, fall through to serial — buffer may be
+			// partially blurred; the serial path overwrites it cleanly.
+		}
+	}
+#endif
+
+	// Serial fallback (original implementation).
+	std::vector<float> tmp(std::max(W, H));
+
+	// Horizontal pass
+	for (A_long y = 0; y < H; ++y) {
+		float *row = buf + y * W;
+		for (A_long x = 0; x < W; ++x) {
+			float acc = 0.0f;
+			for (int t = -half; t <= half; ++t) {
+				A_long sx = std::min(W - 1, std::max((A_long)0, x + (A_long)t));
+				acc += row[sx] * k[t + half];
+			}
+			tmp[x] = acc;
+		}
+		for (A_long x = 0; x < W; ++x) row[x] = tmp[x];
+	}
+
+	// Vertical pass
+	for (A_long x = 0; x < W; ++x) {
+		for (A_long y = 0; y < H; ++y) tmp[y] = buf[y * W + x];
+		for (A_long y = 0; y < H; ++y) {
+			float acc = 0.0f;
+			for (int t = -half; t <= half; ++t) {
+				A_long sy = std::min(H - 1, std::max((A_long)0, y + (A_long)t));
+				acc += tmp[sy] * k[t + half];
+			}
+			buf[y * W + x] = acc;
+		}
+	}
 }
 
 // Unpack an EffectWorld into a flat ARGB float buffer [H * W * 4], row-major,
@@ -268,23 +393,82 @@ UnpackWorldToFloat(const PF_EffectWorld *world, PF_PixelFormat format)
 	return buf;
 }
 
-// Box-blur RGB channels only (skip alpha=ch0) of a packed ARGB float buffer.
-// Single-pass box blur — sufficient for the blurred-colour base, 3x faster than
-// the 3-pass Gaussian approximation used for the weight map.
+// Gaussian blur all 4 channels of a packed ARGB float buffer in-place.
+// Deinterleaves each channel into a temp plane, blurs, then reinterleaves.
 static void
-BoxBlurRGBA(float *buf, A_long W, A_long H, A_long kernel_radius)
+GaussBlurRGBA(float *buf, A_long W, A_long H, const std::vector<float> &k, PF_InData *in_data)
 {
-	if (kernel_radius <= 0) return;
+	if (k.empty() || W <= 0 || H <= 0) return;
 	float *plane = new (std::nothrow) float[W * H];
 	if (!plane) return;
 
-	for (int c = 0; c < 4; ++c) {  // all channels including alpha so colour bleeds outward
+	for (int c = 0; c < 4; ++c) {
 		for (A_long i = 0; i < W * H; ++i) plane[i] = buf[i * 4 + c];
-		BoxBlurFloatOnce(plane, W, H, kernel_radius);  // single pass, not 3-pass
+		GaussBlurFloat(plane, W, H, k, in_data);
 		for (A_long i = 0; i < W * H; ++i) buf[i * 4 + c] = plane[i];
 	}
 	delete[] plane;
 }
+
+// Separable Gaussian blur on a native PF_EffectWorld in-place.
+// T must be PF_Pixel8 or PF_Pixel16. Uses PixelTraits<T>::max_value for
+// normalization so one template covers both depths. Accumulates in A_long
+// to avoid overflow at all kernel sizes we support.
+// Gaussian blur a native typed world by deinterleaving each channel to a float
+// plane, running the threaded GaussBlurFloat, then reinterleaving back.
+// Reuses the iterate_generic infrastructure; no separate thread management needed.
+template <typename T>
+static void
+GaussBlurWorld(PF_EffectWorld *world, const std::vector<float> &k, PF_InData *in_data)
+{
+	if (k.empty() || !world) return;
+	const A_long W    = world->width;
+	const A_long H    = world->height;
+	const float  maxv = (float)PixelTraits<T>::max_value;
+	const float  invv = 1.0f / maxv;
+
+	std::vector<float> plane((size_t)W * H);
+
+	auto getRow = [&](A_long y) -> T* {
+		return reinterpret_cast<T*>(
+			reinterpret_cast<char*>(world->data) + y * world->rowbytes);
+	};
+
+	for (int c = 0; c < 4; ++c) {
+		// Deinterleave channel c into float plane.
+		for (A_long y = 0; y < H; ++y) {
+			const T *row = getRow(y);
+			float   *dst = plane.data() + y * W;
+			for (A_long x = 0; x < W; ++x) {
+				switch (c) {
+					case 0: dst[x] = row[x].alpha * invv; break;
+					case 1: dst[x] = row[x].red   * invv; break;
+					case 2: dst[x] = row[x].green * invv; break;
+					case 3: dst[x] = row[x].blue  * invv; break;
+				}
+			}
+		}
+
+		GaussBlurFloat(plane.data(), W, H, k, in_data);
+
+		// Reinterleave back, clamping to native range.
+		for (A_long y = 0; y < H; ++y) {
+			T           *row = getRow(y);
+			const float *src = plane.data() + y * W;
+			for (A_long x = 0; x < W; ++x) {
+				float v = std::min(1.0f, std::max(0.0f, src[x])) * maxv + 0.5f;
+				typename PixelTraits<T>::DataType vt = (typename PixelTraits<T>::DataType)v;
+				switch (c) {
+					case 0: row[x].alpha = vt; break;
+					case 1: row[x].red   = vt; break;
+					case 2: row[x].green = vt; break;
+					case 3: row[x].blue  = vt; break;
+				}
+			}
+		}
+	}
+}
+
 
 // Build edge weight map: extract alpha, box-blur by edge_radius to create a
 // soft gradient zone around any hard or soft alpha edge. Result is [0..1]
@@ -294,7 +478,8 @@ static float*
 BuildEdgeWeightMap(
 	const PF_EffectWorld	*input_world,
 	PF_PixelFormat			 format,
-	PF_FpLong				 edge_radius)
+	PF_FpLong				 edge_radius,
+	PF_InData				*in_data)
 {
 	const A_long W = input_world->width;
 	const A_long H = input_world->height;
@@ -323,27 +508,8 @@ BuildEdgeWeightMap(
 		return map;
 	}
 
-	// Box-blur the alpha by edge_radius — spreads the 0→1 transition zone.
-	// Fractional blend avoids integer snapping.
-	const A_long kr_lo = (A_long)std::floor(edge_radius);
-	const A_long kr_hi = kr_lo + 1;
-	const float  frac  = (float)(edge_radius - std::floor(edge_radius));
-
-	if (frac < 1e-4f) {
-		BoxBlurFloat(map, W, H, kr_lo);
-	} else {
-		float *map_hi = new (std::nothrow) float[W * H];
-		if (!map_hi) { delete[] map; return nullptr; }
-		std::copy(map, map + W * H, map_hi);
-
-		BoxBlurFloat(map,    W, H, kr_lo);
-		BoxBlurFloat(map_hi, W, H, kr_hi);
-
-		for (A_long i = 0; i < W * H; ++i)
-			map[i] = map[i] * (1.0f - frac) + map_hi[i] * frac;
-
-		delete[] map_hi;
-	}
+	const std::vector<float> k = MakeGaussianKernel((float)edge_radius);
+	GaussBlurFloat(map, W, H, k, in_data);
 
 	// Clamp — blurred alpha is already 0 outside, 1 inside, soft at edge.
 	// Used directly as sharp weight: lerp(blurred, sharp, w).
@@ -367,15 +533,15 @@ EdgeBlurFunc8(
 	PF_Pixel8	*outP)
 {
 	const EdgeBlurRenderInfo *info = static_cast<const EdgeBlurRenderInfo*>(refcon);
-	// w=1 deep inside (sharp original), w=0 at edge (blurred base shows through).
 	const A_long idx = yL * info->input_width + xL;
 	const float  w   = info->edge_weight_map[idx];
 	const float  inv = 1.0f - w;
-	const float *b   = info->blurred_rgba + idx * 4;
-	outP->alpha = (A_u_char)(b[0] * PF_MAX_CHAN8 + 0.5f);
-	outP->red   = (A_u_char)((inP->red   / (float)PF_MAX_CHAN8 * w + b[1] * inv) * PF_MAX_CHAN8 + 0.5f);
-	outP->green = (A_u_char)((inP->green / (float)PF_MAX_CHAN8 * w + b[2] * inv) * PF_MAX_CHAN8 + 0.5f);
-	outP->blue  = (A_u_char)((inP->blue  / (float)PF_MAX_CHAN8 * w + b[3] * inv) * PF_MAX_CHAN8 + 0.5f);
+	const PF_Pixel8 *b = reinterpret_cast<const PF_Pixel8*>(
+		reinterpret_cast<const char*>(info->blurred_world8->data) + yL * info->blurred_world8->rowbytes) + xL;
+	outP->alpha = b->alpha;
+	outP->red   = (A_u_char)((inP->red   * w + b->red   * inv) + 0.5f);
+	outP->green = (A_u_char)((inP->green * w + b->green * inv) + 0.5f);
+	outP->blue  = (A_u_char)((inP->blue  * w + b->blue  * inv) + 0.5f);
 	return PF_Err_NONE;
 }
 
@@ -392,11 +558,12 @@ EdgeBlurFunc16(
 	const A_long idx = yL * info->input_width + xL;
 	const float  w   = info->edge_weight_map[idx];
 	const float  inv = 1.0f - w;
-	const float *b   = info->blurred_rgba + idx * 4;
-	outP->alpha = (A_u_short)(b[0] * PF_MAX_CHAN16 + 0.5f);
-	outP->red   = (A_u_short)((inP->red   / (float)PF_MAX_CHAN16 * w + b[1] * inv) * PF_MAX_CHAN16 + 0.5f);
-	outP->green = (A_u_short)((inP->green / (float)PF_MAX_CHAN16 * w + b[2] * inv) * PF_MAX_CHAN16 + 0.5f);
-	outP->blue  = (A_u_short)((inP->blue  / (float)PF_MAX_CHAN16 * w + b[3] * inv) * PF_MAX_CHAN16 + 0.5f);
+	const PF_Pixel16 *b = reinterpret_cast<const PF_Pixel16*>(
+		reinterpret_cast<const char*>(info->blurred_world16->data) + yL * info->blurred_world16->rowbytes) + xL;
+	outP->alpha = b->alpha;
+	outP->red   = (A_u_short)((inP->red   * w + b->red   * inv) + 0.5f);
+	outP->green = (A_u_short)((inP->green * w + b->green * inv) + 0.5f);
+	outP->blue  = (A_u_short)((inP->blue  * w + b->blue  * inv) + 0.5f);
 	return PF_Err_NONE;
 }
 
@@ -513,6 +680,13 @@ PreRender(
 	UnionLRect(&in_result.result_rect,     &extra->output->result_rect);
 	UnionLRect(&in_result.max_result_rect, &extra->output->max_result_rect);
 
+	// Clamp result_rect to the requested output rect — AE errors if we exceed it.
+	const PF_LRect &out_req = extra->input->output_request.rect;
+	extra->output->result_rect.left   = std::max(extra->output->result_rect.left,   out_req.left);
+	extra->output->result_rect.top    = std::max(extra->output->result_rect.top,    out_req.top);
+	extra->output->result_rect.right  = std::min(extra->output->result_rect.right,  out_req.right);
+	extra->output->result_rect.bottom = std::min(extra->output->result_rect.bottom, out_req.bottom);
+
 	return err;
 }
 
@@ -553,22 +727,61 @@ SmartRender(
 		ERR(wsP->PF_GetPixelFormat(output_world, &format));
 	}
 
-	// Step 1: Unpack and box-blur the full RGBA by blur_amount.
-	// Alpha blurs outward naturally, RGB colour bleeds with it.
-	float *blurred_rgba = nullptr;
-	if (!err && input_world) {
-		blurred_rgba = UnpackWorldToFloat(input_world, format);
-		if (!blurred_rgba) {
-			err = PF_Err_OUT_OF_MEMORY;
-		} else if (info.params.blur_amountF > 1e-4f) {
-			const A_long W  = input_world->width;
-			const A_long H  = input_world->height;
-			const A_long kr = std::max((A_long)1, (A_long)std::round(info.params.blur_amountF));
+	// Step 1: Build a blurred copy of the input for the colour-bleed base.
+	// 32-bit: unpack to float[], blur there (no loss of precision).
+	// 8/16-bit: copy to a native scratch world and blur in-place (no float expansion).
+	float        *blurred_rgba   = nullptr;
+	PF_EffectWorld blurred_world8  = {};
+	PF_EffectWorld blurred_world16 = {};
+	bool           world8_valid    = false;
+	bool           world16_valid   = false;
 
-			BoxBlurRGBA(blurred_rgba, W, H, kr);
+	const std::vector<float> blur_k = (info.params.blur_amountF > 1e-4f)
+		? MakeGaussianKernel((float)info.params.blur_amountF)
+		: std::vector<float>{};
+
+	if (!err && input_world) {
+		const A_long W = input_world->width;
+		const A_long H = input_world->height;
+
+		if (format == PF_PixelFormat_ARGB128) {
+			blurred_rgba = UnpackWorldToFloat(input_world, format);
+			if (!blurred_rgba) {
+				err = PF_Err_OUT_OF_MEMORY;
+			} else if (!blur_k.empty()) {
+				GaussBlurRGBA(blurred_rgba, W, H, blur_k, in_data);
+			}
+			info.blurred_rgba   = blurred_rgba;
+			info.blurred_world8  = nullptr;
+			info.blurred_world16 = nullptr;
+		} else if (format == PF_PixelFormat_ARGB64) {
+			ERR(wsP->PF_NewWorld(in_data->effect_ref, W, H,
+				TRUE, PF_PixelFormat_ARGB64, &blurred_world16));
+			if (!err) {
+				world16_valid = true;
+				ERR(in_data->utils->copy(in_data->effect_ref,
+					input_world, &blurred_world16, nullptr, nullptr));
+			}
+			if (!err && !blur_k.empty())
+				GaussBlurWorld<PF_Pixel16>(&blurred_world16, blur_k, in_data);
+			info.blurred_rgba    = nullptr;
+			info.blurred_world8  = nullptr;
+			info.blurred_world16 = world16_valid ? &blurred_world16 : nullptr;
+		} else {
+			ERR(wsP->PF_NewWorld(in_data->effect_ref, W, H,
+				TRUE, PF_PixelFormat_ARGB32, &blurred_world8));
+			if (!err) {
+				world8_valid = true;
+				ERR(in_data->utils->copy(in_data->effect_ref,
+					input_world, &blurred_world8, nullptr, nullptr));
+			}
+			if (!err && !blur_k.empty())
+				GaussBlurWorld<PF_Pixel8>(&blurred_world8, blur_k, in_data);
+			info.blurred_rgba    = nullptr;
+			info.blurred_world8  = world8_valid ? &blurred_world8 : nullptr;
+			info.blurred_world16 = nullptr;
 		}
 	}
-	info.blurred_rgba = blurred_rgba;
 
 	// Step 2: Build erosion weight map from the ORIGINAL alpha, blurred by edge_radius.
 	// Result is 1 deep inside, 0 outside, with a soft gradient at the edge.
@@ -595,14 +808,12 @@ SmartRender(
 				}
 			}
 
-			// Blur by edge_radius to spread the alpha transition inward.
-			// Then raise to power >1 to push the falloff further inside the matte,
-			// creating a visible zone where w < 1 but original alpha > 0 — this is
-			// where the blurred RGB shows through beneath the eroded sharp original.
+			// Gaussian-blur the alpha by edge_radius to spread the transition inward.
+			// Power curve pulls the falloff further inside the matte so blurred RGB
+			// shows through beneath the eroded sharp original.
 			if (info.params.edge_radiusF > 1e-4f) {
-				const A_long kr = std::max((A_long)1, (A_long)std::round(info.params.edge_radiusF));
-				BoxBlurFloat(edge_map, W, H, kr);
-				// Power curve pulls transition inward — higher = more erosion inward.
+				const std::vector<float> k = MakeGaussianKernel((float)info.params.edge_radiusF);
+				GaussBlurFloat(edge_map, W, H, k, in_data);
 				for (A_long i = 0; i < W * H; ++i)
 					edge_map[i] = std::pow(std::min(1.0f, std::max(0.0f, edge_map[i])), 3.0f);
 			} else {
@@ -656,6 +867,10 @@ SmartRender(
 
 	delete[] edge_map;
 	delete[] blurred_rgba;
+	if (world8_valid && wsP)
+		wsP->PF_DisposeWorld(in_data->effect_ref, &blurred_world8);
+	if (world16_valid && wsP)
+		wsP->PF_DisposeWorld(in_data->effect_ref, &blurred_world16);
 
 	if (wsP) {
 		ERR2(AEFX_ReleaseSuite(	in_data,

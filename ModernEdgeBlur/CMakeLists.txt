@@ -109,6 +109,14 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 
 # No external libraries needed for basic plugin
 
+# Optional threading toggle for GaussBlurFloat. Default is on; pass
+# -DMODERN_EDGE_BLUR_THREADED=0 at configure time to force the serial path.
+if(DEFINED MODERN_EDGE_BLUR_THREADED)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        MODERN_EDGE_BLUR_THREADED=${MODERN_EDGE_BLUR_THREADED}
+    )
+endif()
+
 # Windows-specific settings
 if(WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -129,10 +137,8 @@ endif()
 # user via icacls, so no elevation is needed here.
 set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins")
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E echo "Installing plugin to After Effects..."
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:${PROJECT_NAME}>"
-        "${AE_PLUGINS_DIR}/ModernEdgeBlur.aex"
+    COMMAND powershell.exe -NonInteractive -Command
+        "Copy-Item -Path '$<TARGET_FILE:${PROJECT_NAME}>' -Destination '${AE_PLUGINS_DIR}/ModernEdgeBlur.aex' -Force; Write-Host 'Deployed to AE plugins folder'"
     COMMENT "Installing plugin to After Effects plugins folder"
     VERBATIM
 )
