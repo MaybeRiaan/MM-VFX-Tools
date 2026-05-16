@@ -32,8 +32,6 @@ TableString		g_strs[StrID_NUMTYPES] = {
 	StrID_NONE,						"",
 	StrID_Name,						"Modern Edge Blur",
 	StrID_Description,				"Detects high-contrast alpha transitions and applies a weighted blur to soften matte edges without blurring the interior.",
-	StrID_Gain_Param_Name,			"Gain",
-	StrID_Color_Param_Name,			"Color",
 };
 
 

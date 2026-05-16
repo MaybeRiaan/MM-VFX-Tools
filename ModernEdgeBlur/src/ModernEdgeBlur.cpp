@@ -128,13 +128,9 @@ ParamsSetup(
 
 
 // ---------------------------------------------------------------------------
-// Phase 1: Sobel-gradient edge weight map
-//
-// Returns a heap-allocated float array [height * width] (caller must delete[]).
-// Values are in [0,1]: 1 = strong edge, 0 = flat interior or flat transparent.
-// Edge Radius controls the spread (box blur kernel half-width = edge_radius px).
-// Edge Offset shifts the threshold after spreading: positive → outward (into
-// transparent), negative → inward (into opaque).
+// Alpha samplers + Gaussian kernel construction shared by erosion weight map
+// and RGBA blur base. Erosion weight is built inline in SmartRender as
+// pow(GaussBlur(alpha, edge_radius), 3) — see Architecture.md §4.
 // ---------------------------------------------------------------------------
 
 // Integer pixel alpha samplers (clamp-to-edge).
@@ -410,13 +406,11 @@ GaussBlurRGBA(float *buf, A_long W, A_long H, const std::vector<float> &k, PF_In
 	delete[] plane;
 }
 
-// Separable Gaussian blur on a native PF_EffectWorld in-place.
-// T must be PF_Pixel8 or PF_Pixel16. Uses PixelTraits<T>::max_value for
-// normalization so one template covers both depths. Accumulates in A_long
-// to avoid overflow at all kernel sizes we support.
-// Gaussian blur a native typed world by deinterleaving each channel to a float
-// plane, running the threaded GaussBlurFloat, then reinterleaving back.
-// Reuses the iterate_generic infrastructure; no separate thread management needed.
+// Separable Gaussian blur on a native 8/16-bit PF_EffectWorld in-place.
+// T must be PF_Pixel8 or PF_Pixel16. Deinterleaves each channel to a float
+// plane, runs GaussBlurFloat (which is iterate_generic-threaded), reinterleaves
+// back with clamp-to-native. PixelTraits<T>::max_value provides the
+// normalisation constant so one template covers both bit depths.
 template <typename T>
 static void
 GaussBlurWorld(PF_EffectWorld *world, const std::vector<float> &k, PF_InData *in_data)
@@ -470,10 +464,12 @@ GaussBlurWorld(PF_EffectWorld *world, const std::vector<float> &k, PF_InData *in
 }
 
 
-// Build edge weight map: extract alpha, box-blur by edge_radius to create a
-// soft gradient zone around any hard or soft alpha edge. Result is [0..1]
+// Build edge weight map: extract alpha, Gaussian-blur by edge_radius to create
+// a soft gradient zone around any hard or soft alpha edge. Result is [0..1]
 // where 1 = fully opaque interior (sharp), 0 = transparent exterior (blurred).
-// Caller owns the returned array (delete[]).
+// Caller owns the returned array (delete[]). NOTE: currently unused —
+// SmartRender builds its erosion map inline so it can apply the pow(., 3)
+// shaping. Kept here as a reusable building block.
 static float*
 BuildEdgeWeightMap(
 	const PF_EffectWorld	*input_world,
@@ -521,7 +517,10 @@ BuildEdgeWeightMap(
 
 
 // ---------------------------------------------------------------------------
-// Iterate callbacks — lerp(input, blurred, edge_weight) per pixel
+// Iterate callbacks — per-pixel compose. Output alpha comes from the blurred
+// base (so the matte itself softens), and output RGB is lerp(blurred, sharp, w)
+// where w = pow(blurred_alpha, 3) was prebuilt in SmartRender. w≈1 inside the
+// matte (sharp wins), w→0 at the eroded edge (blurred wins).
 // ---------------------------------------------------------------------------
 
 static PF_Err
@@ -636,8 +635,10 @@ ReadParams(
 static A_long
 InflationPixels(const EdgeBlurInfo &p)
 {
-	// Edge_radius and blur_amount are slider units (interpreted as pixels for
-	// now). Dilation also reads neighbors. Add 1 for safety against rounding.
+	// Slider units are pixels (1 px = 1 px). Inflate by edge_radius + blur_amount
+	// so both convolutions have valid source at the output boundary; add the
+	// dilation radius too when the (not-yet-implemented) dilation pass is on,
+	// so render-region math will already be correct when it lands. +1 for slop.
 	PF_FpLong total = p.edge_radiusF + p.blur_amountF;
 	if (p.dilate_en) {
 		total += p.dilate_amtF;
