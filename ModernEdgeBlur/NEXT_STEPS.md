@@ -2,27 +2,16 @@
 
 Organised follow-ups across feature work, cleanup, and known smells. Each item carries enough context to start cold. Phases referenced here map to [Architecture.md §5](Architecture.md).
 
-## Priority 1 — Phase 3: Color Dilation
-
-The biggest user-visible feature still missing. Currently the `Enable Color Dilation` checkbox and `Dilation Amount` slider are wired up (`ParamsSetup`, `ReadParams`, `InflationPixels`) but `SmartRender` never reads them.
-
-**Algorithm** (Architecture.md §4.2): un-premultiply input RGB by alpha, run two separable Gaussians (`RGB*α` and `α` independently, both at sigma = `Dilation Amount`), divide to recover dilated straight RGB, then re-premultiply by the output alpha. Goal: when alpha falls off at the matte edge, the RGB shown beneath it isn't black-multiplied but instead colour-matched to the nearest opaque interior.
-
-**Where it fits in the render pipeline**: between the existing input checkout and the current Step 1 (blurred RGBA base) in `SmartRender`. The dilation pass produces a colour-corrected version of the source, then the existing Gaussian blur runs on *that* instead of the raw input. The erosion compose at the end is unchanged.
-
-**Reuse**: `GaussBlurFloat` is the workhorse. `UnpackWorldToFloat` already gives us a packed `[H*W*4]` float buffer for 32-bit. The 8/16-bit paths can dilate inside the same packed-float intermediate to avoid writing a second native-typed version of the algorithm.
-
-**Acceptance test**: side-by-side against EXTENDO or Red Giant's spill-suppression on a green-screen plate with dark RGB in the keyed area. Black fringe around the matte boundary should disappear when dilation is on.
-
-**Open question**: ε in `dilated_RGB = blurred_RGB / max(blurred_alpha, ε)` — pick a value (1e-6 is conventional) and confirm no division artefacts in fully-transparent areas.
-
-## Priority 2 — Phase 4: Polish & Validation
+## Priority 1 — Phase 5: Polish & Validation
 
 - **Performance profile on 4K plate**, now that threading is in. The `GaussBlurWorld` deinterleave/reinterleave loop (4 channels × full image, each pass) is the most likely remaining hot spot. Worth profiling before deciding to optimise.
 - **Render-region correctness test**: render a small region preview vs full-frame render of the same composition, difference the overlap. Should be exactly zero. Tests the `InflationPixels` math.
 - **HDR test**: 32-bit float plate with super-white RGB (values > 1). Confirm RGB never gets silently clamped by the coverage-only alpha clamp. Failing case would show as crushed highlights at the edge.
 - **About box content** is currently a generic skeleton template; rewrite to mention the actual plugin name, author, version, link to GitHub.
-- **Version bump** to 1.0.0 once Phase 3 ships and the validation tests pass.
+- **Real-footage acceptance test for Phase 3 dilation**: side-by-side against EXTENDO or Red Giant's spill-suppression on a green-screen plate with dark RGB in the keyed area. Black fringe around the matte boundary should noticeably reduce with Color Dilation on. Tune the default `Edge Extend` if 2.0 looks wrong on real plates.
+- **Real-footage acceptance test for Phase 4 edge-extend**: motion-blurred foreground (hand sweep, fast-moving prop, etc.) re-composited over a contrasting background. `Sample Distance=5`, `Edge Extend=10`, `Sharp Matte Edge=on`, `Edge Radius=0`. Contaminated motion-blur fringe should disappear, matte silhouette stays sharp. Tune 0.95 sample-erode threshold if too aggressive or too gentle on real footage; if so, surface as an internal constant (don't add a user-facing param).
+- **Sample Distance + Color Dilation off warning**: Sample Distance is implicitly ignored when Color Dilation is off (no dilation to push the eroded source out with). Consider a UI tooltip or grey-out-when-disabled treatment so users don't slide it expecting to see something.
+- **Version bump** to 1.0.0 once the validation tests pass.
 
 ## Priority 3 — Small Cleanups
 
@@ -37,6 +26,7 @@ The biggest user-visible feature still missing. Currently the `Enable Color Dila
 - **Spurious `'pwsh.exe' is not recognized` warning** on every build. The actual post-build deploy uses `powershell.exe` and succeeds. Source of the `pwsh.exe` reference is unclear — likely a VS-internal MSBuild rule, not our CMake. Track down and silence or accept as cosmetic.
 - **`build.ps1`** auto-increments `BUILD_VERSION` and auto-commits, which makes iterative builds noisy in git history. Used with `-NoBuildIncrement` during dev. Consider making no-increment the default and requiring a flag to bump, or removing the auto-commit entirely.
 - **`build/` and `.aider.chat.history.md`** are in the working tree but probably should be in `.gitignore`. Check `.gitignore` next time you commit.
+- **Remove the Color Dilation checkbox**, treating `Edge Extend > 0` as the implicit enable. With the corrected algorithm, `Edge Extend = 0` skips `BuildCleanSource` entirely, so the checkbox is redundant. Simpler UI, one less gate to reason about. Small change: drop the param, drop the `dilate_en` member, change InflationPixels and the kernel-allocation gates to read `dilate_amtF > 1e-4f`. Deferred until the user confirms the algorithm is settled.
 
 ### Architecture / docs
 
@@ -53,6 +43,19 @@ These were tried, considered, or designed and explicitly rejected. Recording the
 - **Hardcoding `max_threads = 64`** for the per-thread scratch allocation. The shipped design probes via `iterate_generic(PF_Iterations_ONCE_PER_PROCESSOR, ...)` and uses the real worker count AE returns. Defensive clamp at 256.
 - **Calling-convention annotations on iterate callbacks** (`__cdecl` explicit, custom `PF_CDECL` macro). The SDK has zero `__cdecl` annotations anywhere, and MSVC's default `/Gd` makes both sides `__cdecl` automatically. Adding explicit annotations doesn't fix anything; the shipped callbacks use `extern "C" static` for C linkage + internal linkage, which is sufficient.
 - **GPU path (CUDA/Metal/OpenCL via `PF_GPU_Effect_Suite`)**. Out of scope for v1.0 per Architecture.md §1.
+- **Folding the dilation Gaussian and the colour-bleed Gaussian into a single combined kernel** (`sigma_combined = sqrt(s1^2 + s2^2)`). Mathematically tempting, but the divide step between them isn't linear, so the two passes can't be combined. Don't try.
+- **Per-bit-depth dilation implementations**. Considered for Phase 3 (would give per-bit-depth SIMD hooks for future perf work) but rejected in favour of extending `GaussBlurRGBA` and `GaussBlurWorld<T>` with an optional `dilate_k` parameter. Hybrid path is ~1-2% faster at 4K and ~3x less code. Don't refactor back to per-bit-depth unless SIMD becomes a real need.
+- **Independent dilation function called separately from SmartRender** (separate from the blur pipeline). Would have required re-deinterleaving alpha after the blur runs. The hybrid in-helper approach shares the deinterleave with the existing blur path. Don't split them.
+- **Mode popup for "Soft Erosion" vs "Edge Extend"** (Phase 4 design alternative). Considered as a way to keep the two use cases visually separate, but rejected in favour of a single unified pipeline with two additive params (`Sample Distance` + `Sharp Matte Edge`). The unified design covers both use cases plus the hybrid (soft alpha with deep-interior colour sample) at the cost of zero extra mode logic. Don't add a mode popup unless real users find the param combinations confusing.
+- **Gaussian-blur-then-threshold erosion for Sample Distance**. First shipped this way; user (correctly) flagged that a Gaussian σ=N spreads alpha *outward* as well as inward, so the threshold can land partly inside the contaminated edge zone — defeating the purpose. Replaced with a true morphological min-filter (`MinFilterFloat`) which is what "erode the sampling silhouette by N pixels" actually means. Don't go back to Gaussian + threshold for erosion semantics.
+- **Sample Distance shrinking Edge Extend's effective reach.** Pre-fix algorithm used the eroded blurred-alpha (`blur_a`) to derive the grown matte in Sharp Matte Edge mode, so the matte grew by `Extend - Sample` instead of `Extend`. Sample Distance and Edge Extend are now strictly orthogonal: the grow uses a separate Gauss of the unaltered input alpha, independent of any erosion. Don't reuse `blur_a` for the grown-matte derivation.
+- **Letting dilation affect interior pixels.** Pre-fix algorithm replaced the entire RGB plane with `straight_RGB * input_alpha` (or grown-region fill), which softened the matte interior at default values. Fix: explicitly preserve `input_RGB` inside `input_alpha > EPS`, only fill outside. Without this preservation, enabling Color Dilation at defaults blurs the whole image. The inside-vs-outside test must remain.
+- **Output alpha = clean alpha when Sharp Matte Edge is OFF.** Compose callback in the corrective rewrite read output alpha as `s[0]` (clean_rgba alpha) unconditionally, which collapsed to input alpha when dilation was off — so Blur Amount could no longer produce outward edge bleed (the blurred RGBA had nowhere to show because output alpha didn't extend). Output alpha must be `blurred_rgba[0]` when Sharp Matte is OFF. Don't unify the alpha source again.
+- **O(1) min-filter via van Herk / sliding deque**. Considered when adding MinFilterFloat. Skipped because Sample Distance is typically 0..10 px, so the naive O(radius) per-pixel implementation costs negligible CPU at our image sizes. Revisit only if profiling shows Sample Distance dominating render time at large values.
+- **Reading `info->sharp_alpha` from a duplicated EdgeBlurRenderInfo field**. The plan suggested adding a `bool sharp_alpha` to `EdgeBlurRenderInfo` separate from `params.sharp_alpha`. Implementation read `info->params.sharp_alpha` directly instead — `params` is already in the struct, so the duplicate field was unnecessary. Don't reintroduce.
+- **Dilation as a transformation of the blurred base buffer**. First Phase 4 attempt grafted dilation into `GaussBlurRGBA`/`GaussBlurWorld<T>` so dilation transformed the already-blurred RGBA. Every visible mode broke: matte ate inward, Edge Extend added blur, Sharp Matte Edge produced a black ring. Dilation MUST be a source-preprocessing step that produces a clean input the rest of the pipeline runs on. Never graft it into the blur helpers again. See [memory/phase4_dilation_postmortem.md] for the full diagnosis.
+- **Per-bit-depth scratch worlds in SmartRender**. Pre-Phase-4-rewrite, 8/16-bit paths used native `PF_EffectWorld` scratch buffers with `GaussBlurWorld<T>` and `PF_DisposeWorld`. The corrective rewrite unified everything on packed-float (`UnpackWorldToFloat → BuildCleanSource → GaussBlurRGBA → iterate-with-quantise`), deleting `GaussBlurWorld<T>` entirely. Memory cost at 8/16 bpc went up by `H*W*4*sizeof(float)` per render (~88 MB at 6K) but perf delta is negligible and the code is dramatically simpler. Don't reintroduce native-world scratch unless that memory cost becomes a real problem.
+- **Sharp Matte Edge as a compose-time alpha swap**. Original Phase 4 attempt made the callbacks do `outP->alpha = sharp_alpha ? inP->alpha : b->alpha`. This produced "just a black edge" when on because nothing extended RGB past the original alpha boundary. The correct design bakes Sharp Matte Edge into the clean alpha at preprocessing time (hard outward grow of the input alpha plus RGB fill in the grown region). Compose is no longer per-pixel branched on `sharp_alpha`.
 
 ## Open Questions (no decision yet)
 

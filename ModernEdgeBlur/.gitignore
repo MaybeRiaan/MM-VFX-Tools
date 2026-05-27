@@ -37,3 +37,8 @@ Thumbs.db
 # Adobe AE SDK — not redistributable. Drop a copy into ./sdk/ locally.
 sdk/
 resources/PiPLTool.exe
+
+# Distributable builds — committed for remote testing.
+# Overrides the *.aex / *.exe ignores above for this directory only.
+!dist/
+!dist/*.aex

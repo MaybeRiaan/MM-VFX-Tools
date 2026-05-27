@@ -81,8 +81,12 @@ typedef short int			int16;
 #define	EDGE_BLUR_BLUR_AMOUNT_DFLT		5.0
 
 #define	EDGE_BLUR_DILATE_AMT_MIN		0.0
-#define	EDGE_BLUR_DILATE_AMT_MAX		10.0
+#define	EDGE_BLUR_DILATE_AMT_MAX		50.0
 #define	EDGE_BLUR_DILATE_AMT_DFLT		2.0
+
+#define	EDGE_BLUR_SAMPLE_DIST_MIN		0.0
+#define	EDGE_BLUR_SAMPLE_DIST_MAX		50.0
+#define	EDGE_BLUR_SAMPLE_DIST_DFLT		0.0
 
 enum {
 	EDGE_BLUR_INPUT = 0,
@@ -90,6 +94,8 @@ enum {
 	EDGE_BLUR_BLUR_AMOUNT,
 	EDGE_BLUR_DILATE_EN,
 	EDGE_BLUR_DILATE_AMT,
+	EDGE_BLUR_SAMPLE_DIST,
+	EDGE_BLUR_SHARP_ALPHA,
 	EDGE_BLUR_NUM_PARAMS
 };
 
@@ -97,7 +103,9 @@ enum {
 	EDGE_RADIUS_DISK_ID = 1,
 	BLUR_AMOUNT_DISK_ID,
 	DILATE_EN_DISK_ID,
-	DILATE_AMT_DISK_ID
+	DILATE_AMT_DISK_ID,
+	SAMPLE_DIST_DISK_ID,
+	SHARP_ALPHA_DISK_ID
 };
 
 typedef struct EdgeBlurInfo{
@@ -105,6 +113,8 @@ typedef struct EdgeBlurInfo{
 	PF_FpLong	blur_amountF;
 	PF_Boolean	dilate_en;
 	PF_FpLong	dilate_amtF;
+	PF_FpLong	sample_distF;
+	PF_Boolean	sharp_alpha;
 } EdgeBlurInfo, *EdgeBlurInfoP, **EdgeBlurInfoH;
 
 

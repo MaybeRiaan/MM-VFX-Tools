@@ -30,13 +30,17 @@ Display name and identifier (see [src/ModernEdgeBlur.h](src/ModernEdgeBlur.h)):
 | Edge Radius | `EDGE_BLUR_EDGE_RADIUS` | Float | 3.0 | 0..50 |
 | Blur Amount | `EDGE_BLUR_BLUR_AMOUNT` | Float | 5.0 | 0..50 |
 | Enable Color Dilation | `EDGE_BLUR_DILATE_EN` | Checkbox | off | — |
-| Dilation Amount | `EDGE_BLUR_DILATE_AMT` | Float | 2.0 | 0..10 |
+| Edge Extend | `EDGE_BLUR_DILATE_AMT` | Float | 2.0 | 0..50 |
+| Sample Distance | `EDGE_BLUR_SAMPLE_DIST` | Float | 0.0 | 0..50 |
+| Sharp Matte Edge | `EDGE_BLUR_SHARP_ALPHA` | Checkbox | off | — |
 
 Param semantics:
 
 - **Edge Radius**: Gaussian radius (in pixels) used to blur the alpha when building the erosion weight map. Larger values produce a wider, softer eroded band; 0 disables erosion (sharp output).
 - **Blur Amount**: Gaussian radius (in pixels) of the RGBA blur kernel applied to the source. Drives how much smoothing the blurred-base image gets before being composited beneath the eroded edge.
-- **Enable Color Dilation / Dilation Amount**: enables the un-premult → weighted-neighborhood blur → re-premult pass (Phase 4 — not yet implemented). `Dilation Amount` is the Gaussian sigma of the weighting kernel in pixels.
+- **Enable Color Dilation / Edge Extend**: enables the dilation pass — `blur(premult_RGB) / max(blur(alpha), eps)` to recover straight RGB at the edge, then re-premult. `Edge Extend` is the Gaussian sigma of the dilation kernel in pixels. Eliminates the dark fringe a naive blur of premultiplied RGB produces. Also used as an "edge extend" feature when combined with `Sample Distance` and `Sharp Matte Edge`.
+- **Sample Distance**: how far inward to erode the sampling silhouette before dilation runs. Implemented as a true morphological min-filter (per-pixel minimum alpha in an N-px radius), so it produces a hard inward choke with no rounding or two-way smear. Used to throw away motion-blur-contaminated soft pixels so the dilation pushes clean deep-interior RGB outward. Only meaningful when `Enable Color Dilation` is on.
+- **Sharp Matte Edge**: when on, output alpha = original input alpha (matte is unchanged; dilation only fixes the RGB shown through it). When off, output alpha = blurred alpha (today's soft-erosion look — matte itself softens). Compose-time switch only.
 
 Gaussian kernel construction (used by both Edge Radius and Blur Amount): `sigma = max(radius/2, 0.5)`, kernel size `2*ceil(radius)+1`. All three bit-depth paths share `MakeGaussianKernel` so kernel shape is bit-identical across depths.
 
@@ -55,19 +59,39 @@ The model is alpha-driven erosion, not band-only softening. Compared to the more
 
 An earlier design called for a Sobel-style alpha gradient + spread + threshold-offset to identify the edge band, then lerp sharp→blurred across it. In practice the alpha-blur-and-cube approach produces better results with less code and fewer parameters: it doesn't require an Edge Offset slider (the cube exponent does the same job implicitly), it handles both hard 1-pixel mattes and wide pre-blurred mattes the same way, and it degrades gracefully when alpha is noisy or sparse. The Sobel approach is preserved here as an alternative if the erosion model ever proves insufficient for a real case.
 
-### 4.2 Dilation: weighted-neighborhood algorithm (Phase 4, not yet implemented)
+### 4.2 Dilation: alpha-weighted neighbourhood (the EdgeExtend math)
 
-Working in straight (un-premultiplied) RGB:
+Implemented as a **source preprocessing step** that produces a "clean RGBA source" replacing the raw input for all downstream pipeline stages. The downstream pipeline (Edge Radius erosion blur, Blur Amount colour-bleed, lerp compose) is unchanged.
+
+Input is premultiplied (AE gives us premult buffers). The core algorithm:
+
 ```
-blurred_RGB   = SeparableGaussian(RGB * alpha_mask,  sigma=DilateAmt)
-blurred_alpha = SeparableGaussian(      alpha_mask,  sigma=DilateAmt)
-dilated_RGB   = blurred_RGB / max(blurred_alpha, ε)
+# Optional: Sample Distance > 0 erodes the sampling silhouette inward
+# via a true morphological min-filter, then hard-thresholds to a 0/1
+# mask (so masked-out pixels contribute exactly zero to the dilation Gauss).
+if Sample Distance > 0:
+    eroded  = MinFilter(input_alpha, radius=SampleDist)
+    mask    = (eroded > EPS) ? 1 : 0
+    src_a   = input_alpha * mask    # 0 outside the eroded zone
+    src_RGB = input_RGB   * mask    # 0 outside the eroded zone (premult RGB)
+else:
+    src_a   = input_alpha
+    src_RGB = input_RGB
+
+# Alpha-weighted neighbourhood (the dilation itself)
+blur_a   = SeparableGaussian(src_a,   sigma=EdgeExtend)
+blur_RGB = SeparableGaussian(src_RGB, sigma=EdgeExtend)
+straight_RGB = blur_RGB / max(blur_a, EPS)
 ```
-This pulls opaque-pixel colors into the transparent neighborhood weighted by their alpha. ε prevents divide-by-zero in fully transparent regions (those pixels keep their original RGB, which is irrelevant since their alpha is 0).
 
-Then re-premultiply: `out_RGB = dilated_RGB * out_alpha`.
+`straight_RGB` is colour pushed from confident-interior pixels into the wider neighbourhood, weighted by alpha. EPS = 1e-4 keeps the divide bounded.
 
-EXTENDO and similar plugins are variants of this. Faster than nearest-opaque search; better quality than naive RGB-blur.
+Output composition depends on `Sharp Matte Edge`:
+
+- **OFF**: `clean_alpha = input_alpha` (unchanged). Inside the original matte: `clean_RGB = input_RGB` (untouched). Outside: `clean_RGB = straight_RGB * input_alpha = 0` (premult-zero, since input_alpha is 0 there). The compose callback then swaps in `blurred_alpha` for the output alpha, letting the blurred RGBA bleed outward — Blur Amount drives the soft edge.
+- **ON**: hard outward grow of the original alpha. `grown_a = (Gauss(input_alpha, dilate_k) > EPS) ? 1 : 0`, `clean_alpha = max(input_alpha, grown_a)`. NB: the Gauss is on **input alpha**, not the eroded one — Edge Extend's reach is independent of Sample Distance. Inside the original matte: `clean_RGB = input_RGB` (untouched). In the grown region: `clean_RGB = straight_RGB * clean_alpha`. Matte literally extends outward by ~Edge Extend pixels with a hard outer boundary and a clean-colour fill from the eroded interior.
+
+EXTENDO, Nuke's `EdgeExtend`, and Furnace's `F_Erode` are variants of this. Faster than nearest-opaque search; better quality than naive RGB-blur.
 
 ## 5. Phased plan
 
@@ -85,16 +109,25 @@ Separable Gaussian on RGBA (all bit depths), composed via `lerp(blurred, sharp, 
 ### Phase 2.5 — Threading (done, commit `2195018`)
 Parallelised the inner separable Gaussian (`GaussBlurFloat`) via `in_data->utils->iterate_generic` — H-pass per row, V-pass per column, one shared per-thread scratch pool sized to the actual image. Worker count probed via `PF_Iterations_ONCE_PER_PROCESSOR`. Gated by `MODERN_EDGE_BLUR_THREADED` (default 1) with the serial body preserved as fallback. See [memory/threading_iterate_generic.md](.claude/projects/.../memory) for the stack-overflow bug that killed the first attempt.
 
-### Phase 3 — Color dilation (not started)
-Implement §4.2. Un-premult / dual-Gaussian / divide / re-premult. Gate on `Dilate En`. Run *before* the RGBA blur so the dilated colors get softened together with the matte. Params are already wired in `ParamsSetup` and `ReadParams`; only the implementation in `SmartRender` is missing.
+### Phase 3 — Color dilation (done)
+Implemented §4.2 by extending the existing `GaussBlurRGBA` and `GaussBlurWorld<T>` helpers with an optional `dilate_k` parameter. When non-null, alpha and the (already-premultiplied) RGB are blurred with `dilate_k`, RGB is divided by `max(blurred_alpha, 1e-4)` to recover straight RGB, then the existing `blur_k` pass runs on the dilated buffer for the colour-bleed falloff. Sequence is dilate→divide→blur because the divide step isn't linear and can't be folded into a single combined Gaussian. The compose at the end is unchanged. Gated on `Dilate En` and `Dilation Amount > 0`; when off, the helpers are bit-identical to the pre-Phase-3 path.
 
-**Acceptance test:** side-by-side against EXTENDO on the same source. Black fringes that appear in current Phase 2 output should disappear when dilation is enabled. Test with both light- and dark-keyed plates.
+### Phase 4 — Edge Extend mode (done, corrective rewrite shipped)
+First Phase 4 attempt grafted dilation into the blur helpers (`GaussBlurRGBA`/`GaussBlurWorld<T>`), which incorrectly transformed the *blurred base buffer* and broke every visible mode (matte ate inward, Edge Extend added blur, Sharp Matte Edge produced a black ring). Rewrote dilation as a **source preprocessing step** (`BuildCleanSource`): it transforms the input into a "clean RGBA source" that the existing erosion-blur and compose pipeline runs on. The lerp at compose is `lerp(blurred_clean, clean, w)`, both premult-consistent.
 
-### Phase 4 — Polish & validation (not started)
-- Performance profile on 4K plate now that threading is in. Identify any remaining per-pixel hot spots (channel deinterleave/reinterleave in `GaussBlurWorld` is a likely candidate).
+`Sharp Matte Edge` is now baked into the clean alpha at preprocessing time — when on, the clean alpha is the original input alpha hard-grown outward by `Edge Extend` pixels (threshold the dilation-blurred alpha at EPS), and the grown region is filled with dilated RGB from the eroded interior. When off, the clean alpha is the unmodified input alpha and only the RGB is replaced with the alpha-weighted-neighbourhood version.
+
+`Sample Distance` (alpha-threshold erosion at 0.95) is applied before the dilation runs, so the colour push comes from confident deep-interior pixels rather than motion-blur-contaminated soft edges.
+
+The bit-depth code structure also unified as part of the rewrite: all paths now go through `UnpackWorldToFloat → BuildCleanSource → GaussBlurRGBA (colour-bleed) → iterate compose`, with the 8/16-bit callbacks quantising to native on writeback. `GaussBlurWorld<T>` and `BuildEdgeWeightMap` were deleted (no longer reachable; `GaussBlurWorld<T>` was a casualty of the architecture change, `BuildEdgeWeightMap` was already dead). Memory cost at 8/16 bpc went up by one `H*W*4*sizeof(float)` allocation; perf impact in the noise.
+
+Renamed `Dilation Amount` → `Edge Extend` (display only; disk ID preserved). With both new params at defaults (Sample Distance=0, Sharp Matte Edge=off) and Color Dilation off, output is unchanged from pre-Phase-3.
+
+### Phase 5 — Polish & validation (next)
+- Performance profile on 4K plate now that threading, dilation, and sample-erode are in. Identify any remaining per-pixel hot spots (channel deinterleave/reinterleave in `GaussBlurWorld` is a likely candidate).
 - Validate render-region math on a small-region preview vs. full-frame render. Pixels in overlap region must match.
 - 32-bit float HDR test: footage with super-white values; confirm no clamping leaks where the alpha-coverage clamp shouldn't be touching RGB.
-- About box, plugin metadata, version bump.
+- About box, plugin metadata, version bump to 1.0.0.
 
 ## 6. Alternatives considered
 
