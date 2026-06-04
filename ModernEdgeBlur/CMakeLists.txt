@@ -1,19 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
-# Read current version from ModernEdgeBlur.h
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/ModernEdgeBlur.h" VERSION_H_CONTENT)
-string(REGEX MATCH "#define[ \t]+MAJOR_VERSION[ \t]+([0-9]+)" _ ${VERSION_H_CONTENT})
-set(VERSION_MAJOR ${CMAKE_MATCH_1})
-string(REGEX MATCH "#define[ \t]+MINOR_VERSION[ \t]+([0-9]+)" _ ${VERSION_H_CONTENT})
-set(VERSION_MINOR ${CMAKE_MATCH_1})
-string(REGEX MATCH "#define[ \t]+BUG_VERSION[ \t]+([0-9]+)" _ ${VERSION_H_CONTENT})
-set(VERSION_PATCH ${CMAKE_MATCH_1})
-string(REGEX MATCH "#define[ \t]+BUILD_VERSION[ \t]+([0-9]+)" _ ${VERSION_H_CONTENT})
-set(VERSION_BUILD ${CMAKE_MATCH_1})
+project(ModernEdgeBlur)
 
-project(ModernEdgeBlur VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH})
-
-# Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -22,7 +10,6 @@ set(SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sdk")
 set(RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
 set(SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-# Include directories
 include_directories(
     ${SRC_DIR}
     ${SDK_ROOT}/Headers
@@ -31,119 +18,87 @@ include_directories(
     ${RESOURCES_DIR}
 )
 
-# Source files
-set(SOURCES
-    ${SRC_DIR}/ModernEdgeBlur.cpp
-    ${SRC_DIR}/ModernEdgeBlur_Strings.cpp
+# SDK support sources compiled into every plugin target.
+set(SDK_SOURCES
     ${SDK_ROOT}/Util/AEGP_SuiteHandler.cpp
     ${SDK_ROOT}/Util/MissingSuiteError.cpp
     ${SDK_ROOT}/Util/AEFX_SuiteHelper.c
     ${SDK_ROOT}/Util/Smart_Utils.cpp
 )
 
-set(HEADERS
-    ${SRC_DIR}/ModernEdgeBlur.h
-    ${SRC_DIR}/ModernEdgeBlur_Strings.h
-)
-
-# PiPL Resource file
-set(PIPL_SOURCE ${RESOURCES_DIR}/ModernEdgeBlurPiPL.r)
-
-# Find PiPLTool (local copy)
 set(PIPLTOOL "${RESOURCES_DIR}/PiPLTool.exe")
-
 if(NOT EXISTS ${PIPLTOOL})
     message(FATAL_ERROR "PiPLTool.exe not found at: ${PIPLTOOL}")
 endif()
 
-# Compile PiPL to binary resource
-set(PIPL_BINARY ${CMAKE_CURRENT_BINARY_DIR}/ModernEdgeBlurPiPL.rc)
-
-# Preprocess the .r file first
-set(PIPL_PREPROCESSED ${CMAKE_CURRENT_BINARY_DIR}/ModernEdgeBlurPiPL.rr)
-
-add_custom_command(
-    OUTPUT ${PIPL_PREPROCESSED}
-    COMMAND ${CMAKE_CXX_COMPILER} /I "${SDK_ROOT}/Headers" /I "${SRC_DIR}" 
-            /D "MAJOR_VERSION=${VERSION_MAJOR}" 
-            /D "MINOR_VERSION=${VERSION_MINOR}" 
-            /D "BUG_VERSION=${VERSION_PATCH}" 
-            /D "STAGE_VERSION=0"
-            /D "BUILD_VERSION=${VERSION_BUILD}"
-            /EP "${PIPL_SOURCE}" > "${PIPL_PREPROCESSED}"
-    DEPENDS ${PIPL_SOURCE} ${SRC_DIR}/ModernEdgeBlur.h
-    COMMENT "Preprocessing PiPL resource..."
-    VERBATIM
-)
-
-# PiPLTool.exe doesn't quote-handle paths with spaces. Run it from the build dir
-# with bare filenames so the space in "OFX DEV" never reaches its argv.
-add_custom_command(
-    OUTPUT ${PIPL_BINARY}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PIPLTOOL}" "${CMAKE_CURRENT_BINARY_DIR}/PiPLTool.exe"
-    COMMAND cmd /c ".\\PiPLTool.exe ModernEdgeBlurPiPL.rr ModernEdgeBlurPiPL.rc.tmp"
-    COMMAND ${CMAKE_CXX_COMPILER} /nologo /D "MSWindows" /EP "${PIPL_BINARY}.tmp" > "${PIPL_BINARY}"
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    DEPENDS ${PIPL_PREPROCESSED}
-    COMMENT "Compiling PiPL resource with PiPLTool..."
-    VERBATIM
-)
-
-# Ensure the RC file is treated as a Windows resource
-if(MSVC)
-    set_source_files_properties(${PIPL_BINARY} PROPERTIES
-        LANGUAGE RC
-        GENERATED TRUE
-    )
-endif()
-
-# Create the plugin as a shared library (.aex is just a renamed .dll)
-add_library(${PROJECT_NAME} MODULE ${SOURCES} ${HEADERS} ${PIPL_BINARY})
-
-# Set output name to .aex
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    PREFIX ""
-    SUFFIX ".aex"
-    OUTPUT_NAME "ModernEdgeBlur"
-)
-
-# No external libraries needed for basic plugin
-
-# Optional threading toggle for GaussBlurFloat. Default is on; pass
-# -DMODERN_EDGE_BLUR_THREADED=0 at configure time to force the serial path.
-if(DEFINED MODERN_EDGE_BLUR_THREADED)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE
-        MODERN_EDGE_BLUR_THREADED=${MODERN_EDGE_BLUR_THREADED}
-    )
-endif()
-
-# Windows-specific settings
-if(WIN32)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE
-        _WINDOWS
-        WIN32
-        _USRDLL
-        MSWindows
-    )
-    
-    # Set subsystem to Windows
-    set_target_properties(${PROJECT_NAME} PROPERTIES
-        LINK_FLAGS "/SUBSYSTEM:WINDOWS"
-    )
-endif()
-
-# Post-build: Copy to After Effects plugins folder.
-# The AE plug-ins directory has been granted write permission for the current
-# user via icacls, so no elevation is needed here.
 set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins")
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND powershell.exe -NonInteractive -Command
-        "Copy-Item -Path '$<TARGET_FILE:${PROJECT_NAME}>' -Destination '${AE_PLUGINS_DIR}/ModernEdgeBlur.aex' -Force; Write-Host 'Deployed to AE plugins folder'"
-    COMMENT "Installing plugin to After Effects plugins folder"
-    VERBATIM
-)
 
-# Print build info
-message(STATUS "Modern Edge Blur v${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH} Build ${VERSION_BUILD}")
-message(STATUS "AE SDK: ${AE_SDK_ROOT}")
-message(STATUS "Install to: ${AE_PLUGINS_DIR}")
+# add_meb_plugin(TARGET PIPL_R <source files...>)
+#   TARGET   — CMake target / OUTPUT_NAME of the .aex
+#   PIPL_R   — the tool's PiPL .r file
+#   remaining args (ARGN) — the tool's own .cpp sources (SDK_SOURCES added auto).
+#   Builds the PiPL via the spaces-safe PiPLTool workaround (unique intermediate
+#   names per tool so the two custom commands don't collide), compiles the tool
+#   sources into a MODULE .aex, and deploys to the AE folder.
+function(add_meb_plugin TARGET PIPL_R)
+    set(PIPL_RR  "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}PiPL.rr")
+    set(PIPL_RC  "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}PiPL.rc")
+
+    add_custom_command(
+        OUTPUT ${PIPL_RR}
+        COMMAND ${CMAKE_CXX_COMPILER} /I "${SDK_ROOT}/Headers" /I "${SRC_DIR}"
+                /D "MSWindows" /EP "${PIPL_R}" > "${PIPL_RR}"
+        DEPENDS ${PIPL_R}
+        COMMENT "Preprocessing ${TARGET} PiPL..."
+        VERBATIM
+    )
+
+    # PiPLTool.exe splits argv on spaces — run it from the build dir with bare
+    # filenames so the space in the project path never reaches its argv.
+    add_custom_command(
+        OUTPUT ${PIPL_RC}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PIPLTOOL}" "${CMAKE_CURRENT_BINARY_DIR}/PiPLTool.exe"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PIPL_RR}" "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}PiPL.rr"
+        COMMAND cmd /c ".\\PiPLTool.exe ${TARGET}PiPL.rr ${TARGET}PiPL.rc.tmp"
+        COMMAND ${CMAKE_CXX_COMPILER} /nologo /D "MSWindows" /EP "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}PiPL.rc.tmp" > "${PIPL_RC}"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        DEPENDS ${PIPL_RR}
+        COMMENT "Compiling ${TARGET} PiPL with PiPLTool..."
+        VERBATIM
+    )
+
+    if(MSVC)
+        set_source_files_properties(${PIPL_RC} PROPERTIES LANGUAGE RC GENERATED TRUE)
+    endif()
+
+    add_library(${TARGET} MODULE ${ARGN} ${SDK_SOURCES} ${PIPL_RC})
+
+    set_target_properties(${TARGET} PROPERTIES
+        PREFIX ""
+        SUFFIX ".aex"
+        OUTPUT_NAME "${TARGET}"
+    )
+
+    if(WIN32)
+        target_compile_definitions(${TARGET} PRIVATE _WINDOWS WIN32 _USRDLL MSWindows)
+        set_target_properties(${TARGET} PROPERTIES LINK_FLAGS "/SUBSYSTEM:WINDOWS")
+    endif()
+
+    if(DEFINED MODERN_EDGE_BLUR_THREADED)
+        target_compile_definitions(${TARGET} PRIVATE
+            MODERN_EDGE_BLUR_THREADED=${MODERN_EDGE_BLUR_THREADED})
+    endif()
+
+    add_custom_command(TARGET ${TARGET} POST_BUILD
+        COMMAND powershell.exe -NonInteractive -Command
+            "Copy-Item -Path '$<TARGET_FILE:${TARGET}>' -Destination '${AE_PLUGINS_DIR}/${TARGET}.aex' -Force; Write-Host 'Deployed ${TARGET} to AE plugins folder'"
+        COMMENT "Installing ${TARGET} to After Effects plugins folder"
+        VERBATIM
+    )
+endfunction()
+
+add_meb_plugin(ModernEdgeBlur "${RESOURCES_DIR}/ModernEdgeBlurPiPL.r"
+    "${SRC_DIR}/ModernEdgeBlur.cpp"
+    "${SRC_DIR}/ModernEdgeBlur_Strings.cpp")
+
+message(STATUS "ModernEdgeBlur.aex → ${AE_PLUGINS_DIR}")

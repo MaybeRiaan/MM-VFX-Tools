@@ -1,28 +1,3 @@
-/*******************************************************************/
-/*                                                                 */
-/*                      ADOBE CONFIDENTIAL                         */
-/*                   _ _ _ _ _ _ _ _ _ _ _ _ _                     */
-/*                                                                 */
-/* Copyright 2007-2023 Adobe Inc.                                  */
-/* All Rights Reserved.                                            */
-/*                                                                 */
-/* NOTICE:  All information contained herein is, and remains the   */
-/* property of Adobe Inc. and its suppliers, if                    */
-/* any.  The intellectual and technical concepts contained         */
-/* herein are proprietary to Adobe Inc. and its                    */
-/* suppliers and may be covered by U.S. and Foreign Patents,       */
-/* patents in process, and are protected by trade secret or        */
-/* copyright law.  Dissemination of this information or            */
-/* reproduction of this material is strictly forbidden unless      */
-/* prior written permission is obtained from Adobe Inc.            */
-/* Incorporated.                                                   */
-/*                                                                 */
-/*******************************************************************/
-
-/*
-	ModernEdgeBlur.h
-*/
-
 #pragma once
 
 #ifndef MODERN_EDGE_BLUR_H
@@ -33,11 +8,10 @@ typedef unsigned short		u_short;
 typedef unsigned short		u_int16;
 typedef unsigned long		u_long;
 typedef short int			int16;
-#define PF_TABLE_BITS	12
-#define PF_TABLE_SZ_16	4096
+#define PF_TABLE_BITS		12
+#define PF_TABLE_SZ_16		4096
 
-#define PF_DEEP_COLOR_AWARE 1	// make sure we get 16bpc pixels;
-								// AE_Effect.h checks for this.
+#define PF_DEEP_COLOR_AWARE 1
 
 #include "AEConfig.h"
 
@@ -61,75 +35,61 @@ typedef short int			int16;
 
 #include "ModernEdgeBlur_Strings.h"
 
-/* Versioning information */
+#define MAJOR_VERSION	1
+#define MINOR_VERSION	2
+#define BUG_VERSION		0
+#define STAGE_VERSION	PF_Stage_DEVELOP
+#define BUILD_VERSION	1
 
-#define	MAJOR_VERSION	1
-#define	MINOR_VERSION	1
-#define	BUG_VERSION		0
-#define	STAGE_VERSION	PF_Stage_DEVELOP
-#define	BUILD_VERSION	11
+// ---------------------------------------------------------------------------
+// Parameter ranges and defaults
+// ---------------------------------------------------------------------------
 
+#define MEB_SHIFT_EDGE_MIN		-50.0
+#define MEB_SHIFT_EDGE_MAX		 50.0
+#define MEB_SHIFT_EDGE_DFLT		  0.0
 
-/* Parameter defaults */
+#define MEB_BLUR_AMOUNT_MIN		  0.0
+#define MEB_BLUR_AMOUNT_MAX		100.0
+#define MEB_BLUR_AMOUNT_DFLT	  4.0
 
-#define	EDGE_BLUR_EDGE_RADIUS_MIN		0.0
-#define	EDGE_BLUR_EDGE_RADIUS_MAX		50.0
-#define	EDGE_BLUR_EDGE_RADIUS_DFLT		3.0
+#define MEB_BLEND_RADIUS_MIN	  0.0
+#define MEB_BLEND_RADIUS_MAX	100.0
+#define MEB_BLEND_RADIUS_DFLT	  4.0
 
-#define	EDGE_BLUR_BLUR_AMOUNT_MIN		0.0
-#define	EDGE_BLUR_BLUR_AMOUNT_MAX		50.0
-#define	EDGE_BLUR_BLUR_AMOUNT_DFLT		5.0
-
-#define	EDGE_BLUR_DILATE_AMT_MIN		0.0
-#define	EDGE_BLUR_DILATE_AMT_MAX		50.0
-#define	EDGE_BLUR_DILATE_AMT_DFLT		2.0
-
-#define	EDGE_BLUR_SAMPLE_DIST_MIN		0.0
-#define	EDGE_BLUR_SAMPLE_DIST_MAX		50.0
-#define	EDGE_BLUR_SAMPLE_DIST_DFLT		0.0
-
+// ---------------------------------------------------------------------------
+// Parameter indices (0 = implicit input layer)
+// ---------------------------------------------------------------------------
 enum {
-	EDGE_BLUR_INPUT = 0,
-	EDGE_BLUR_EDGE_RADIUS,
-	EDGE_BLUR_BLUR_AMOUNT,
-	EDGE_BLUR_DILATE_EN,
-	EDGE_BLUR_DILATE_AMT,
-	EDGE_BLUR_SAMPLE_DIST,
-	EDGE_BLUR_SHARP_ALPHA,
-	EDGE_BLUR_NUM_PARAMS
+	MEB_INPUT = 0,
+	MEB_SHIFT_EDGE,
+	MEB_BLUR_AMOUNT,
+	MEB_BLEND_RADIUS,
+	MEB_NUM_PARAMS
 };
 
+// Disk IDs — never reorder, never reuse
 enum {
-	EDGE_RADIUS_DISK_ID = 1,
-	BLUR_AMOUNT_DISK_ID,
-	DILATE_EN_DISK_ID,
-	DILATE_AMT_DISK_ID,
-	SAMPLE_DIST_DISK_ID,
-	SHARP_ALPHA_DISK_ID
+	MEB_SHIFT_EDGE_DISK_ID   = 1,
+	MEB_BLUR_AMOUNT_DISK_ID  = 2,
+	MEB_BLEND_RADIUS_DISK_ID = 3
 };
 
-typedef struct EdgeBlurInfo{
-	PF_FpLong	edge_radiusF;
+typedef struct MEB_Params {
+	PF_FpLong	shift_edgeF;
 	PF_FpLong	blur_amountF;
-	PF_Boolean	dilate_en;
-	PF_FpLong	dilate_amtF;
-	PF_FpLong	sample_distF;
-	PF_Boolean	sharp_alpha;
-} EdgeBlurInfo, *EdgeBlurInfoP, **EdgeBlurInfoH;
+	PF_FpLong	blend_radiusF;
+} MEB_Params;
 
 
 extern "C" {
-
-	DllExport
-	PF_Err
-	EffectMain(
-		PF_Cmd			cmd,
-		PF_InData		*in_data,
-		PF_OutData		*out_data,
-		PF_ParamDef		*params[],
-		PF_LayerDef		*output,
-		void			*extra);
-
+	DllExport PF_Err EffectMain(
+		PF_Cmd		cmd,
+		PF_InData	*in_data,
+		PF_OutData	*out_data,
+		PF_ParamDef	*params[],
+		PF_LayerDef	*output,
+		void		*extra);
 }
 
 #endif // MODERN_EDGE_BLUR_H
