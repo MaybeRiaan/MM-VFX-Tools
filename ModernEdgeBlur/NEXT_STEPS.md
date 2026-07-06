@@ -1,6 +1,19 @@
 # Modern Edge Blur — Next Steps
 
-> **STATUS 2026-07-06 (later session): BLACK HALO RESOLVED — user-confirmed in AE on all sources.** Root cause was TWO independent bugs stacked (wrong blur input space AND wrong output convention), plus a third at the Phase 4 blend — which is why every single-variable fix attempt failed and the debugging history below kept going in circles. See "Black halo — RESOLVED" under Priority 3 for the three root causes; the golden rule is: **AE's effect pipeline is STRAIGHT (unmatted) alpha on BOTH sides — premultiply → blur → unpremultiply internally, hand back straight colour, never multiply RGB by alpha in the output.** Also fixed the same session: blur kernel sigma mapping (radius×0.25 → ×0.5, support 3σ) — the old "gentle" mapping had been tuned by eye against the halo bug's darkening, which faked extra width. Priority 1 done, Priority 3 done, Shift Edge (Priority 2) still on the shelf.
+> **STATUS 2026-07-06, end of session — v1.3 core is DONE and verified. Blur Amount and Blend Radius are correct, halo-free, and ~4x faster on worst-case frames. All work committed to main.**
+>
+> **This session completed (all user-verified in AE):**
+> 1. **Black halo RESOLVED** — three stacked root causes (blur input not honestly premultiplied; output handed back premultiplied when AE's effect pipeline is STRAIGHT alpha on both sides; Phase 4 blend mixing the zeroed-black cliff via plain lerp). Golden rule for all future Phase 2/4 work: **premultiply → blur → unpremultiply internally, output straight colour, never multiply RGB by alpha in the output.** Full writeup: "Black halo — RESOLVED" under Priority 3.
+> 2. **Blend Radius dark line RESOLVED** — alpha-weighted composite blend (sharp term drops out exactly where sharp coverage is 0).
+> 3. **Blur width remapped** — kernel sigma radius×0.25 → ×0.5 with 3σ support; user-confirmed the blur shape looks right (old mapping was eyeball-tuned against the halo bug's fake extra width).
+> 4. **Performance restructure** — fused threaded ingest/composite passes, tiled vertical blur, thread_local buffer pool. Measured: TOTAL avg 597→351ms, worst case 2413→580ms on a 4.6K comp; visually verified unchanged. Details under Priority 3.
+>
+> **NEXT SESSION — start here, in rough priority order:**
+> 1. **Shift Edge (Priority 2):** fix the slider not appearing in AE's effect UI, validate the restructured shift path (untested — it now derives buffers post-shift via `MEB_DeriveRow`), then implement the planned **method dropdown**: "genuine min/max" (current exact circular `MorphPlane` — needs threading at minimum, it's O(radius²) and serial) vs "fast choke" (octagon/running-min, whichever benchmarks fastest). See Priority 2 for details.
+> 2. **8/16bpc verification** of the unpremult pipeline (commit `7ad1164` once flagged unpremult instability across bit depths; halo fix was only confirmed at project depth).
+> 3. **Red Giant Edge Blur A/B** at matched slider values — fine-tune the sigma ×0.5 factor only if the comparison demands it.
+> 4. **Before any release build:** strip the debug logging + EDGE/PHASE4 dump diagnostics (see the debug-logging note under Priority 3), and remember build.ps1's deploy silently fails while AE is open — check timestamps before trusting a test (see "Testing pitfalls").
+> 5. Backlog when relevant: erosion-shape dropdown (Box/Octagon/Circle), box-chain "fast blur" option, SIMD in blur inner loops, Ingest thread-fanout curiosity, EdgeRepair plugin (Priority 4).
 
 ## Priority 1 — Blend Radius erosion of the sharp/blurred blend weight — DONE (2026-07-03)
 
