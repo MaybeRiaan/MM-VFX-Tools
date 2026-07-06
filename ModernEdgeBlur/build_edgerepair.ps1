@@ -14,6 +14,13 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot   = $PSScriptRoot
 $VersionHeader = Join-Path $ProjectRoot "src\EdgeRepair.h"
+# The PiPL carries its OWN copy of the version defines and AE compares the
+# packed AE_Effect_Version integer from BOTH sides at load. If they drift by
+# even one build number AE rejects the effect with a misleading "version
+# mismatch. Code version is 1.0 and PiPL version is 1.0" (it prints only
+# MAJOR.MINOR but compares the full packed value). So every bump must touch
+# BOTH files - see Update-BuildVersion.
+$PiplResource  = Join-Path $ProjectRoot "resources\EdgeRepairPiPL.r"
 $BuildDir      = Join-Path $ProjectRoot "build"
 
 Write-Host "=== Edge Repair Build Script ===" -ForegroundColor Cyan
@@ -38,11 +45,15 @@ function Get-CurrentVersion {
 function Update-BuildVersion {
     param([int]$NewBuild)
 
-    $content = Get-Content $VersionHeader -Raw
-    $content = $content -replace '(#define\s+BUILD_VERSION\s+)\d+', "`${1}$NewBuild"
-    Set-Content $VersionHeader -Value $content -NoNewline
+    # Bump BOTH the header and the PiPL - AE compares the packed version from
+    # each and rejects on any drift (see $PiplResource note above).
+    foreach ($file in @($VersionHeader, $PiplResource)) {
+        $content = Get-Content $file -Raw
+        $content = $content -replace '(#define\s+BUILD_VERSION\s+)\d+', "`${1}$NewBuild"
+        Set-Content $file -Value $content -NoNewline
+    }
 
-    Write-Host "Updated EdgeRepair BUILD_VERSION to $NewBuild" -ForegroundColor Green
+    Write-Host "Updated EdgeRepair BUILD_VERSION to $NewBuild (header + PiPL)" -ForegroundColor Green
 }
 
 $version = Get-CurrentVersion

@@ -45,9 +45,10 @@ typedef short int			int16;
 
 // ---------------------------------------------------------------------------
 // Parameter indices (0 = implicit input layer).
-// Stage 0 registers no params; the locked seven (Erode, Extend, Softness,
-// Alpha Choke, Texture Preserve, View Mode, Premultiplied — disk IDs 101-107)
-// arrive in Stage 1. Disk IDs are forever: never reorder, never reuse.
+// Stage 0 registers no params; the locked FIVE (Erode, Extend, Detail,
+// Alpha Choke, View Mode — disk IDs 101-105) arrive in Stage 1. Premult is
+// internal-only (no knob); no Softness param (a separate suite plugin owns
+// edge shaping). Disk IDs are forever: never reorder, never reuse.
 // ---------------------------------------------------------------------------
 enum {
 	ER_INPUT = 0,
