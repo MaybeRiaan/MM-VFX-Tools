@@ -2,16 +2,23 @@
 
     Pipeline (per frame):
       1. [Shift Edge]  Stubbed — morphological grow/shrink on alpha. No-op when = 0 (default).
-      2. [Blur Amount] Gaussian blur full premultiplied RGBA (GaussBlurRGBA, threaded via
-                       iterate_generic, sigma = radius * 0.25) → blurred base (A). No AE
-                       world/native convolve involved — see Phase 2 comment in SmartRender.
+      2. [Blur Amount] Premultiply (rgb *= alpha, every pixel) a copy of sharp_buf, Gaussian
+                       blur it whole (GaussBlurRGBA, threaded via iterate_generic, sigma =
+                       radius * 0.5), then UNPREMULTIPLY (rgb /= max(blurred alpha, 1e-4))
+                       → blurred base (A) in straight colour. Premult space for the blur
+                       itself, straight colour out — matching AE's straight-alpha effect
+                       pipeline on both sides. No AE world/native convolve involved — see
+                       Phase 2 comment in SmartRender.
       3. [Blend Radius] Erode sharp alpha inward by radius (octagon erosion — 4-direction
                         approximation of a circular min-filter, threaded via iterate_generic),
                         then Gaussian-blur to feather (also threaded via iterate_generic) →
                         weight w = clamp(eroded+blurred, 0, 1). w controls how much sharp
                         (top) layer shows vs blurred (base) layer — eroding w reveals more
                         of the blurred base at the edge.
-      4. [Composite]   out_rgb   = lerp(A_rgb, sharp_rgb, w)
+      4. [Composite]   out_rgb   = (sharp_rgb·w·sharp_a + A_rgb·(1-w)·A_a) / (w·sharp_a + (1-w)·A_a)
+                       — alpha-weighted blend in straight colour, NO alpha multiply on the
+                       result; AE applies alpha itself at composite time. Reduces to a plain
+                       lerp in the interior; drops the sharp term where sharp coverage is 0.
                        out_alpha = A_alpha  (blurred alpha = soft feathered edge, unchanged by Blend Radius)
 
     Passthrough: Blur=0 and Blend=0 → input copied directly to output, held RGB preserved.
@@ -21,8 +28,15 @@
              it can't retroactively clean pixels an upstream effect already baked in (e.g.
              a precomp with an internal keyer that only touches alpha, leaving un-keyed
              footage colour sitting underneath). Enforcing it ourselves means honest
-             premult holds regardless of what the source actually did.
-             Gaussian sees zero colour outside matte → no dark halo.
+             premult holds regardless of what the source actually did. sharp_buf itself
+             stays straight/true-colour (zeroed cliff only) for the sharp-layer contribution;
+             a SEPARATE copy goes through premultiply → blur → unpremultiply for Blur Amount
+             (see Phase 2 comment). Both halves matter: blurring premultiplied means a
+             partial-alpha edge pixel contributes only its coverage-weighted share of colour
+             to the kernel sum (no black contamination), and unpremultiplying after means
+             the output is straight colour, which is what AE expects back — handing back
+             premultiplied colour makes AE apply alpha a second time (colour×alpha²), a
+             dark halo on every source including the transparency grid.
     No input inflation — src_world is exactly output size.
 */
 
@@ -302,12 +316,16 @@ static void OctagonErode(const float *in, float *out, A_long W, A_long H,
 // ---------------------------------------------------------------------------
 
 // Build a 1-D Gaussian kernel (normalised).
-// sigma = radius/4, support = ceil(radius)+1 — gentle blur feel.
+// sigma = radius/2, support = ceil(3*sigma) — support must reach ~3 sigma or
+// the clipped tails make the blur read visibly smaller than its sigma.
+// (Was radius/4, tuned by eye against the old premult bug whose darkening
+// made the blur LOOK wider than it was; with honest colour that mapping
+// reads far too small next to Red Giant Edge Blur at the same value.)
 static std::vector<float> MakeBlurKernel(float radius)
 {
     if (radius < 0.5f) return {};
-    const float sigma = radius * 0.25f;
-    const int   half  = (int)std::ceil(radius) + 1;
+    const float sigma = radius * 0.5f;
+    const int   half  = (int)std::ceil(3.f * sigma);
     const int   size  = 2 * half + 1;
     std::vector<float> k(size);
     float sum = 0.f;
@@ -913,9 +931,9 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         }
         DebugLogTiming("ZeroRGB", t0, MEB_Clock::now());
 
-        // Capture the (now honestly zeroed) premultiplied RGBA — this is what
-        // Phase 2 blurs. See the Phase 2 comment: we blur this directly, we do
-        // NOT treat it as straight/un-multiplied data.
+        // Copy for Phase 2 to blur. Starts as straight colour (same as
+        // sharp_buf); Phase 2 premultiplies → blurs → unpremultiplies it,
+        // so by composite time it's straight colour again either way.
         float *blurred_buf = new (std::nothrow) float[outN * 4];
         if (!blurred_buf) { delete[] sharp_buf; err = PF_Err_OUT_OF_MEMORY; goto cleanup; }
         std::memcpy(blurred_buf, sharp_buf, outN * 4 * sizeof(float));
@@ -938,24 +956,29 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         }
 
         // -----------------------------------------------------------------
-        // Phase 2: Blurred base.
-        // blurred_buf holds the zeroed data (0 outside the matte, true colour
-        // inside — see the zero-RGB pass above). Blur it with GaussBlurRGBA,
-        // then DIVIDE the blurred RGB by the blurred alpha — NOT multiply.
-        // This is the actual bug in every earlier attempt: zeroing RGB where
-        // alpha=0 forces the blur kernel to average real edge colour together
-        // with hard black, which darkens the estimate near any edge — the
-        // exact same pollution problem the white background caused before
-        // zeroing, just black instead of white. For a locally-constant true
-        // colour C, blur(C·alpha)/blur(alpha) recovers C exactly regardless
-        // of how much of the kernel's support falls outside the matte, since
-        // the division cancels the coverage-dependent attenuation instead of
-        // compounding it. This makes blurred_buf hold the BLURRED LAYER'S TRUE
-        // COLOUR (not premultiplied) after this step — Phase 4 premultiplies
-        // once, at the very end, after blending with the sharp layer's colour.
-        // Division is guarded near alpha=0 (unstable/meaningless there; RGB
-        // is left as whatever near-zero value it already has, which won't
-        // matter since it's multiplied by ~0 alpha at composite time anyway).
+        // Phase 2: Blurred base — premultiply → blur → UNPREMULTIPLY.
+        // AE's effect pipeline is STRAIGHT (unmatted) alpha on both sides:
+        // the EDGE DUMP proved the input side (a=0.78 and a=1.0 pixels carry
+        // identical RGB — straight colour, not scaled by coverage), and the
+        // output side is symmetric — AE multiplies our RGB by our alpha
+        // itself at composite time. So the blur must run in premultiplied
+        // space (otherwise a partial-alpha edge pixel contributes its FULL
+        // colour to the kernel sum instead of its coverage-weighted share —
+        // that contamination was one half of the black-halo bug), but the
+        // RESULT handed back must be straight colour (outputting
+        // premultiplied colour makes AE multiply by alpha a second time —
+        // colour×alpha², a dark fringe on every source including the
+        // transparency grid, and a visibly "shrunken" blur. That was the
+        // other half).
+        //
+        // The unpremultiply divide is SAFE here, unlike the earlier "divide
+        // by alpha" attempt on straight input: blur(colour×alpha)/blur(alpha)
+        // is a convex weighted average of true colours inside the kernel
+        // support (weights = alpha×kernel), mathematically bounded by those
+        // colours — no amplification possible. The divisor clamp only
+        // matters where blurred alpha ≈ 0, where RGB is ≈ 0 too; 1e-4
+        // matches the shipped BuildCleanSource implementation of this same
+        // technique (commit 84e713f).
         //
         // No AE world needed here — AE's native convolve utility measured
         // 10-20x slower than our own threaded blur (see NEXT_STEPS.md), so we
@@ -967,32 +990,26 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         if (do_blur) {
             const auto k = MakeBlurKernel((float)p.blur_amountF);
 
-            auto ts = MEB_Clock::now();
-            GaussBlurRGBA(blurred_buf, outW, outH, k, in_data);
-            DebugLogTiming("  GaussBlurRGBA", ts, MEB_Clock::now());
-
-            ts = MEB_Clock::now();
-            // Clamp the divisor rather than branching on it — a hard
-            // if (a > epsilon) cutoff makes the recovered colour jump
-            // discontinuously right at the threshold (divided-and-correct on
-            // one side, left-raw-and-much-darker on the other), and that
-            // internal jump survives the final premultiply as a visible thin
-            // dark ring wherever the blurred alpha happens to cross epsilon.
-            // Clamping instead keeps inv_a continuous everywhere: it matches
-            // the true division above epsilon and smoothly saturates instead
-            // of jumping below it, so there's no seam to show up as fringing.
-            const float kAlphaNormEpsilon = 0.02f;
             for (size_t i = 0; i < outN; ++i) {
-                const float a      = blurred_buf[i * 4 + 0];
-                const float inv_a  = 1.0f / std::max(a, kAlphaNormEpsilon);
+                const float a = blurred_buf[i * 4 + 0];
+                blurred_buf[i * 4 + 1] *= a;
+                blurred_buf[i * 4 + 2] *= a;
+                blurred_buf[i * 4 + 3] *= a;
+            }
+
+            GaussBlurRGBA(blurred_buf, outW, outH, k, in_data);
+
+            const float kAlphaNormEpsilon = 1e-4f;
+            for (size_t i = 0; i < outN; ++i) {
+                const float a     = blurred_buf[i * 4 + 0];
+                const float inv_a = 1.0f / std::max(a, kAlphaNormEpsilon);
                 blurred_buf[i * 4 + 1] *= inv_a;
                 blurred_buf[i * 4 + 2] *= inv_a;
                 blurred_buf[i * 4 + 3] *= inv_a;
             }
-            DebugLogTiming("  Unpremultiply", ts, MEB_Clock::now());
-        } else {
-            std::memcpy(blurred_buf, sharp_buf, outN * 4 * sizeof(float));
         }
+        // else: blurred_buf is the un-blurred straight-colour copy of
+        // sharp_buf — already in the right space for Phase 4, nothing to do.
         DebugLogTiming("BlurAmount", t0, MEB_Clock::now());
 
         // -----------------------------------------------------------------
@@ -1033,17 +1050,26 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
 
         // -----------------------------------------------------------------
         // Phase 4: Composite and pack output.
-        // sharp_buf's RGB is true colour (held, zero only at alpha=0 — see
-        // the zero-RGB pass). blurred_buf's RGB is now ALSO true colour as of
-        // Phase 2's unpremultiply-by-division step, not premultiplied. Blend
-        // the two TRUE colours by w, then premultiply ONCE at the very end by
-        // out_alpha — not before. Multiplying earlier (per-layer, before this
-        // blend) is exactly what caused the black-halo bug: it darkens each
-        // layer's colour individually wherever ITS OWN alpha is low, before
-        // the blend even happens, rather than letting the blend produce a
-        // clean true-colour estimate first and only fading it via alpha once,
-        // at the end.
-        // out_rgb   = lerp(blurred_true_rgb, sharp_true_rgb, w) × out_alpha
+        // Both layers are STRAIGHT colour here: sharp_buf as delivered (held
+        // colour, zeroed only at the alpha=0 cliff), blurred_buf as recovered
+        // by Phase 2's unpremultiply. Output must be straight too — AE
+        // multiplies RGB by alpha itself at composite time, so we hand back
+        // the blended straight colour untouched and let alpha do the fading.
+        // Multiplying by out_alpha here (any variant — per-layer or final)
+        // double-applies alpha once AE composites, which reads as a dark
+        // halo on every source. See the Phase 2 comment.
+        //
+        // The blend itself must be ALPHA-WEIGHTED, not a plain lerp by w:
+        // just outside the sharp matte, Blend Radius's feathered mask gives w
+        // a small nonzero value while sharp_buf's RGB there is the zeroed
+        // cliff — a plain lerp mixes that black in at weight w and draws a
+        // thin dark line that gets stronger as Blend Radius rises. Weighting
+        // each layer's colour by (blend weight × its own alpha) and
+        // renormalising is the premultiplied-space blend expressed in
+        // straight colour: where sharp coverage is 0 the sharp term drops
+        // out entirely, and in the interior (both alphas 1) it reduces to
+        // exactly the plain lerp.
+        // out_rgb   = (sh_rgb·w·sh_a + bl_rgb·(1-w)·bl_a) / (w·sh_a + (1-w)·bl_a)
         // out_alpha = blurred_alpha  (unchanged — still Blur Amount's alpha)
         // -----------------------------------------------------------------
         t0 = MEB_Clock::now();
@@ -1058,13 +1084,23 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 float       *dst = out_row.data();
 
                 for (A_long x = 0; x < outW; ++x) {
-                    const float w      = wt[x];
-                    const float inv    = 1.f - w;
-                    const float outA   = bl[0];
-                    dst[0] = outA;
-                    dst[1] = (sh[1] * w + bl[1] * inv) * outA;
-                    dst[2] = (sh[2] * w + bl[2] * inv) * outA;
-                    dst[3] = (sh[3] * w + bl[3] * inv) * outA;
+                    const float w     = wt[x];
+                    const float sw    = w * sh[0];
+                    const float bw    = (1.f - w) * bl[0];
+                    const float denom = sw + bw;
+                    dst[0] = bl[0];
+                    if (denom > 1e-6f) {
+                        const float norm = 1.f / denom;
+                        dst[1] = (sh[1] * sw + bl[1] * bw) * norm;
+                        dst[2] = (sh[2] * sw + bl[2] * bw) * norm;
+                        dst[3] = (sh[3] * sw + bl[3] * bw) * norm;
+                    } else {
+                        // No coverage from either layer — pass the blurred
+                        // colour through (it's ~0 out here anyway).
+                        dst[1] = bl[1];
+                        dst[2] = bl[2];
+                        dst[3] = bl[3];
+                    }
                     sh += 4; bl += 4; dst += 4;
                 }
 
