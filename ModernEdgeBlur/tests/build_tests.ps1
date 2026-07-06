@@ -1,0 +1,33 @@
+# Headless unit tests for Edge Repair's AE-free algorithm cores.
+# Compiles and runs each test with plain cl.exe (no AE SDK). Exit 0 = all
+# passed. The project path contains a space, which breaks cl's argv parsing,
+# so we compile from a copy in a space-free temp dir (same class of issue the
+# CMake PiPL step works around).
+
+$ErrorActionPreference = "Stop"
+$TestsDir = $PSScriptRoot
+$CommonDir = Join-Path (Split-Path $TestsDir -Parent) "src\common"
+
+$vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+$vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
+if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+
+$work = Join-Path $env:TEMP "edgerepair_tests"
+if (Test-Path $work) { Remove-Item $work -Recurse -Force }
+New-Item -ItemType Directory -Path $work | Out-Null
+
+Copy-Item (Join-Path $CommonDir "*.h") $work -Force
+$tests = Get-ChildItem $TestsDir -Filter "test_*.cpp"
+
+$fail = 0
+foreach ($t in $tests) {
+    Copy-Item $t.FullName $work -Force
+    $exe = [System.IO.Path]::GetFileNameWithoutExtension($t.Name)
+    Write-Host "=== Building/running $($t.Name) ===" -ForegroundColor Cyan
+    $cmd = "call `"$vcvars`" 2>nul && cd /d `"$work`" && cl /nologo /EHsc /O2 /std:c++17 $($t.Name) && .\$exe.exe"
+    cmd /c $cmd
+    if ($LASTEXITCODE -ne 0) { $fail++; Write-Host "$($t.Name) FAILED (exit $LASTEXITCODE)" -ForegroundColor Red }
+}
+
+if ($fail) { Write-Host "`n$fail test file(s) failed" -ForegroundColor Red; exit 1 }
+Write-Host "`nAll test files passed" -ForegroundColor Green

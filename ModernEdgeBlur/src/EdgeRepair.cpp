@@ -40,9 +40,12 @@
 #define NOMINMAX
 #include "EdgeRepair.h"
 #include "common/MM_Common.h"
+#include "common/MM_DistanceField.h"
+#include "common/MM_CoreMatte.h"
 
 #include <cmath>
 #include <cstring>
+#include <cstdint>
 #include <algorithm>
 #include <vector>
 #include <new>
@@ -53,11 +56,11 @@
 // Exposed nowhere — a fixed sensible value per the brief.
 static const float ER_TEXTURE_BLUR_RADIUS = 8.0f;
 
-// Tiling debug visualization. 1 = View Mode renders a seam-test pattern that
-// depends on inflated neighbors (see ER_TileDebugRow); 0 = passthrough. Left
-// ON for the Stage 1 gate; flipped to 0 (or removed) once inflation is signed
-// off and Stage 2's real view modes arrive.
-#define ER_TILING_DEBUG 1
+// Tiling debug visualization. 1 = every View Mode renders the Stage 1 seam-
+// test pattern (see ER_TileDebugRow); 0 = the real pipeline/view modes run.
+// Inflation was signed off at the Stage 1 gate, so this is OFF now; flip to 1
+// only to re-run the seam test.
+#define ER_TILING_DEBUG 0
 
 // ---------------------------------------------------------------------------
 // Inflation radius from the current params. Only OUTWARD reach matters for
@@ -260,6 +263,80 @@ ER_UnpackRow(void *refconPV, A_long /*thread_indexL*/, A_long y, A_long /*iterat
 } // extern "C"
 
 // ---------------------------------------------------------------------------
+// View-mode visualizations (Stage 2). Both read a full-inflated-source plane
+// (core matte, or distance field) and write the OUTPUT region of it, mapped
+// through the srcOX/srcOY origin offset. Computing on the inflated source and
+// cropping to output is what keeps the field correct right up to the output
+// edge — distances there depend on core pixels in the inflated border.
+// ---------------------------------------------------------------------------
+
+// Core Matte: white where core, black elsewhere. Opaque greyscale.
+struct ER_CoreViewRefcon {
+    const uint8_t  *core;       // srcW*srcH 0/1
+    A_long          srcW;
+    A_long          srcOX, srcOY;
+    PF_EffectWorld *out_world;
+    PF_PixelFormat  fmt;
+    A_long          outW;
+};
+
+// Distance Field: normalized d/maxDisplay → greyscale (0 at core, brightening
+// outward, clamped to white past maxDisplay). Opaque.
+struct ER_DistViewRefcon {
+    const float    *dist;       // srcW*srcH
+    A_long          srcW;
+    A_long          srcOX, srcOY;
+    float           invMaxDisplay;   // 1 / normalization distance
+    PF_EffectWorld *out_world;
+    PF_PixelFormat  fmt;
+    A_long          outW;
+};
+
+extern "C" {
+
+static PF_Err
+ER_CoreViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iterationsL*/)
+{
+    const ER_CoreViewRefcon *rc = static_cast<const ER_CoreViewRefcon*>(refconPV);
+    const A_long W = rc->outW;
+    const uint8_t *srow = rc->core + (size_t)(oy + rc->srcOY) * rc->srcW + rc->srcOX;
+
+    thread_local std::vector<float> rowv;
+    if ((A_long)rowv.size() < W * 4) rowv.resize((size_t)W * 4);
+    float *dst = rowv.data();
+    for (A_long ox = 0; ox < W; ++ox, dst += 4) {
+        const float v = srow[ox] ? 1.f : 0.f;
+        dst[0] = 1.f; dst[1] = v; dst[2] = v; dst[3] = v;
+    }
+
+    void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
+    mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+    return PF_Err_NONE;
+}
+
+static PF_Err
+ER_DistViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iterationsL*/)
+{
+    const ER_DistViewRefcon *rc = static_cast<const ER_DistViewRefcon*>(refconPV);
+    const A_long W = rc->outW;
+    const float *srow = rc->dist + (size_t)(oy + rc->srcOY) * rc->srcW + rc->srcOX;
+
+    thread_local std::vector<float> rowv;
+    if ((A_long)rowv.size() < W * 4) rowv.resize((size_t)W * 4);
+    float *dst = rowv.data();
+    for (A_long ox = 0; ox < W; ++ox, dst += 4) {
+        const float v = mm::ClampF(srow[ox] * rc->invMaxDisplay, 0.f, 1.f);
+        dst[0] = 1.f; dst[1] = v; dst[2] = v; dst[3] = v;
+    }
+
+    void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
+    mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+    return PF_Err_NONE;
+}
+
+} // extern "C"
+
+// ---------------------------------------------------------------------------
 // Plugin entry points
 // ---------------------------------------------------------------------------
 
@@ -455,10 +532,10 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         }
 
 #if ER_TILING_DEBUG
+        // Stage 1 seam test (disabled by default now that Stage 2's real view
+        // modes exist). Flip ER_TILING_DEBUG to 1 to re-run it — it overrides
+        // all view modes.
         {
-            // maxRadius for the seam test == the inflation we requested. If
-            // inflation is correct this samples real data on every side; if
-            // not, a seam appears at the tile boundaries.
             ER_TileDebugRefcon rc;
             rc.src = srcBuf.data(); rc.srcW = srcW; rc.srcH = srcH;
             rc.srcOX = srcOX; rc.srcOY = srcOY;
@@ -467,12 +544,76 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
             mm::ForEachRow(in_data, outH, &rc, ER_TileDebugRow);
         }
 #else
-        {
-            ER_PassRefcon rc;
-            rc.src = srcBuf.data(); rc.srcW = srcW;
-            rc.srcOX = srcOX; rc.srcOY = srcOY;
-            rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
-            mm::ForEachRow(in_data, outH, &rc, ER_PassRow);
+        // -----------------------------------------------------------------
+        // Stage 2 pipeline (partial): core matte + the single driving
+        // distance field, computed over the FULL inflated source so the
+        // field is correct right to the output edge, then cropped to output
+        // by the view callbacks. Result and Extended Colour are still
+        // passthrough (their pipeline arrives in Stages 3-4); Core Matte and
+        // Distance Field are real.
+        // -----------------------------------------------------------------
+        const size_t srcN = (size_t)srcW * srcH;
+
+        // Extract the straight-alpha plane from the inflated source. (AE
+        // hands premultiplied pixels; alpha itself is identical either way,
+        // so no unpremult is needed just to threshold it.)
+        std::vector<float>   alphaPlane;
+        std::vector<uint8_t> core;
+        std::vector<float>   dist;
+        bool haveField = false;
+        try {
+            alphaPlane.resize(srcN);
+            core.resize(srcN);
+            dist.resize(srcN);
+        } catch (const std::bad_alloc &) {
+            err = PF_Err_OUT_OF_MEMORY;
+            goto cleanup;
+        }
+        for (size_t i = 0; i < srcN; ++i) alphaPlane[i] = srcBuf[i * 4 + 0];
+
+        // Core matte: threshold at 0.5, signed Erode. Then the driving field.
+        mm::BuildCoreMatte(alphaPlane.data(), core.data(), (int)srcW, (int)srcH,
+                           0.5f, (float)p.erodeF);
+        haveField = mm::CoreDistanceField(core.data(), dist.data(), (int)srcW, (int)srcH);
+
+        switch (p.viewL) {
+            case ER_VIEW_CORE_MATTE: {
+                ER_CoreViewRefcon rc;
+                rc.core = core.data(); rc.srcW = srcW;
+                rc.srcOX = srcOX; rc.srcOY = srcOY;
+                rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
+                mm::ForEachRow(in_data, outH, &rc, ER_CoreViewRow);
+                break;
+            }
+            case ER_VIEW_DISTANCE_FIELD: {
+                if (!haveField) {
+                    // Empty core → field is "infinitely far" everywhere;
+                    // show black rather than garbage.
+                    for (size_t i = 0; i < srcN; ++i) dist[i] = 1e20f;
+                }
+                // Normalize so the visualization spans 0..Extend (the band the
+                // pipeline actually uses); fall back to a sane constant if
+                // Extend is ~0 so the view isn't all-white.
+                const float norm = (float)p.extendF >= 1.f ? (float)p.extendF : 64.f;
+                ER_DistViewRefcon rc;
+                rc.dist = dist.data(); rc.srcW = srcW;
+                rc.srcOX = srcOX; rc.srcOY = srcOY;
+                rc.invMaxDisplay = 1.f / norm;
+                rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
+                mm::ForEachRow(in_data, outH, &rc, ER_DistViewRow);
+                break;
+            }
+            case ER_VIEW_RESULT:
+            case ER_VIEW_EXTENDED_COLOUR:
+            default: {
+                // Passthrough until Stages 3-4 wire up fill + composite.
+                ER_PassRefcon rc;
+                rc.src = srcBuf.data(); rc.srcW = srcW;
+                rc.srcOX = srcOX; rc.srcOY = srcOY;
+                rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
+                mm::ForEachRow(in_data, outH, &rc, ER_PassRow);
+                break;
+            }
         }
 #endif
     }
