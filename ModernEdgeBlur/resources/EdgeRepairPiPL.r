@@ -10,7 +10,7 @@
 #define	MINOR_VERSION	0
 #define	BUG_VERSION		0
 #define	STAGE_VERSION	0	// PF_Stage_DEVELOP (enum value 0) — must match EdgeRepair.h
-#define	BUILD_VERSION	3
+#define	BUILD_VERSION	4
 
 #ifndef AE_OS_WIN
 	#include <AE_General.r>

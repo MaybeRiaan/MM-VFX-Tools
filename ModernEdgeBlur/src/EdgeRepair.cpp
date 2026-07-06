@@ -125,28 +125,41 @@ ReadParams(PF_InData *in_data, ER_Params *p)
 }
 
 // ---------------------------------------------------------------------------
-// Tiling debug pass. For each output pixel it samples the input alpha at
-// ±maxRadius horizontally and vertically and takes the max, i.e. "is there
-// any matte within maxRadius of me?" That answer is smooth across the whole
-// frame ONLY if every output pixel can actually read maxRadius past itself —
-// which is exactly what inflation provides. If PreRender under-inflated, the
-// pixels near a tile's edge get clamped/black neighbors from outside their
-// tile and the max drops discontinuously → a hard seam at the tile boundary,
-// identical in position to AE's render tiling. A correct inflation shows a
-// smooth dilated-alpha halo with no seam at any zoom, in RAM preview or the
-// render queue.
+// Tiling debug pass — a true circular dilation of the input alpha by radius R.
+// For each output pixel it takes the MAX input alpha over the disc of radius R
+// centered on that pixel, i.e. "is there any matte within R of me?" Because
+// dilation by a disc is rotationally symmetric, a filled circle grown by R
+// stays a perfect circle — so the ONLY way the halo can show a straight-edged
+// discontinuity is a real render-tile seam (input data missing outside a
+// tile because PreRender under-inflated), never the sampler's own
+// neighborhood shape.
+//
+// [Why not the cheap 4-tap axis sampler used earlier: sampling only (x±R,y)
+// and (x,y±R) traces a DIAMOND, not a disc, so it drew faceted/octagonal
+// halos that were easy to mistake for seams. A correct-inflation frame looked
+// buggy. The disc removes that ambiguity — see the Stage 1 gate notes.]
+//
+// Cost: rather than the full O(R^2) disc (~785K taps/pixel at R=500), we scan
+// each row offset dy in [-R,R] and sample only the disc's horizontal EXTENT
+// endpoints at that row, (sx ± floor(sqrt(R^2 - dy^2)), sy+dy). ~2R taps/pixel
+// (~1000 at R=500) — fine for a debug view. This is EXACT for a convex opaque
+// matte (the endpoints are the extreme reach on each row, so if the disc
+// overlaps the shape it overlaps an endpoint) — which is exactly the circle
+// probe the gate relies on. For a non-convex matte with an opaque sliver
+// sitting strictly between an endpoint and center, this can under-report on
+// that row; harmless for the gate (use the circle as the shape oracle), and
+// the whole debug view is removed in Stage 2 regardless.
 //
 // srcOX/srcOY map an OUTPUT pixel to its coordinate in the (larger, inflated)
-// source buffer: source(x,y) holds output(x - srcOX, y - srcOY)... i.e. the
-// output pixel (ox,oy) lives at source (ox+srcOX, oy+srcOY). Sampling is
-// clamped to the source buffer bounds, so at the true layer edge it degrades
-// gracefully instead of reading garbage.
+// source buffer: output pixel (ox,oy) lives at source (ox+srcOX, oy+srcOY).
+// Sampling is clamped to the source buffer bounds, so at the true layer edge
+// it degrades gracefully instead of reading garbage.
 // ---------------------------------------------------------------------------
 struct ER_TileDebugRefcon {
     const float    *src;        // inflated source, srcW*srcH*4 ARGB float
     A_long          srcW, srcH;
     A_long          srcOX, srcOY;   // output→source origin offset (>= 0)
-    A_long          radius;         // maxRadius sampled on each axis
+    A_long          radius;         // R: disc radius == maxRadius
     PF_EffectWorld *out_world;
     PF_PixelFormat  fmt;
     A_long          outW;
@@ -158,38 +171,32 @@ static PF_Err
 ER_TileDebugRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iterationsL*/)
 {
     const ER_TileDebugRefcon *rc = static_cast<const ER_TileDebugRefcon*>(refconPV);
-    const A_long W = rc->outW;
-    const A_long R = rc->radius;
+    const A_long W  = rc->outW;
+    const A_long R  = rc->radius;
+    const A_long R2 = R * R;
     const A_long sy = oy + rc->srcOY;
 
     thread_local std::vector<float> rowv;
     if ((A_long)rowv.size() < W * 4) rowv.resize((size_t)W * 4);
     float *dst = rowv.data();
 
-    // Precompute the clamped vertical neighbor rows once per output row.
-    const A_long syUp = mm::ClampL(sy - R, 0, rc->srcH - 1);
-    const A_long syDn = mm::ClampL(sy + R, 0, rc->srcH - 1);
-    const float *rowC  = rc->src + (size_t)sy   * rc->srcW * 4;
-    const float *rowUp = rc->src + (size_t)syUp * rc->srcW * 4;
-    const float *rowDn = rc->src + (size_t)syDn * rc->srcW * 4;
-
     for (A_long ox = 0; ox < W; ++ox, dst += 4) {
-        const A_long sx   = ox + rc->srcOX;
-        const A_long sxL  = mm::ClampL(sx - R, 0, rc->srcW - 1);
-        const A_long sxR  = mm::ClampL(sx + R, 0, rc->srcW - 1);
+        const A_long sx = ox + rc->srcOX;
 
-        // Alpha at the five taps (self + 4 axis neighbors at ±R).
-        const float aC = rowC [(size_t)sx  * 4 + 0];
-        const float aL = rowC [(size_t)sxL * 4 + 0];
-        const float aR = rowC [(size_t)sxR * 4 + 0];
-        const float aU = rowUp[(size_t)sx  * 4 + 0];
-        const float aD = rowDn[(size_t)sx  * 4 + 0];
+        float m = rc->src[((size_t)sy * rc->srcW + sx) * 4 + 0]; // center tap
+        for (A_long dy = -R; dy <= R && m < 1.f; ++dy) {
+            const A_long syy = mm::ClampL(sy + dy, 0, rc->srcH - 1);
+            const A_long dx  = (A_long)std::floor(std::sqrt((double)(R2 - dy * dy)));
+            const float *row = rc->src + (size_t)syy * rc->srcW * 4;
 
-        float m = aC;
-        if (aL > m) m = aL;
-        if (aR > m) m = aR;
-        if (aU > m) m = aU;
-        if (aD > m) m = aD;
+            const A_long sxL = mm::ClampL(sx - dx, 0, rc->srcW - 1);
+            const float  aL  = row[(size_t)sxL * 4 + 0];
+            if (aL > m) m = aL;
+
+            const A_long sxR = mm::ClampL(sx + dx, 0, rc->srcW - 1);
+            const float  aR  = row[(size_t)sxR * 4 + 0];
+            if (aR > m) m = aR;
+        }
 
         // Greyscale, fully opaque so the pattern is visible over any comp bg.
         dst[0] = 1.f; dst[1] = m; dst[2] = m; dst[3] = m;
