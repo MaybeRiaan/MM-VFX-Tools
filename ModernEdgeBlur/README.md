@@ -1,4 +1,8 @@
-# Modern Edge Blur
+# Modern Edge Blur (MM plugin suite)
+
+This repo builds a small suite of After Effects "MM" category plugins from one CMake project: **Modern Edge Blur** (documented below, shipped/working) and **Edge Repair** (in progress — edge extension/decontamination; see [docs/EdgeRepair.md](docs/EdgeRepair.md) for its full spec and staged-build status). The two are independent plugins that happen to share a build system and a small common helper lib (`src/common/`) — Modern Edge Blur's own plugin code is never modified for Edge Repair's sake.
+
+## Modern Edge Blur
 
 An After Effects plugin that softens the edges of keyed or masked layers with a Gaussian blur, while keeping the interior sharp. Replacement for Red Giant's discontinued Edge Blur plugin.
 
