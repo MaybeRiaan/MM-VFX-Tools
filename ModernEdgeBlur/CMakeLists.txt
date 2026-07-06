@@ -101,4 +101,15 @@ add_meb_plugin(ModernEdgeBlur "${RESOURCES_DIR}/ModernEdgeBlurPiPL.r"
     "${SRC_DIR}/ModernEdgeBlur.cpp"
     "${SRC_DIR}/ModernEdgeBlur_Strings.cpp")
 
-message(STATUS "ModernEdgeBlur.aex → ${AE_PLUGINS_DIR}")
+# Shared suite helpers — compiled into each plugin target that lists them,
+# same pattern as SDK_SOURCES. ModernEdgeBlur keeps its private copies for
+# now (could migrate later; deliberately untouched).
+set(MM_COMMON_SOURCES
+    "${SRC_DIR}/common/MM_Common.cpp")
+
+add_meb_plugin(EdgeRepair "${RESOURCES_DIR}/EdgeRepairPiPL.r"
+    "${SRC_DIR}/EdgeRepair.cpp"
+    "${SRC_DIR}/EdgeRepair_Strings.cpp"
+    ${MM_COMMON_SOURCES})
+
+message(STATUS "ModernEdgeBlur.aex, EdgeRepair.aex → ${AE_PLUGINS_DIR}")
