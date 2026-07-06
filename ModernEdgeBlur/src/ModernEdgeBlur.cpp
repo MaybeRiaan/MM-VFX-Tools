@@ -524,9 +524,10 @@ static void GaussBlurPlane(float *buf, A_long W, A_long H, const std::vector<flo
 }
 
 // ---------------------------------------------------------------------------
-// TEMPORARY DEBUG LOGGING — kept intentionally for now (useful during v1.3
-// testing); revisit before an actual release build. Provides the per-phase
-// timing breakdown used throughout Priority 3's performance work.
+// DEBUG LOGGING — compiled out by default (MEB_DEBUG_LOG 0) for distribution
+// builds. Flip to 1 to re-enable the per-phase timing breakdown and the
+// EDGE/PHASE4 pixel dumps for the next performance pass — all call sites
+// stay in place; the bodies and the dump blocks become no-ops when disabled.
 //
 // Log lines are buffered per-thread in memory (DebugLog) and flushed to disk
 // in one write per SmartRender call (DebugLogFlush, called at the cleanup:
@@ -541,8 +542,11 @@ static void GaussBlurPlane(float *buf, A_long W, A_long H, const std::vector<flo
 // awkward to hand this build to someone else's PC). Falls back to %TEMP% if
 // that folder isn't writable.
 // ---------------------------------------------------------------------------
+#define MEB_DEBUG_LOG 0   // 1 = per-frame timing log + pixel dumps, 0 = silent
+
 using MEB_Clock = std::chrono::steady_clock;
 
+#if MEB_DEBUG_LOG
 static thread_local std::string g_logBuffer;
 
 // Folder the plugin .aex itself lives in, or empty if it can't be determined.
@@ -600,6 +604,12 @@ static void DebugLogTiming(const char *phase, MEB_Clock::time_point t0, MEB_Cloc
     snprintf(buf, sizeof(buf), "TIMING: %-12s %9.2f ms", phase, ms);
     DebugLog(buf);
 }
+#else
+// Logging disabled — inline no-ops, call sites unchanged.
+static inline void DebugLog(const char *) {}
+static inline void DebugLogFlush() {}
+static inline void DebugLogTiming(const char *, MEB_Clock::time_point, MEB_Clock::time_point) {}
+#endif // MEB_DEBUG_LOG
 
 // ---------------------------------------------------------------------------
 // Separable Gaussian blur of an INTERLEAVED 4-channel float buffer [H*W*4],
@@ -1129,16 +1139,17 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         }
         DebugLogTiming("Ingest", t0, MEB_Clock::now());
 
-        // TEMPORARY DIAGNOSTIC — dump (alpha, R, G, B) across the first
-        // soft-edge transition found on the middle row. NOTE: since the
-        // ingest fusion this reads POST-zero data (RGB already zeroed at the
-        // a<=0 cliff), not the raw AE delivery — the original straight-vs-
-        // premultiplied question this answered is settled (straight).
-        // g_edgeY/g_edgeX are reused further down (Phase 4) to dump w,
-        // Blur Amount's alpha, and the final composited values at the SAME
-        // tracked pixel, to check whether out_rgb and out_alpha stay
-        // consistent with each other through Phase 3/4.
+        // DIAGNOSTIC (compiled out unless MEB_DEBUG_LOG) — dump (alpha, R,
+        // G, B) across the first soft-edge transition found on the middle
+        // row. NOTE: since the ingest fusion this reads POST-zero data (RGB
+        // already zeroed at the a<=0 cliff), not the raw AE delivery — the
+        // original straight-vs-premultiplied question this answered is
+        // settled (straight). g_edgeY/g_edgeX are reused further down
+        // (Phase 4) to dump w, Blur Amount's alpha, and the final composited
+        // values at the SAME tracked pixel, to check whether out_rgb and
+        // out_alpha stay consistent with each other through Phase 3/4.
         A_long g_edgeY = -1, g_edgeX = -1;
+#if MEB_DEBUG_LOG
         {
             const A_long midY = outH / 2;
             const float *row = sharp_buf + (size_t)midY * outW * 4;
@@ -1169,6 +1180,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 DebugLog("EDGE DUMP: no soft/transition edge found on middle row (subject may not cross it)");
             }
         }
+#endif // MEB_DEBUG_LOG
 
         // Phase 1: Shift Edge — stubbed, only runs when non-zero (default=0).
         // Runs BEFORE the zero-RGB/derive work: it changes the alpha shape
@@ -1311,15 +1323,16 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         }
         DebugLogTiming("Composite", t0, MEB_Clock::now());
 
-        // TEMPORARY DIAGNOSTIC — dump w, Blur Amount's alpha, sharp/blurred
-        // RGB, and the final composited RGBA across the same tracked edge
-        // pixel range as the EDGE DUMP above. Checks whether out_rgb and
-        // out_alpha stay consistent (out_alpha comes only from Blur Amount's
-        // blur, while the RGB blend weight w comes from Blend Radius's
-        // separate erosion+feather — if the two disagree near the edge,
-        // out_rgb can show meaningful colour while out_alpha has already
-        // dropped near zero, which is itself an invalid-premult condition
-        // independent of anything Phase 2 does). Remove once answered.
+        // DIAGNOSTIC (compiled out unless MEB_DEBUG_LOG) — dump w, Blur
+        // Amount's alpha, sharp/blurred RGB, and the final composited RGBA
+        // across the same tracked edge pixel range as the EDGE DUMP above.
+        // Checks whether out_rgb and out_alpha stay consistent (out_alpha
+        // comes only from Blur Amount's blur, while the RGB blend weight w
+        // comes from Blend Radius's separate erosion+feather — if the two
+        // disagree near the edge, out_rgb can show meaningful colour while
+        // out_alpha has already dropped near zero, which is itself an
+        // invalid-premult condition independent of anything Phase 2 does).
+#if MEB_DEBUG_LOG
         if (g_edgeX >= 0 && !trackedOutRow.empty()) {
             char buf[320];
             snprintf(buf, sizeof(buf), "PHASE4 DUMP: row=%ld", (long)g_edgeY);
@@ -1337,6 +1350,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 DebugLog(buf);
             }
         }
+#endif // MEB_DEBUG_LOG
 
         DebugLogTiming("TOTAL", t_total0, MEB_Clock::now());
         DebugLog("---");
