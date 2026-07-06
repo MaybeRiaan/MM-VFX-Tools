@@ -1,53 +1,252 @@
-/*  EdgeRepair.cpp — Stage 0 skeleton.
+/*  EdgeRepair.cpp — Stage 1: params + inflated checkout + tiling debug mode.
 
     Edge Repair extends trusted interior color across contaminated matte
     edges (keying halos, motion-blur rims) along a single per-frame Euclidean
     distance field: core matte → EDT → pull–push fill → distance-weighted
-    blend with frequency-separated texture preserve → optional alpha choke.
-    Pure stream operator: RGBA in, RGBA out, RGB modified, alpha untouched
-    unless the user explicitly chokes it. See the build brief in the repo
-    docs for the locked seven-parameter model.
+    blend with frequency-separated Detail (texture preserve) → optional alpha
+    choke. Pure stream operator: RGBA in, RGBA out, RGB modified, alpha
+    untouched unless the user explicitly chokes it. Five locked params
+    (Erode/Extend/Detail/Alpha Choke/View Mode, disk IDs 101-105); premult is
+    internal-only, no knob.
 
-    THIS STAGE: pure passthrough. No params, no processing — SmartFX
-    pre-render/render plumbing only, output byte-identical to input at
-    8/16/32bpc. Each later stage layers one subsystem onto this skeleton.
+    THIS STAGE: the five params are registered and the inflated PreRender
+    checkout is implemented, but no image algorithm runs yet — every View
+    Mode renders passthrough. The one thing that DOES run is the tiling debug
+    visualization (compile-time switch ER_TILING_DEBUG), whose whole job is to
+    prove the inflation is correct: it makes any missing inflated border show
+    up as a hard seam at tile boundaries. Stages 2-4 replace the passthrough
+    body with the real pipeline.
 
-    Key divergence from ModernEdgeBlur (the suite's reference plugin), from
-    Stage 1 onward: ModernEdgeBlur deliberately does NO input-rect inflation;
-    this plugin MUST inflate its checkout by the full influence radius
-    (Erode + Extend + |Alpha Choke| + texture blur) or tile seams appear that
-    differ between RAM preview and final render. Stage 0 checks out the
-    request rect unmodified — inflation lands with the params in Stage 1.
+    THE #1 CORRECTNESS PROPERTY — input-rect inflation. Unlike ModernEdgeBlur
+    (which deliberately does NO inflation), every pixel of Edge Repair's
+    output depends on input pixels up to `maxRadius` away:
+        maxRadius = ceil( max(Erode,0) + max(Extend,0) + |AlphaChoke|
+                          + ER_TEXTURE_BLUR_RADIUS )
+    (Erode/Choke clamped at 0 on the outward side — only their outward reach
+    matters for how far we must READ; the pull–push fill runs unbounded but is
+    only USED out to Extend, so Extend is what governs the read radius.)
+    PreRender expands the checkout request rect by maxRadius on all sides
+    (AE clamps to available layer data); SmartRender then addresses the larger
+    source world through the origin offset AE reports. Get this wrong and
+    seams appear that differ between RAM preview and final render — the single
+    hardest bug in the project, which is why Stage 1 gates on it explicitly.
 
-    MFR-safe: no mutable global/static state anywhere in this plugin.
+    MFR-safe: no mutable global/static state anywhere in this plugin. The
+    inflation amount and rects computed in PreRender are stashed in
+    pre_render_data (heap, owned by AE, freed in our handler) and read back in
+    SmartRender — never in a global.
 */
 
 #define NOMINMAX
 #include "EdgeRepair.h"
 #include "common/MM_Common.h"
 
+#include <cmath>
 #include <cstring>
+#include <algorithm>
+#include <vector>
+#include <new>
+
+// Fixed texture-frequency-split blur radius (px). The Detail high-pass in
+// Stage 4 subtracts a small Gaussian of this radius from the plate; it
+// contributes to the inflation radius because that Gaussian reads neighbors.
+// Exposed nowhere — a fixed sensible value per the brief.
+static const float ER_TEXTURE_BLUR_RADIUS = 8.0f;
+
+// Tiling debug visualization. 1 = View Mode renders a seam-test pattern that
+// depends on inflated neighbors (see ER_TileDebugRow); 0 = passthrough. Left
+// ON for the Stage 1 gate; flipped to 0 (or removed) once inflation is signed
+// off and Stage 2's real view modes arrive.
+#define ER_TILING_DEBUG 1
 
 // ---------------------------------------------------------------------------
-// Passthrough row copy — raw bytes, so output is bit-identical to input at
-// every depth (no unpack/repack rounding anywhere in the path).
+// Inflation radius from the current params. Only OUTWARD reach matters for
+// how far output pixels must read into the input: Extend governs the used
+// band, Erode/Choke contribute their magnitudes (either sign moves the edge,
+// and the render region must cover the moved edge either way), plus the
+// texture blur's own kernel reach. Returned in pixels, ceil'd, >= 0.
 // ---------------------------------------------------------------------------
+static A_long ER_InflateRadius(const ER_Params &p)
+{
+    const double reach =
+        std::max(0.0, std::abs((double)p.erodeF)) +
+        std::max(0.0, (double)p.extendF) +
+        std::abs((double)p.chokeF) +
+        (double)ER_TEXTURE_BLUR_RADIUS;
+    A_long r = (A_long)std::ceil(reach);
+    return r < 0 ? 0 : r;
+}
 
-struct ER_CopyRefcon {
-    const PF_EffectWorld *src;
-    PF_EffectWorld       *dst;
-    size_t                bytesPerRow;   // width * PixelBytes(fmt), NOT rowbytes
+// Stashed by PreRender, read by SmartRender. Just the inflation amount — the
+// source-world origin offset is recovered from the checked-out world itself
+// in SmartRender, so nothing here needs to survive that isn't a plain scalar.
+typedef struct {
+    A_long inflate;   // px added on every side in PreRender
+} ER_PreRenderData;
+
+// AE calls this to free the block we handed it via
+// extra->output->pre_render_data (see PreRender). Signature is fixed by
+// PF_DeletePreRenderDataFunc.
+extern "C" void
+ER_DeletePreRenderData(void *pre_render_dataPV)
+{
+    if (pre_render_dataPV) free(pre_render_dataPV);
+}
+
+// ---------------------------------------------------------------------------
+// Param read. current_time/time_step/time_scale come straight from in_data.
+// ---------------------------------------------------------------------------
+static PF_Err
+ReadParams(PF_InData *in_data, ER_Params *p)
+{
+    PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
+    PF_ParamDef def;
+
+    #define ER_GET_FLOAT(IDX, FLD) \
+        AEFX_CLR_STRUCT(def); \
+        ERR(PF_CHECKOUT_PARAM(in_data, IDX, in_data->current_time, \
+            in_data->time_step, in_data->time_scale, &def)); \
+        p->FLD = def.u.fs_d.value; \
+        ERR2(PF_CHECKIN_PARAM(in_data, &def));
+
+    ER_GET_FLOAT(ER_ERODE,  erodeF)
+    ER_GET_FLOAT(ER_EXTEND, extendF)
+    ER_GET_FLOAT(ER_DETAIL, detailF)
+    ER_GET_FLOAT(ER_CHOKE,  chokeF)
+    #undef ER_GET_FLOAT
+
+    AEFX_CLR_STRUCT(def);
+    ERR(PF_CHECKOUT_PARAM(in_data, ER_VIEW, in_data->current_time,
+        in_data->time_step, in_data->time_scale, &def));
+    p->viewL = def.u.pd.value;   // popup: 1-based index
+    ERR2(PF_CHECKIN_PARAM(in_data, &def));
+
+    return err;
+}
+
+// ---------------------------------------------------------------------------
+// Tiling debug pass. For each output pixel it samples the input alpha at
+// ±maxRadius horizontally and vertically and takes the max, i.e. "is there
+// any matte within maxRadius of me?" That answer is smooth across the whole
+// frame ONLY if every output pixel can actually read maxRadius past itself —
+// which is exactly what inflation provides. If PreRender under-inflated, the
+// pixels near a tile's edge get clamped/black neighbors from outside their
+// tile and the max drops discontinuously → a hard seam at the tile boundary,
+// identical in position to AE's render tiling. A correct inflation shows a
+// smooth dilated-alpha halo with no seam at any zoom, in RAM preview or the
+// render queue.
+//
+// srcOX/srcOY map an OUTPUT pixel to its coordinate in the (larger, inflated)
+// source buffer: source(x,y) holds output(x - srcOX, y - srcOY)... i.e. the
+// output pixel (ox,oy) lives at source (ox+srcOX, oy+srcOY). Sampling is
+// clamped to the source buffer bounds, so at the true layer edge it degrades
+// gracefully instead of reading garbage.
+// ---------------------------------------------------------------------------
+struct ER_TileDebugRefcon {
+    const float    *src;        // inflated source, srcW*srcH*4 ARGB float
+    A_long          srcW, srcH;
+    A_long          srcOX, srcOY;   // output→source origin offset (>= 0)
+    A_long          radius;         // maxRadius sampled on each axis
+    PF_EffectWorld *out_world;
+    PF_PixelFormat  fmt;
+    A_long          outW;
 };
 
 extern "C" {
 
 static PF_Err
-ER_CopyRow(void *refconPV, A_long /*thread_indexL*/, A_long y, A_long /*iterationsL*/)
+ER_TileDebugRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iterationsL*/)
 {
-    const ER_CopyRefcon *rc = static_cast<const ER_CopyRefcon*>(refconPV);
-    const void *srcRow = reinterpret_cast<const char*>(rc->src->data) + (size_t)y * rc->src->rowbytes;
-    void       *dstRow = reinterpret_cast<char*>(rc->dst->data)       + (size_t)y * rc->dst->rowbytes;
-    std::memcpy(dstRow, srcRow, rc->bytesPerRow);
+    const ER_TileDebugRefcon *rc = static_cast<const ER_TileDebugRefcon*>(refconPV);
+    const A_long W = rc->outW;
+    const A_long R = rc->radius;
+    const A_long sy = oy + rc->srcOY;
+
+    thread_local std::vector<float> rowv;
+    if ((A_long)rowv.size() < W * 4) rowv.resize((size_t)W * 4);
+    float *dst = rowv.data();
+
+    // Precompute the clamped vertical neighbor rows once per output row.
+    const A_long syUp = mm::ClampL(sy - R, 0, rc->srcH - 1);
+    const A_long syDn = mm::ClampL(sy + R, 0, rc->srcH - 1);
+    const float *rowC  = rc->src + (size_t)sy   * rc->srcW * 4;
+    const float *rowUp = rc->src + (size_t)syUp * rc->srcW * 4;
+    const float *rowDn = rc->src + (size_t)syDn * rc->srcW * 4;
+
+    for (A_long ox = 0; ox < W; ++ox, dst += 4) {
+        const A_long sx   = ox + rc->srcOX;
+        const A_long sxL  = mm::ClampL(sx - R, 0, rc->srcW - 1);
+        const A_long sxR  = mm::ClampL(sx + R, 0, rc->srcW - 1);
+
+        // Alpha at the five taps (self + 4 axis neighbors at ±R).
+        const float aC = rowC [(size_t)sx  * 4 + 0];
+        const float aL = rowC [(size_t)sxL * 4 + 0];
+        const float aR = rowC [(size_t)sxR * 4 + 0];
+        const float aU = rowUp[(size_t)sx  * 4 + 0];
+        const float aD = rowDn[(size_t)sx  * 4 + 0];
+
+        float m = aC;
+        if (aL > m) m = aL;
+        if (aR > m) m = aR;
+        if (aU > m) m = aU;
+        if (aD > m) m = aD;
+
+        // Greyscale, fully opaque so the pattern is visible over any comp bg.
+        dst[0] = 1.f; dst[1] = m; dst[2] = m; dst[3] = m;
+    }
+
+    void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
+    mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+    return PF_Err_NONE;
+}
+
+} // extern "C"
+
+// ---------------------------------------------------------------------------
+// Passthrough row: copy the (offset) source region straight to output via
+// unpack→repack so it works regardless of the source origin offset. Used by
+// every non-debug View Mode this stage.
+// ---------------------------------------------------------------------------
+struct ER_PassRefcon {
+    const float    *src;        // inflated source ARGB float
+    A_long          srcW;
+    A_long          srcOX, srcOY;
+    PF_EffectWorld *out_world;
+    PF_PixelFormat  fmt;
+    A_long          outW;
+};
+
+extern "C" {
+
+static PF_Err
+ER_PassRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iterationsL*/)
+{
+    const ER_PassRefcon *rc = static_cast<const ER_PassRefcon*>(refconPV);
+    const float *srcRow = rc->src + ((size_t)(oy + rc->srcOY) * rc->srcW + rc->srcOX) * 4;
+    void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
+    mm::PackRow(srcRow, outRow, rc->outW, rc->fmt);
+    return PF_Err_NONE;
+}
+
+} // extern "C"
+
+// Unpack the whole (inflated) source world into a contiguous ARGB float
+// buffer. One threaded pass; the rest of the pipeline works off this buffer.
+struct ER_UnpackRefcon {
+    const PF_EffectWorld *world;
+    PF_PixelFormat        fmt;
+    float                *dst;    // srcW*srcH*4
+    A_long                srcW;
+};
+
+extern "C" {
+
+static PF_Err
+ER_UnpackRow(void *refconPV, A_long /*thread_indexL*/, A_long y, A_long /*iterationsL*/)
+{
+    const ER_UnpackRefcon *rc = static_cast<const ER_UnpackRefcon*>(refconPV);
+    const void *srcRow = reinterpret_cast<const char*>(rc->world->data) + (size_t)y * rc->world->rowbytes;
+    mm::UnpackRow(srcRow, rc->dst + (size_t)y * rc->srcW * 4, rc->srcW, rc->fmt);
     return PF_Err_NONE;
 }
 
@@ -73,9 +272,7 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
     out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION,
                                       STAGE_VERSION, BUILD_VERSION);
     // Must match resources/EdgeRepairPiPL.r literals exactly (0x02000440 /
-    // 0x08001400) or AE rejects with a silent/misleading mismatch error.
-    // PIX_INDEPENDENT + USE_OUTPUT_EXTENT follow ModernEdgeBlur's precedent;
-    // the rest are the brief's required set.
+    // 0x08001400) or AE rejects with a version/outflags mismatch.
     out_data->out_flags  = PF_OutFlag_DEEP_COLOR_AWARE |
                            PF_OutFlag_PIX_INDEPENDENT  |
                            PF_OutFlag_USE_OUTPUT_EXTENT;
@@ -88,24 +285,80 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 static PF_Err
 ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerDef *)
 {
-    // Stage 0: input layer only. The locked seven params (disk IDs 101-107)
-    // are registered in Stage 1.
+    PF_Err      err = PF_Err_NONE;
+    PF_ParamDef def;
+
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX("Erode",
+        ER_ERODE_MIN, ER_ERODE_MAX, ER_ERODE_MIN, ER_ERODE_MAX,
+        ER_ERODE_DFLT, PF_Precision_HUNDREDTHS, 0, 0, ER_ERODE_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX("Extend",
+        ER_EXTEND_MIN, ER_EXTEND_MAX, ER_EXTEND_MIN, ER_EXTEND_MAX,
+        ER_EXTEND_DFLT, PF_Precision_HUNDREDTHS, 0, 0, ER_EXTEND_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX("Detail",
+        ER_DETAIL_MIN, ER_DETAIL_MAX, ER_DETAIL_MIN, ER_DETAIL_MAX,
+        ER_DETAIL_DFLT, PF_Precision_HUNDREDTHS, 0, 0, ER_DETAIL_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX("Alpha Choke",
+        ER_CHOKE_MIN, ER_CHOKE_MAX, ER_CHOKE_MIN, ER_CHOKE_MAX,
+        ER_CHOKE_DFLT, PF_Precision_HUNDREDTHS, 0, 0, ER_CHOKE_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_POPUP("View Mode",
+        ER_VIEW_NUM - 1,        // number of items
+        ER_VIEW_DFLT,           // default (1-based)
+        ER_VIEW_ITEMS,
+        ER_VIEW_DISK_ID);
+
     out_data->num_params = ER_NUM_PARAMS;
-    return PF_Err_NONE;
+    return err;
 }
 
 // ---------------------------------------------------------------------------
-// PreRender — Stage 0: check out exactly the requested rect, unmodified.
-// preserve_rgb_of_zero_alpha is left as delivered so passthrough returns
-// held RGB untouched (byte-identity gate). Stage 1 replaces this with the
-// inflated checkout.
+// PreRender — inflate the checkout request by maxRadius on all sides. AE
+// clamps the request to whatever layer data actually exists, so at the true
+// layer boundary we simply get less than we asked for (handled by clamped
+// addressing in SmartRender). The output result rect is intersected back to
+// the originally-requested rect: our alpha extent never grows.
 // ---------------------------------------------------------------------------
 static PF_Err
 PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
 {
     PF_Err err = PF_Err_NONE;
 
+    ER_Params p; AEFX_CLR_STRUCT(p);
+    ERR(ReadParams(in_data, &p));
+    const A_long inflate = err ? 0 : ER_InflateRadius(p);
+
+    // Stash the inflation amount for SmartRender. AE owns this pointer once
+    // assigned and frees it via our PF_Cmd_SMART_PRE_RENDER cleanup contract.
+    ER_PreRenderData *prd = static_cast<ER_PreRenderData*>(
+        malloc(sizeof(ER_PreRenderData)));
+    if (prd) {
+        prd->inflate = inflate;
+        extra->output->pre_render_data = prd;
+        extra->output->delete_pre_render_data_func = ER_DeletePreRenderData;
+    }
+
     PF_RenderRequest req = extra->input->output_request;
+
+    // Expand the requested rect on all sides. AE intersects this against the
+    // real layer bounds internally during checkout.
+    if (inflate > 0) {
+        req.rect.left   -= inflate;
+        req.rect.top    -= inflate;
+        req.rect.right  += inflate;
+        req.rect.bottom += inflate;
+    }
+    // Internal-only premult handling: we ask AE for premultiplied pixels
+    // (its native delivery) and hand them back premultiplied. No preserve
+    // override — that is a user-facing footage-interpretation knob we do not
+    // expose.
 
     PF_CheckoutResult in_result;
     ERR(extra->cb->checkout_layer(in_data->effect_ref,
@@ -116,8 +369,8 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
     UnionLRect(&in_result.result_rect,     &extra->output->result_rect);
     UnionLRect(&in_result.max_result_rect, &extra->output->max_result_rect);
 
-    // Clamp the result rect to what was actually requested — the output's
-    // alpha extent never grows (same discipline as ModernEdgeBlur).
+    // Clamp the result rect back to the ORIGINAL request — output alpha
+    // extent must not grow from the inflated read.
     const PF_LRect &out_req = extra->input->output_request.rect;
     if (extra->output->result_rect.left   < out_req.left)   extra->output->result_rect.left   = out_req.left;
     if (extra->output->result_rect.top    < out_req.top)    extra->output->result_rect.top    = out_req.top;
@@ -128,7 +381,9 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
 }
 
 // ---------------------------------------------------------------------------
-// SmartRender — Stage 0: raw row copy, input → output.
+// SmartRender — Stage 1: unpack the inflated source, then render either the
+// tiling debug pattern (ER_TILING_DEBUG) or passthrough. The real pipeline
+// arrives in Stages 2-4.
 // ---------------------------------------------------------------------------
 static PF_Err
 SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra)
@@ -150,17 +405,69 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         PF_PixelFormat fmt = PF_PixelFormat_INVALID;
         ERR(wsP->PF_GetPixelFormat(out_world, &fmt));
         if (err) goto cleanup;
+        if (mm::PixelBytes(fmt) == 0) { err = PF_Err_BAD_CALLBACK_PARAM; goto cleanup; }
 
-        const size_t bpp = mm::PixelBytes(fmt);
-        if (bpp == 0) { err = PF_Err_BAD_CALLBACK_PARAM; goto cleanup; }
+        ER_Params p; AEFX_CLR_STRUCT(p);
+        ERR(ReadParams(in_data, &p));
+        if (err) goto cleanup;
 
-        // Stage 0 checkout is uninflated, so src and output rects coincide;
-        // min() is pure defensiveness, not a tiling strategy.
-        const A_long W = src_world->width  < out_world->width  ? src_world->width  : out_world->width;
-        const A_long H = src_world->height < out_world->height ? src_world->height : out_world->height;
+        const ER_PreRenderData *prd =
+            static_cast<const ER_PreRenderData*>(extra->input->pre_render_data);
+        const A_long inflate = prd ? prd->inflate : 0;
 
-        ER_CopyRefcon rc{ src_world, out_world, (size_t)W * bpp };
-        mm::ForEachRow(in_data, H, &rc, ER_CopyRow);
+        const A_long srcW = src_world->width;
+        const A_long srcH = src_world->height;
+        const A_long outW = out_world->width;
+        const A_long outH = out_world->height;
+
+        // Output→source origin offset. AE gives the inflated source its own
+        // extent; the output's top-left sits `inflate` pixels in from the
+        // source's top-left, BUT only as far as the layer edge allowed the
+        // inflation to actually happen. Recover the true offset from how much
+        // bigger the source came back on each leading edge, capped at the
+        // requested inflate and floored at 0. Using the size difference keeps
+        // us correct when AE clamped the inflated request at the layer
+        // boundary (source smaller than out+2*inflate on that side).
+        A_long srcOX = inflate, srcOY = inflate;
+        if (srcOX > (srcW - outW)) srcOX = srcW - outW;   // clamped at left/right layer edge
+        if (srcOY > (srcH - outH)) srcOY = srcH - outH;
+        if (srcOX < 0) srcOX = 0;
+        if (srcOY < 0) srcOY = 0;
+
+        // Unpack the whole inflated source into one ARGB float buffer.
+        std::vector<float> srcBuf;
+        try {
+            srcBuf.resize((size_t)srcW * srcH * 4);
+        } catch (const std::bad_alloc &) {
+            err = PF_Err_OUT_OF_MEMORY;
+            goto cleanup;
+        }
+        {
+            ER_UnpackRefcon urc{ src_world, fmt, srcBuf.data(), srcW };
+            mm::ForEachRow(in_data, srcH, &urc, ER_UnpackRow);
+        }
+
+#if ER_TILING_DEBUG
+        {
+            // maxRadius for the seam test == the inflation we requested. If
+            // inflation is correct this samples real data on every side; if
+            // not, a seam appears at the tile boundaries.
+            ER_TileDebugRefcon rc;
+            rc.src = srcBuf.data(); rc.srcW = srcW; rc.srcH = srcH;
+            rc.srcOX = srcOX; rc.srcOY = srcOY;
+            rc.radius = inflate;
+            rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
+            mm::ForEachRow(in_data, outH, &rc, ER_TileDebugRow);
+        }
+#else
+        {
+            ER_PassRefcon rc;
+            rc.src = srcBuf.data(); rc.srcW = srcW;
+            rc.srcOX = srcOX; rc.srcOY = srcOY;
+            rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
+            mm::ForEachRow(in_data, outH, &rc, ER_PassRow);
+        }
+#endif
     }
 
 cleanup:
