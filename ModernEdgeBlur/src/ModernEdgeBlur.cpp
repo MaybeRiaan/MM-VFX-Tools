@@ -2,15 +2,26 @@
 
     Pipeline (per frame):
       1. [Shift Edge]  Stubbed — morphological grow/shrink on alpha. No-op when = 0 (default).
-      2. [Blur Amount] Gaussian blur full RGBA via AE's built-in convolve → blurred base (A).
-                       Fallback: hand-rolled separable Gaussian (sigma = radius * 0.25).
-      3. [Blend Radius] Gaussian blur sharp alpha only → weight w = clamp(blurred_alpha, 0, 1).
-                        Hand-rolled kernel (sigma = radius, support = ceil(radius*3)).
+      2. [Blur Amount] Gaussian blur full premultiplied RGBA (GaussBlurRGBA, threaded via
+                       iterate_generic, sigma = radius * 0.25) → blurred base (A). No AE
+                       world/native convolve involved — see Phase 2 comment in SmartRender.
+      3. [Blend Radius] Erode sharp alpha inward by radius (octagon erosion — 4-direction
+                        approximation of a circular min-filter, threaded via iterate_generic),
+                        then Gaussian-blur to feather (also threaded via iterate_generic) →
+                        weight w = clamp(eroded+blurred, 0, 1). w controls how much sharp
+                        (top) layer shows vs blurred (base) layer — eroding w reveals more
+                        of the blurred base at the edge.
       4. [Composite]   out_rgb   = lerp(A_rgb, sharp_rgb, w)
-                       out_alpha = A_alpha  (blurred alpha = soft feathered edge)
+                       out_alpha = A_alpha  (blurred alpha = soft feathered edge, unchanged by Blend Radius)
 
     Passthrough: Blur=0 and Blend=0 → input copied directly to output, held RGB preserved.
-    Premult: preserve_rgb_of_zero_alpha=FALSE. Outside-matte pixels are (0,0,0,0).
+    Premult: preserve_rgb_of_zero_alpha=FALSE on checkout, PLUS an explicit zero-RGB-
+             where-alpha-is-0 pass on sharp_buf right after unpacking. The checkout flag
+             alone isn't enough — it only lets AE discard hidden RGB it manages itself,
+             it can't retroactively clean pixels an upstream effect already baked in (e.g.
+             a precomp with an internal keyer that only touches alpha, leaving un-keyed
+             footage colour sitting underneath). Enforcing it ourselves means honest
+             premult holds regardless of what the source actually did.
              Gaussian sees zero colour outside matte → no dark halo.
     No input inflation — src_world is exactly output size.
 */
@@ -21,6 +32,10 @@
 #include <cstring>
 #include <algorithm>
 #include <vector>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <chrono>
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -116,24 +131,21 @@ static void PackRow(const float *src, void *dstRow, A_long W, PF_PixelFormat fmt
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1: Morphological shift on alpha (circular kernel, brute-force)
-// radius > 0 → dilate (grow alpha); radius < 0 → erode (shrink alpha)
-// Operates in-place on a float[H*W*4] ARGB buffer (channel 0 = alpha).
+// Morphological min/max filter on a single float plane (circular kernel,
+// brute-force). dilate=true grows the plane (max filter); dilate=false
+// shrinks it (min filter / erosion). Shared by ShiftEdgeAlpha (Phase 1) and
+// the Blend Radius alpha erosion (Phase 3).
 // ---------------------------------------------------------------------------
-static void ShiftEdgeAlpha(float *buf, A_long W, A_long H, float radius)
+static void MorphPlane(const float *in, float *out, A_long W, A_long H, float radius, bool dilate)
 {
-    if (std::abs(radius) < 0.5f) return;
-
-    const bool dilate = (radius > 0.f);
     const float r = std::abs(radius);
+    if (r < 0.5f) {
+        std::memcpy(out, in, sizeof(float) * (size_t)W * H);
+        return;
+    }
+
     const int   ri = (int)std::ceil(r);
     const float r2 = r * r;
-
-    // Pre-extract alpha plane
-    std::vector<float> alpha_in((size_t)W * H);
-    for (A_long i = 0; i < W * H; ++i) alpha_in[i] = buf[i * 4 + 0];
-
-    std::vector<float> alpha_out((size_t)W * H);
 
     for (A_long y = 0; y < H; ++y) {
         for (A_long x = 0; x < W; ++x) {
@@ -143,17 +155,143 @@ static void ShiftEdgeAlpha(float *buf, A_long W, A_long H, float radius)
                     if ((float)(dx*dx + dy*dy) > r2) continue;
                     const A_long sx = clampL(x + dx, 0, W - 1);
                     const A_long sy = clampL(y + dy, 0, H - 1);
-                    const float  a  = alpha_in[(size_t)sy * W + sx];
+                    const float  a  = in[(size_t)sy * W + sx];
                     if (dilate) { if (a > best) best = a; }
                     else        { if (a < best) best = a; }
                 }
             }
-            alpha_out[(size_t)y * W + x] = best;
+            out[(size_t)y * W + x] = best;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: Morphological shift on alpha.
+// radius > 0 → dilate (grow alpha); radius < 0 → erode (shrink alpha)
+// Operates in-place on a float[H*W*4] ARGB buffer (channel 0 = alpha).
+// ---------------------------------------------------------------------------
+static void ShiftEdgeAlpha(float *buf, A_long W, A_long H, float radius)
+{
+    if (std::abs(radius) < 0.5f) return;
+
+    const bool dilate = (radius > 0.f);
+
+    std::vector<float> alpha_in((size_t)W * H);
+    for (A_long i = 0; i < W * H; ++i) alpha_in[i] = buf[i * 4 + 0];
+
+    std::vector<float> alpha_out((size_t)W * H);
+    MorphPlane(alpha_in.data(), alpha_out.data(), W, H, radius, dilate);
 
     // Write shifted alpha back; RGB unchanged
     for (A_long i = 0; i < W * H; ++i) buf[i * 4 + 0] = alpha_out[i];
+}
+
+// ---------------------------------------------------------------------------
+// Octagonal erosion — approximates the circular min-filter used by Blend
+// Radius (Phase 3) at a fraction of the cost, without dropping to a square.
+//
+// Erosion composes exactly under Minkowski sum: eroding by shape A then by
+// shape B gives the identical result to eroding once by A⊕B. So instead of
+// one O(radius^2) 2D circular scan, we erode along 4 individual directions —
+// horizontal, vertical, and both diagonals — each a cheap O(halfLen) 1D scan.
+// Their combined shape is an octagon. Sizing the axis half-length as
+// radius*(sqrt(2)-1) and the diagonal half-length as radius*(1-1/sqrt(2))
+// makes the octagon reach exactly `radius` pixels along both the axis and
+// 45-degree directions — a standard "near-circle" construction. Visually
+// very close to a true disc, especially since the result is immediately
+// Gaussian-feathered afterward (see MakeBlendKernel / GaussBlurPlane).
+//
+// Each directional pass reads from one buffer and writes to a different one,
+// so every output pixel is independent of every other — safe to split across
+// AE's worker threads via iterate_generic with no shared scratch state.
+// ---------------------------------------------------------------------------
+
+struct MEB_DirMinRefcon {
+    const float *in;
+    float       *out;
+    A_long       W, H;
+    int          dx, dy, halfLen;
+};
+
+extern "C" {
+
+static PF_Err
+MEB_DirMinRow(void *refconPV, A_long /*thread_indexL*/, A_long y, A_long /*iterationsL*/)
+{
+    const MEB_DirMinRefcon *rc = static_cast<const MEB_DirMinRefcon*>(refconPV);
+    const A_long W       = rc->W;
+    const int    dx      = rc->dx;
+    const int    dy      = rc->dy;
+    const int    halfLen = rc->halfLen;
+    float       *outRow  = rc->out + (size_t)y * W;
+
+    for (A_long x = 0; x < W; ++x) {
+        float m = 1.f;
+        for (int t = -halfLen; t <= halfLen; ++t) {
+            const A_long sx = clampL(x + t * dx, 0, W - 1);
+            const A_long sy = clampL(y + t * dy, 0, rc->H - 1);
+            const float  a  = rc->in[(size_t)sy * W + sx];
+            if (a < m) m = a;
+        }
+        outRow[x] = m;
+    }
+    return PF_Err_NONE;
+}
+
+} // extern "C"
+
+// 1D min-filter of half-width halfLen along direction (dx,dy), clamped to
+// image edges. Threaded per output row via iterate_generic when available.
+static void DirectionalMinFilter(const float *in, float *out, A_long W, A_long H,
+                                  int dx, int dy, int halfLen, PF_InData *in_data)
+{
+    if (halfLen <= 0) {
+        std::memcpy(out, in, sizeof(float) * (size_t)W * H);
+        return;
+    }
+
+    if (in_data && in_data->utils && in_data->utils->iterate_generic) {
+        MEB_DirMinRefcon rc{ in, out, W, H, dx, dy, halfLen };
+        if ((*in_data->utils->iterate_generic)(H, &rc, MEB_DirMinRow) == PF_Err_NONE) return;
+    }
+
+    // Serial fallback.
+    for (A_long y = 0; y < H; ++y) {
+        for (A_long x = 0; x < W; ++x) {
+            float m = 1.f;
+            for (int t = -halfLen; t <= halfLen; ++t) {
+                const A_long sx = clampL(x + t * dx, 0, W - 1);
+                const A_long sy = clampL(y + t * dy, 0, H - 1);
+                const float  a  = in[(size_t)sy * W + sx];
+                if (a < m) m = a;
+            }
+            out[(size_t)y * W + x] = m;
+        }
+    }
+}
+
+// Approximate circular erosion of a float alpha plane via 4-direction octagon
+// decomposition. radius < 0.5 is a no-op (copies input to output).
+static void OctagonErode(const float *in, float *out, A_long W, A_long H,
+                          float radius, PF_InData *in_data)
+{
+    if (radius < 0.5f) {
+        std::memcpy(out, in, sizeof(float) * (size_t)W * H);
+        return;
+    }
+
+    // Clamp axis half-length to >=1 so any radius past the 0.5 threshold
+    // erodes by at least one pixel (avoids a dead zone at very low radius,
+    // where sqrt(2)-1 * radius would otherwise round down to 0).
+    const int a = std::max(1, (int)std::lround(radius * 0.41421356f)); // sqrt(2)-1
+    const int c =              (int)std::lround(radius * 0.29289322f); // 1-1/sqrt(2)
+
+    std::vector<float> tmp((size_t)W * H);
+
+    DirectionalMinFilter(in,         tmp.data(), W, H,  1,  0, a, in_data); // horizontal
+    DirectionalMinFilter(tmp.data(), out,        W, H,  0,  1, a, in_data); // vertical
+    DirectionalMinFilter(out,        tmp.data(), W, H,  1,  1, c, in_data); // diagonal ↘
+    DirectionalMinFilter(tmp.data(), out,        W, H,  1, -1, c, in_data); // diagonal ↗
 }
 
 // ---------------------------------------------------------------------------
@@ -200,11 +338,117 @@ static std::vector<float> MakeBlendKernel(float radius)
     return k;
 }
 
-// Separable Gaussian blur of a single float plane [H*W], in-place.
-static void GaussBlurPlane(float *buf, A_long W, A_long H, const std::vector<float> &k)
+// ---------------------------------------------------------------------------
+// iterate_generic infrastructure for the separable Gaussian (GaussBlurPlane).
+//
+// This blur runs in-place: the horizontal pass must read a whole row before
+// overwriting it, and the vertical pass must read a whole column before
+// overwriting it, so each callback needs its own scratch buffer distinct from
+// every other concurrently-running callback. Two designs were tried before
+// this one:
+//   1. A pool with one scratch slot per worker thread, sized by probing AE's
+//      worker count (PF_Iterations_ONCE_PER_PROCESSOR) and indexed by
+//      thread_indexL. Nothing guarantees the probe count matches the
+//      concurrency AE actually uses for the real H/V passes — if the real
+//      pass used a higher thread_indexL than the probe predicted, that
+//      indexing wrote past the end of the allocated buffer. That heap
+//      overflow is consistent with the scrambled/torn edge artifacts seen in
+//      testing.
+//   2. A fresh heap allocation inside every single row/column callback (safe,
+//      no shared state) — but for a large frame that's thousands of
+//      concurrent allocations, and most allocators serialize on an internal
+//      lock under concurrent load, so this was measurably slow.
+// Current design: thread_local storage. Each OS thread gets its own scratch
+// buffer, grown once on first use and reused for every row/column that
+// thread ever processes after that — safe regardless of AE's actual thread
+// count (no probing, no bound to violate), and no repeated allocation.
+// ---------------------------------------------------------------------------
+
+struct MEB_BlurRefcon {
+    float       *buf;
+    A_long       W, H;
+    const float *kdata;
+    int          half;
+};
+
+extern "C" {
+
+static PF_Err
+MEB_HBlurRow(void *refconPV, A_long /*thread_indexL*/, A_long i, A_long /*iterationsL*/)
+{
+    const MEB_BlurRefcon *rc = static_cast<const MEB_BlurRefcon*>(refconPV);
+    const A_long W    = rc->W;
+    const int    half = rc->half;
+    float       *row  = rc->buf + (size_t)i * W;
+
+    // thread_local: one persistent buffer per OS thread, grown once and
+    // reused across every row this thread ever processes (here and across
+    // later calls/frames) — avoids a fresh heap allocation per row, which
+    // under concurrent threads serializes on the allocator and was slow.
+    thread_local std::vector<float> tmp;
+    if ((A_long)tmp.size() < W) tmp.resize((size_t)W);
+
+    for (A_long x = 0; x < W; ++x) {
+        float acc = 0.f;
+        for (int t = -half; t <= half; ++t) {
+            acc += row[clampL(x + t, 0, W - 1)] * rc->kdata[t + half];
+        }
+        tmp[x] = acc;
+    }
+    for (A_long x = 0; x < W; ++x) row[x] = tmp[x];
+    return PF_Err_NONE;
+}
+
+static PF_Err
+MEB_VBlurCol(void *refconPV, A_long /*thread_indexL*/, A_long i, A_long /*iterationsL*/)
+{
+    const MEB_BlurRefcon *rc = static_cast<const MEB_BlurRefcon*>(refconPV);
+    const A_long W    = rc->W;
+    const A_long H    = rc->H;
+    const int    half = rc->half;
+
+    thread_local std::vector<float> tmp;
+    if ((A_long)tmp.size() < H) tmp.resize((size_t)H);
+
+    for (A_long y = 0; y < H; ++y) tmp[y] = rc->buf[(size_t)y * W + i];
+    for (A_long y = 0; y < H; ++y) {
+        float acc = 0.f;
+        for (int t = -half; t <= half; ++t) {
+            acc += tmp[clampL(y + t, 0, H - 1)] * rc->kdata[t + half];
+        }
+        rc->buf[(size_t)y * W + i] = acc;
+    }
+    return PF_Err_NONE;
+}
+
+} // extern "C"
+
+// Separable Gaussian blur of a single float plane [H*W], in-place. Threaded
+// via iterate_generic when available (see scaffold above); falls back to a
+// serial pass otherwise, or if either threaded pass reports an error.
+static void GaussBlurPlane(float *buf, A_long W, A_long H, const std::vector<float> &k, PF_InData *in_data)
 {
     if (k.empty() || W <= 0 || H <= 0) return;
     const int half = (int)(k.size() / 2);
+
+    if (in_data && in_data->utils && in_data->utils->iterate_generic) {
+        MEB_BlurRefcon rc;
+        rc.buf   = buf;
+        rc.W     = W;
+        rc.H     = H;
+        rc.kdata = k.data();
+        rc.half  = half;
+
+        PF_Err herr = (*in_data->utils->iterate_generic)(H, &rc, MEB_HBlurRow);
+        if (herr == PF_Err_NONE) {
+            PF_Err verr = (*in_data->utils->iterate_generic)(W, &rc, MEB_VBlurCol);
+            if (verr == PF_Err_NONE) return;
+        }
+        // On failure of either pass, fall through to serial — buf may be
+        // partially blurred; the serial path overwrites it cleanly.
+    }
+
+    // Serial fallback.
     std::vector<float> tmp((size_t)std::max(W, H));
 
     // Horizontal pass
@@ -233,77 +477,219 @@ static void GaussBlurPlane(float *buf, A_long W, A_long H, const std::vector<flo
     }
 }
 
-// Gaussian blur a PF_EffectWorld in-place using AE's built-in convolve.
-// Two separable 1D passes (horizontal then vertical).
-// Falls back to our own plane-by-plane blur if AE's convolve fails.
-static void GaussBlurWorld(PF_EffectWorld *world, float radius, PF_InData *in_data,
-                           A_long W, A_long H, PF_PixelFormat fmt)
+// ---------------------------------------------------------------------------
+// TEMPORARY DEBUG LOGGING — kept intentionally for now (useful during v1.3
+// testing); revisit before an actual release build. Provides the per-phase
+// timing breakdown used throughout Priority 3's performance work.
+//
+// Log lines are buffered per-thread in memory (DebugLog) and flushed to disk
+// in one write per SmartRender call (DebugLogFlush, called at the cleanup:
+// label) rather than opening/writing/closing the file on every single call —
+// that was ~8-10 file opens per frame, and repeated file I/O can itself be
+// slow under antivirus/real-time-scanning software that hooks file opens,
+// which would pollute the very timings we're trying to measure.
+//
+// Log location: next to ModernEdgeBlur.aex itself — same physical location
+// regardless of which Windows user account is running AE (unlike %TEMP%,
+// which resolves to a different per-user folder on every machine, making it
+// awkward to hand this build to someone else's PC). Falls back to %TEMP% if
+// that folder isn't writable.
+// ---------------------------------------------------------------------------
+using MEB_Clock = std::chrono::steady_clock;
+
+static thread_local std::string g_logBuffer;
+
+// Folder the plugin .aex itself lives in, or empty if it can't be determined.
+static std::string GetPluginDir()
 {
-    if (radius < 0.5f) return;
-
-    if (in_data && in_data->utils && in_data->utils->gaussian_kernel && in_data->utils->convolve) {
-        const A_long max_dia = 255;
-        std::vector<A_long> kbuf(max_dia, 0);
-        A_long diameter = 0;
-
-        PF_Err kerr = (*in_data->utils->gaussian_kernel)(
-            in_data->effect_ref, (A_FpLong)radius,
-            PF_KernelFlag_1D | PF_KernelFlag_NORMALIZED | PF_KernelFlag_USE_LONG,
-            1.0, &diameter, kbuf.data());
-
-        if (kerr == PF_Err_NONE && diameter > 0 && diameter <= max_dia) {
-            kerr = (*in_data->utils->convolve)(
-                in_data->effect_ref, world, nullptr,
-                PF_KernelFlag_1D | PF_KernelFlag_NORMALIZED | PF_KernelFlag_USE_LONG | PF_KernelFlag_HORIZONTAL,
-                diameter, kbuf.data(), kbuf.data(), kbuf.data(), kbuf.data(), world);
-
-            if (kerr == PF_Err_NONE) {
-                kerr = (*in_data->utils->convolve)(
-                    in_data->effect_ref, world, nullptr,
-                    PF_KernelFlag_1D | PF_KernelFlag_NORMALIZED | PF_KernelFlag_USE_LONG | PF_KernelFlag_VERTICAL,
-                    diameter, kbuf.data(), kbuf.data(), kbuf.data(), kbuf.data(), world);
-            }
-
-            if (kerr == PF_Err_NONE) return;
+#ifdef AE_OS_WIN
+    HMODULE hMod = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                           reinterpret_cast<LPCSTR>(&GetPluginDir), &hMod) && hMod) {
+        char path[MAX_PATH] = {0};
+        if (GetModuleFileNameA(hMod, path, MAX_PATH) > 0) {
+            std::string p(path);
+            size_t pos = p.find_last_of("\\/");
+            if (pos != std::string::npos) return p.substr(0, pos + 1);
         }
     }
-
-    // Fallback: our own separable blur.
-    const size_t N = (size_t)W * H;
-    const auto k = MakeBlurKernel(radius);
-    if (k.empty()) return;
-
-    std::vector<float> tmp(N * 4);
-    for (A_long y = 0; y < H; ++y)
-        UnpackRow(reinterpret_cast<const char*>(world->data) + y * world->rowbytes,
-                  tmp.data() + (size_t)y * W * 4, W, fmt);
-
-    std::vector<float> plane(N);
-    for (int c = 0; c < 4; ++c) {
-        for (size_t i = 0; i < N; ++i) plane[i] = tmp[i * 4 + c];
-        GaussBlurPlane(plane.data(), W, H, k);
-        for (size_t i = 0; i < N; ++i) tmp[i * 4 + c] = plane[i];
-    }
-
-    for (A_long y = 0; y < H; ++y)
-        PackRow(tmp.data() + (size_t)y * W * 4,
-                reinterpret_cast<char*>(world->data) + y * world->rowbytes, W, fmt);
+#endif
+    return std::string();
 }
 
-// Gaussian blur a single alpha plane extracted from a packed ARGB buffer.
-// Returns a new heap float[H*W] containing the blurred alpha values.
-static float* GaussBlurAlphaOnly(const float *argb, A_long W, A_long H, float radius)
+static void DebugLog(const char *msg)
 {
-    const size_t N = (size_t)W * H;
-    float *alpha = new (std::nothrow) float[N];
-    if (!alpha) return nullptr;
+    g_logBuffer += msg;
+    g_logBuffer += '\n';
+}
 
-    for (size_t i = 0; i < N; ++i) alpha[i] = argb[i * 4 + 0];
+// Writes this thread's accumulated buffer out in one shot, then clears it.
+// Call once per SmartRender invocation regardless of exit path.
+static void DebugLogFlush()
+{
+    if (g_logBuffer.empty()) return;
 
-    const auto k = MakeBlendKernel(radius);
-    if (!k.empty()) GaussBlurPlane(alpha, W, H, k);
+    static const std::string pluginDir   = GetPluginDir();
+    static const std::string primaryPath = pluginDir.empty() ? std::string() : (pluginDir + "ModernEdgeBlur_debug.log");
+    static const std::string fallbackPath = [] {
+        const char *tempDir = std::getenv("TEMP");
+        return (tempDir ? std::string(tempDir) : std::string(".")) + "\\ModernEdgeBlur_debug.log";
+    }();
 
-    return alpha;
+    FILE *f = nullptr;
+    if (!primaryPath.empty()) fopen_s(&f, primaryPath.c_str(), "a");
+    if (!f) fopen_s(&f, fallbackPath.c_str(), "a");
+    if (f) {
+        fwrite(g_logBuffer.data(), 1, g_logBuffer.size(), f);
+        fclose(f);
+    }
+    g_logBuffer.clear();
+}
+
+// Logs "TIMING: <phase>  <ms> ms" using the same debug log buffer.
+static void DebugLogTiming(const char *phase, MEB_Clock::time_point t0, MEB_Clock::time_point t1)
+{
+    const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    char buf[128];
+    snprintf(buf, sizeof(buf), "TIMING: %-12s %9.2f ms", phase, ms);
+    DebugLog(buf);
+}
+
+// ---------------------------------------------------------------------------
+// Separable Gaussian blur of an INTERLEAVED 4-channel float buffer [H*W*4],
+// in-place — blurs alpha/red/green/blue together in one pass instead of 4
+// sequential single-channel GaussBlurPlane calls. A Gaussian blur is
+// per-channel-independent (linear, same kernel per channel), so the result is
+// numerically identical to 4 separate passes either way — this is purely a
+// perf restructuring, not a behaviour change. Doing it as 1 pass instead of 4
+// avoids 4x the iterate_generic dispatch/join overhead and the extract-into-
+// a-plane / write-back copies a per-channel loop needs (each an extra
+// full-image pass). Used only by SmartRender's Phase 2 (Blur Amount) below;
+// GaussBlurPlane (single-channel) is untouched and still used as-is by Blend
+// Radius's weight blur — separate code path, not shared with this one.
+// ---------------------------------------------------------------------------
+
+struct MEB_BlurRGBARefcon {
+    float       *buf;   // interleaved ARGB, W*H*4 floats
+    A_long       W, H;
+    const float *kdata;
+    int          half;
+};
+
+extern "C" {
+
+static PF_Err
+MEB_HBlurRowRGBA(void *refconPV, A_long /*thread_indexL*/, A_long i, A_long /*iterationsL*/)
+{
+    const MEB_BlurRGBARefcon *rc = static_cast<const MEB_BlurRGBARefcon*>(refconPV);
+    const A_long W    = rc->W;
+    const int    half = rc->half;
+    float       *row  = rc->buf + (size_t)i * W * 4;
+
+    thread_local std::vector<float> tmp;
+    if ((A_long)tmp.size() < W * 4) tmp.resize((size_t)W * 4);
+
+    for (A_long x = 0; x < W; ++x) {
+        float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
+        for (int t = -half; t <= half; ++t) {
+            const float *p  = row + (size_t)clampL(x + t, 0, W - 1) * 4;
+            const float  kw = rc->kdata[t + half];
+            acc0 += p[0] * kw; acc1 += p[1] * kw;
+            acc2 += p[2] * kw; acc3 += p[3] * kw;
+        }
+        float *o = tmp.data() + (size_t)x * 4;
+        o[0] = acc0; o[1] = acc1; o[2] = acc2; o[3] = acc3;
+    }
+    std::memcpy(row, tmp.data(), sizeof(float) * (size_t)W * 4);
+    return PF_Err_NONE;
+}
+
+static PF_Err
+MEB_VBlurColRGBA(void *refconPV, A_long /*thread_indexL*/, A_long i, A_long /*iterationsL*/)
+{
+    const MEB_BlurRGBARefcon *rc = static_cast<const MEB_BlurRGBARefcon*>(refconPV);
+    const A_long W    = rc->W;
+    const A_long H    = rc->H;
+    const int    half = rc->half;
+
+    thread_local std::vector<float> tmp;
+    if ((A_long)tmp.size() < H * 4) tmp.resize((size_t)H * 4);
+
+    for (A_long y = 0; y < H; ++y) {
+        const float *p = rc->buf + ((size_t)y * W + i) * 4;
+        float       *o = tmp.data() + (size_t)y * 4;
+        o[0] = p[0]; o[1] = p[1]; o[2] = p[2]; o[3] = p[3];
+    }
+    for (A_long y = 0; y < H; ++y) {
+        float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
+        for (int t = -half; t <= half; ++t) {
+            const float *p  = tmp.data() + (size_t)clampL(y + t, 0, H - 1) * 4;
+            const float  kw = rc->kdata[t + half];
+            acc0 += p[0] * kw; acc1 += p[1] * kw;
+            acc2 += p[2] * kw; acc3 += p[3] * kw;
+        }
+        float *dst = rc->buf + ((size_t)y * W + i) * 4;
+        dst[0] = acc0; dst[1] = acc1; dst[2] = acc2; dst[3] = acc3;
+    }
+    return PF_Err_NONE;
+}
+
+} // extern "C"
+
+static void GaussBlurRGBA(float *buf, A_long W, A_long H, const std::vector<float> &k, PF_InData *in_data)
+{
+    if (k.empty() || W <= 0 || H <= 0) return;
+    const int half = (int)(k.size() / 2);
+
+    if (in_data && in_data->utils && in_data->utils->iterate_generic) {
+        MEB_BlurRGBARefcon rc;
+        rc.buf = buf; rc.W = W; rc.H = H; rc.kdata = k.data(); rc.half = half;
+
+        PF_Err herr = (*in_data->utils->iterate_generic)(H, &rc, MEB_HBlurRowRGBA);
+        if (herr == PF_Err_NONE) {
+            PF_Err verr = (*in_data->utils->iterate_generic)(W, &rc, MEB_VBlurColRGBA);
+            if (verr == PF_Err_NONE) return;
+        }
+        // On failure of either pass, fall through to serial below.
+    }
+
+    // Serial fallback.
+    std::vector<float> tmp((size_t)std::max(W, H) * 4);
+
+    for (A_long y = 0; y < H; ++y) {
+        float *row = buf + (size_t)y * W * 4;
+        for (A_long x = 0; x < W; ++x) {
+            float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
+            for (int t = -half; t <= half; ++t) {
+                const float *p  = row + (size_t)clampL(x + t, 0, W - 1) * 4;
+                const float  kw = k[t + half];
+                acc0 += p[0] * kw; acc1 += p[1] * kw;
+                acc2 += p[2] * kw; acc3 += p[3] * kw;
+            }
+            float *o = tmp.data() + (size_t)x * 4;
+            o[0] = acc0; o[1] = acc1; o[2] = acc2; o[3] = acc3;
+        }
+        std::memcpy(row, tmp.data(), sizeof(float) * (size_t)W * 4);
+    }
+
+    for (A_long x = 0; x < W; ++x) {
+        for (A_long y = 0; y < H; ++y) {
+            const float *p = buf + ((size_t)y * W + x) * 4;
+            float       *o = tmp.data() + (size_t)y * 4;
+            o[0] = p[0]; o[1] = p[1]; o[2] = p[2]; o[3] = p[3];
+        }
+        for (A_long y = 0; y < H; ++y) {
+            float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
+            for (int t = -half; t <= half; ++t) {
+                const float *p  = tmp.data() + (size_t)clampL(y + t, 0, H - 1) * 4;
+                const float  kw = k[t + half];
+                acc0 += p[0] * kw; acc1 += p[1] * kw;
+                acc2 += p[2] * kw; acc3 += p[3] * kw;
+            }
+            float *dst = buf + ((size_t)y * W + x) * 4;
+            dst[0] = acc0; dst[1] = acc1; dst[2] = acc2; dst[3] = acc3;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +780,7 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
     PF_Err err = PF_Err_NONE;
 
     PF_RenderRequest req = extra->input->output_request;
-    req.preserve_rgb_of_zero_alpha = TRUE;
+    req.preserve_rgb_of_zero_alpha = FALSE;
 
     PF_CheckoutResult in_result;
     ERR(extra->cb->checkout_layer(in_data->effect_ref,
@@ -449,13 +835,90 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         // No inflation — src_world is exactly output size.
         // Unpack directly; no crop needed.
         const size_t outN = (size_t)outW * outH;
+        const auto t_total0 = MEB_Clock::now();
+        auto t0 = t_total0;
         float *sharp_buf = UnpackWorld(src_world, fmt);
         if (!sharp_buf) { err = PF_Err_OUT_OF_MEMORY; goto cleanup; }
+        DebugLogTiming("Unpack", t0, MEB_Clock::now());
+
+        // TEMPORARY DIAGNOSTIC — dump raw (alpha, R, G, B) across the first
+        // soft-edge transition found on the middle row, straight from
+        // UnpackWorld before Shift Edge/zeroing touch anything. Settles
+        // whether the source is straight alpha (RGB stays near-constant as
+        // alpha falls toward 0) or already premultiplied (RGB falls off
+        // roughly proportionally with alpha) — remove once answered.
+        // g_edgeY/g_edgeX are reused further down (Phase 4) to dump w,
+        // Blur Amount's alpha, and the final composited values at the SAME
+        // tracked pixel, to check whether out_rgb and out_alpha stay
+        // consistent with each other through Phase 3/4.
+        A_long g_edgeY = -1, g_edgeX = -1;
+        {
+            const A_long midY = outH / 2;
+            const float *row = sharp_buf + (size_t)midY * outW * 4;
+            A_long edgeX = -1;
+            for (A_long x = 1; x < outW; ++x) {
+                const float a0 = row[(x - 1) * 4 + 0];
+                const float a1 = row[x * 4 + 0];
+                if ((a0 <= 0.01f && a1 > 0.01f) || (a0 >= 0.99f && a1 < 0.99f) ||
+                    (a1 > 0.01f && a1 < 0.99f)) {
+                    edgeX = x;
+                    break;
+                }
+            }
+            if (edgeX >= 0) {
+                g_edgeY = midY;
+                g_edgeX = edgeX;
+                char buf[256];
+                snprintf(buf, sizeof(buf), "EDGE DUMP: row=%ld, edge found at x=%ld", (long)midY, (long)edgeX);
+                DebugLog(buf);
+                const A_long lo = std::max((A_long)0, edgeX - 10);
+                const A_long hi = std::min(outW - 1, edgeX + 10);
+                for (A_long x = lo; x <= hi; ++x) {
+                    const float *p = row + (size_t)x * 4;
+                    snprintf(buf, sizeof(buf), "  x=%ld  a=%.4f  r=%.4f  g=%.4f  b=%.4f", (long)x, p[0], p[1], p[2], p[3]);
+                    DebugLog(buf);
+                }
+            } else {
+                DebugLog("EDGE DUMP: no soft/transition edge found on middle row (subject may not cross it)");
+            }
+        }
 
         // Phase 1: Shift Edge — stubbed, only runs when non-zero (default=0).
+        // Must run BEFORE the zero-RGB pass below: it changes the alpha shape
+        // (grow/shrink), and the zeroing needs to key off the FINAL alpha, not
+        // the pre-shift one — otherwise a grow would reveal newly-alpha>0
+        // pixels whose RGB we'd already zeroed (black instead of real colour),
+        // and a shrink would leave a leftover-colour ring we never got to zero.
+        t0 = MEB_Clock::now();
         if (std::abs(p.shift_edgeF) >= 0.5f) {
             ShiftEdgeAlpha(sharp_buf, outW, outH, (float)p.shift_edgeF);
         }
+        DebugLogTiming("ShiftEdge", t0, MEB_Clock::now());
+
+        // Force honest premult ourselves: zero RGB wherever alpha is 0.
+        // Requesting preserve_rgb_of_zero_alpha=FALSE on checkout asks AE to
+        // discard hidden RGB behind zero-alpha pixels, but that's only a
+        // courtesy for data AE itself manages (e.g. native masks). It can't
+        // retroactively clean pixels an UPSTREAM effect already baked in —
+        // e.g. a precomp with an internal color keyer that only ever touches
+        // alpha and leaves the original un-keyed footage colour sitting
+        // underneath.
+        t0 = MEB_Clock::now();
+        for (size_t i = 0; i < outN; ++i) {
+            if (sharp_buf[i * 4 + 0] <= 0.f) {
+                sharp_buf[i * 4 + 1] = 0.f;
+                sharp_buf[i * 4 + 2] = 0.f;
+                sharp_buf[i * 4 + 3] = 0.f;
+            }
+        }
+        DebugLogTiming("ZeroRGB", t0, MEB_Clock::now());
+
+        // Capture the (now honestly zeroed) premultiplied RGBA — this is what
+        // Phase 2 blurs. See the Phase 2 comment: we blur this directly, we do
+        // NOT treat it as straight/un-multiplied data.
+        float *blurred_buf = new (std::nothrow) float[outN * 4];
+        if (!blurred_buf) { delete[] sharp_buf; err = PF_Err_OUT_OF_MEMORY; goto cleanup; }
+        std::memcpy(blurred_buf, sharp_buf, outN * 4 * sizeof(float));
 
         // -----------------------------------------------------------------
         // Passthrough: if no processing is requested, copy sharp to output
@@ -470,59 +933,87 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 PackRow(sharp_buf + (size_t)y * outW * 4, outRow, outW, fmt);
             }
             delete[] sharp_buf;
+            delete[] blurred_buf;
             goto cleanup;
         }
 
         // -----------------------------------------------------------------
-        // Phase 2: Blurred base — Gaussian blur of premultiplied data.
-        // Blurring premult is correct: alpha and RGB are blurred together,
-        // so the blurred RGB is always proportional to blurred alpha at the edge.
-        // Zero-alpha pixels outside the matte have RGB=0 in honest premult,
-        // so they contribute no colour to the blur kernel — no halo.
+        // Phase 2: Blurred base.
+        // blurred_buf holds the zeroed data (0 outside the matte, true colour
+        // inside — see the zero-RGB pass above). Blur it with GaussBlurRGBA,
+        // then DIVIDE the blurred RGB by the blurred alpha — NOT multiply.
+        // This is the actual bug in every earlier attempt: zeroing RGB where
+        // alpha=0 forces the blur kernel to average real edge colour together
+        // with hard black, which darkens the estimate near any edge — the
+        // exact same pollution problem the white background caused before
+        // zeroing, just black instead of white. For a locally-constant true
+        // colour C, blur(C·alpha)/blur(alpha) recovers C exactly regardless
+        // of how much of the kernel's support falls outside the matte, since
+        // the division cancels the coverage-dependent attenuation instead of
+        // compounding it. This makes blurred_buf hold the BLURRED LAYER'S TRUE
+        // COLOUR (not premultiplied) after this step — Phase 4 premultiplies
+        // once, at the very end, after blending with the sharp layer's colour.
+        // Division is guarded near alpha=0 (unstable/meaningless there; RGB
+        // is left as whatever near-zero value it already has, which won't
+        // matter since it's multiplied by ~0 alpha at composite time anyway).
+        //
+        // No AE world needed here — AE's native convolve utility measured
+        // 10-20x slower than our own threaded blur (see NEXT_STEPS.md), so we
+        // no longer route through it at all. Blur the plain float buffer
+        // directly via GaussBlurRGBA, no PF_NewWorld/PackRow/UnpackWorld/
+        // DisposeWorld round trip needed.
         // -----------------------------------------------------------------
-        // Phase 2: Blur src_world in-place using AE's convolve, then unpack.
-        // We need a mutable copy of src_world to blur — create a new world.
-        PF_EffectWorld blur_world;
-        AEFX_CLR_STRUCT(blur_world);
-        bool blur_world_created = false;
-
+        t0 = MEB_Clock::now();
         if (do_blur) {
-            ERR(wsP->PF_NewWorld(in_data->effect_ref, outW, outH, FALSE, fmt, &blur_world));
-            if (!err) {
-                blur_world_created = true;
-                // Copy src_world into blur_world row by row
-                for (A_long y = 0; y < outH; ++y) {
-                    const void *srcRow = reinterpret_cast<const char*>(src_world->data) + y * src_world->rowbytes;
-                    void *dstRow = reinterpret_cast<char*>(blur_world.data) + y * blur_world.rowbytes;
-                    std::memcpy(dstRow, srcRow, (size_t)outW * (blur_world.rowbytes / outW > 0 ? blur_world.rowbytes / outW : 4));
-                }
-                GaussBlurWorld(&blur_world, (float)p.blur_amountF, in_data, outW, outH, fmt);
+            const auto k = MakeBlurKernel((float)p.blur_amountF);
+
+            auto ts = MEB_Clock::now();
+            GaussBlurRGBA(blurred_buf, outW, outH, k, in_data);
+            DebugLogTiming("  GaussBlurRGBA", ts, MEB_Clock::now());
+
+            ts = MEB_Clock::now();
+            // Clamp the divisor rather than branching on it — a hard
+            // if (a > epsilon) cutoff makes the recovered colour jump
+            // discontinuously right at the threshold (divided-and-correct on
+            // one side, left-raw-and-much-darker on the other), and that
+            // internal jump survives the final premultiply as a visible thin
+            // dark ring wherever the blurred alpha happens to cross epsilon.
+            // Clamping instead keeps inv_a continuous everywhere: it matches
+            // the true division above epsilon and smoothly saturates instead
+            // of jumping below it, so there's no seam to show up as fringing.
+            const float kAlphaNormEpsilon = 0.02f;
+            for (size_t i = 0; i < outN; ++i) {
+                const float a      = blurred_buf[i * 4 + 0];
+                const float inv_a  = 1.0f / std::max(a, kAlphaNormEpsilon);
+                blurred_buf[i * 4 + 1] *= inv_a;
+                blurred_buf[i * 4 + 2] *= inv_a;
+                blurred_buf[i * 4 + 3] *= inv_a;
             }
-        }
-
-        float *blurred_buf = blur_world_created
-            ? UnpackWorld(&blur_world, fmt)
-            : new (std::nothrow) float[outN * 4];
-
-        if (!blurred_buf) {
-            delete[] sharp_buf;
-            if (blur_world_created) wsP->PF_DisposeWorld(in_data->effect_ref, &blur_world);
-            err = PF_Err_OUT_OF_MEMORY;
-            goto cleanup;
-        }
-
-        if (!blur_world_created) {
+            DebugLogTiming("  Unpremultiply", ts, MEB_Clock::now());
+        } else {
             std::memcpy(blurred_buf, sharp_buf, outN * 4 * sizeof(float));
         }
-
-        if (blur_world_created) wsP->PF_DisposeWorld(in_data->effect_ref, &blur_world);
+        DebugLogTiming("BlurAmount", t0, MEB_Clock::now());
 
         // -----------------------------------------------------------------
-        // Phase 3: Blend weight — Gaussian blur of the sharp alpha only.
-        // Extract alpha before premult (it is unchanged by premult).
-        // w = pow(blurred_alpha, 3): 1 deep inside, 0 at edge/outside.
+        // Phase 3: Blend Radius — erode the sharp (top) layer's reveal mask.
+        // 1. Erode the sharp alpha inward by blend_radius (octagon erosion —
+        //    4-direction approximation of a circular min-filter, much cheaper
+        //    than a true 2D circular scan; see OctagonErode) — this shrinks
+        //    the region where the sharp layer is shown at full strength.
+        // 2. Gaussian-blur the eroded mask to feather the new, smaller edge.
+        // w is purely the sharp-vs-blurred blend weight: at w=1 the sharp
+        // layer shows fully, at w=0 only the blurred layer shows through.
+        // Increasing Blend Radius erodes w inward, revealing more of the
+        // blurred layer at the edge; at extreme radius w→0 everywhere and
+        // the sharp layer is fully eroded away. Output alpha is untouched —
+        // it still comes from Blur Amount's blurred alpha (Phase 4).
         // -----------------------------------------------------------------
-        float *weight = GaussBlurAlphaOnly(sharp_buf, outW, outH, (float)p.blend_radiusF);
+        t0 = MEB_Clock::now();
+        std::vector<float> sharp_alpha(outN);
+        for (size_t i = 0; i < outN; ++i) sharp_alpha[i] = sharp_buf[i * 4 + 0];
+
+        float *weight = new (std::nothrow) float[outN];
         if (!weight) {
             delete[] sharp_buf;
             delete[] blurred_buf;
@@ -530,16 +1021,33 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
             goto cleanup;
         }
 
+        OctagonErode(sharp_alpha.data(), weight, outW, outH, (float)p.blend_radiusF, in_data);
+
+        const auto blend_k = MakeBlendKernel((float)p.blend_radiusF);
+        if (!blend_k.empty()) GaussBlurPlane(weight, outW, outH, blend_k, in_data);
+
         for (size_t i = 0; i < outN; ++i) {
             weight[i] = clampF(weight[i], 0.f, 1.f);
         }
+        DebugLogTiming("BlendRadius", t0, MEB_Clock::now());
 
         // -----------------------------------------------------------------
         // Phase 4: Composite and pack output.
-        // Both sharp_buf and blurred_buf are premultiplied here.
-        // out_rgb   = lerp(blurred_rgb, sharp_rgb, w)
-        // out_alpha = blurred_alpha
+        // sharp_buf's RGB is true colour (held, zero only at alpha=0 — see
+        // the zero-RGB pass). blurred_buf's RGB is now ALSO true colour as of
+        // Phase 2's unpremultiply-by-division step, not premultiplied. Blend
+        // the two TRUE colours by w, then premultiply ONCE at the very end by
+        // out_alpha — not before. Multiplying earlier (per-layer, before this
+        // blend) is exactly what caused the black-halo bug: it darkens each
+        // layer's colour individually wherever ITS OWN alpha is low, before
+        // the blend even happens, rather than letting the blend produce a
+        // clean true-colour estimate first and only fading it via alpha once,
+        // at the end.
+        // out_rgb   = lerp(blurred_true_rgb, sharp_true_rgb, w) × out_alpha
+        // out_alpha = blurred_alpha  (unchanged — still Blur Amount's alpha)
         // -----------------------------------------------------------------
+        t0 = MEB_Clock::now();
+        std::vector<float> trackedOutRow;
         {
             std::vector<float> out_row((size_t)outW * 4);
 
@@ -550,19 +1058,53 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 float       *dst = out_row.data();
 
                 for (A_long x = 0; x < outW; ++x) {
-                    const float w   = wt[x];
-                    const float inv = 1.f - w;
-                    dst[0] = bl[0];
-                    dst[1] = sh[1] * w + bl[1] * inv;
-                    dst[2] = sh[2] * w + bl[2] * inv;
-                    dst[3] = sh[3] * w + bl[3] * inv;
+                    const float w      = wt[x];
+                    const float inv    = 1.f - w;
+                    const float outA   = bl[0];
+                    dst[0] = outA;
+                    dst[1] = (sh[1] * w + bl[1] * inv) * outA;
+                    dst[2] = (sh[2] * w + bl[2] * inv) * outA;
+                    dst[3] = (sh[3] * w + bl[3] * inv) * outA;
                     sh += 4; bl += 4; dst += 4;
                 }
+
+                if (y == g_edgeY) trackedOutRow = out_row;
 
                 void *outRow = reinterpret_cast<char*>(out_world->data) + y * out_world->rowbytes;
                 PackRow(out_row.data(), outRow, outW, fmt);
             }
         }
+        DebugLogTiming("Composite", t0, MEB_Clock::now());
+
+        // TEMPORARY DIAGNOSTIC — dump w, Blur Amount's alpha, sharp/blurred
+        // RGB, and the final composited RGBA across the same tracked edge
+        // pixel range as the EDGE DUMP above. Checks whether out_rgb and
+        // out_alpha stay consistent (out_alpha comes only from Blur Amount's
+        // blur, while the RGB blend weight w comes from Blend Radius's
+        // separate erosion+feather — if the two disagree near the edge,
+        // out_rgb can show meaningful colour while out_alpha has already
+        // dropped near zero, which is itself an invalid-premult condition
+        // independent of anything Phase 2 does). Remove once answered.
+        if (g_edgeX >= 0 && !trackedOutRow.empty()) {
+            char buf[320];
+            snprintf(buf, sizeof(buf), "PHASE4 DUMP: row=%ld", (long)g_edgeY);
+            DebugLog(buf);
+            const A_long lo = std::max((A_long)0, g_edgeX - 10);
+            const A_long hi = std::min(outW - 1, g_edgeX + 10);
+            for (A_long x = lo; x <= hi; ++x) {
+                const float *sh = sharp_buf   + ((size_t)g_edgeY * outW + x) * 4;
+                const float *bl = blurred_buf + ((size_t)g_edgeY * outW + x) * 4;
+                const float  w  = weight[(size_t)g_edgeY * outW + x];
+                const float *o  = trackedOutRow.data() + (size_t)x * 4;
+                snprintf(buf, sizeof(buf),
+                    "  x=%ld  w=%.4f  sh(a=%.3f r=%.3f)  bl(a=%.3f r=%.3f)  out(a=%.4f r=%.4f g=%.4f b=%.4f)",
+                    (long)x, w, sh[0], sh[1], bl[0], bl[1], o[0], o[1], o[2], o[3]);
+                DebugLog(buf);
+            }
+        }
+
+        DebugLogTiming("TOTAL", t_total0, MEB_Clock::now());
+        DebugLog("---");
 
         delete[] weight;
         delete[] blurred_buf;
@@ -570,6 +1112,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
     }
 
 cleanup:
+    DebugLogFlush();
     if (wsP) ERR2(AEFX_ReleaseSuite(in_data, out_data, kPFWorldSuite, kPFWorldSuiteVersion2, ""));
     return err;
 }

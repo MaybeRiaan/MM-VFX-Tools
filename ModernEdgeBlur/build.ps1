@@ -138,35 +138,69 @@ if ($vsGenerator) {
 
 Push-Location $BuildDir
 try {
+    # cmake/ninja/git below are native tools invoked directly (not wrapped in
+    # cmd /c), and every step already checks $LASTEXITCODE explicitly and
+    # throws on real failure. Under $ErrorActionPreference = "Stop" (the
+    # script default, restored below), any stderr line from a native command
+    # — even a harmless warning, not just a real failure — becomes a
+    # terminating error before those LASTEXITCODE checks ever run. Relax it
+    # for this native-tool region only; the explicit throws still catch real
+    # failures.
+    $ErrorActionPreference = "Continue"
+
     # Set up Visual Studio environment for Ninja if needed
+    $vsCMake = "cmake"
+    $vsNinjaExe = "ninja"
+    $vcvarsPath = $null
     if ($vsGenerator -eq "Ninja" -and $vsInstallPath) {
-        $vcvarsPath = Join-Path $vsInstallPath "VC\Auxiliary\Build\vcvars64.bat"
-        if (Test-Path $vcvarsPath) {
-            Write-Host "Setting up Visual Studio environment..." -ForegroundColor Cyan
-            # Run vcvars and capture environment
-            $tempFile = [System.IO.Path]::GetTempFileName()
-            cmd /c "`"$vcvarsPath`" && set" > $tempFile
-            Get-Content $tempFile | ForEach-Object {
-                if ($_ -match "^([^=]+)=(.*)$") {
-                    [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2])
-                }
-            }
-            Remove-Item $tempFile
+        # Prefer the CMake/Ninja bundled with this VS install over whatever
+        # "cmake"/"ninja" resolve to on PATH (a standalone system-wide CMake
+        # can win PATH resolution ahead of VS's own bundled copy).
+        $vsCMakeCandidate = Join-Path $vsInstallPath "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+        $vsNinjaCandidate = Join-Path $vsInstallPath "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+        if (Test-Path $vsCMakeCandidate) { $vsCMake = $vsCMakeCandidate }
+        if (Test-Path $vsNinjaCandidate) { $vsNinjaExe = $vsNinjaCandidate }
+
+        $vcvarsCandidate = Join-Path $vsInstallPath "VC\Auxiliary\Build\vcvars64.bat"
+        if (Test-Path $vcvarsCandidate) {
+            $vcvarsPath = $vcvarsCandidate
+            Write-Host "Will initialize Visual Studio environment for cmake/ninja calls..." -ForegroundColor Cyan
         }
     }
-    
+
+    # NOTE: vcvars64.bat + cmake/ninja are invoked together inside a single
+    # cmd.exe call below (see $configureCmd/$buildCmd), rather than capturing
+    # vcvars' "set" output and replaying it into this PowerShell process via
+    # [System.Environment]::SetEnvironmentVariable. That replay approach was
+    # tried first and reliably corrupted CMake's generated Ninja files —
+    # CMAKE_BUILD_TYPE came out as the literal, unexpanded text "$Config" in
+    # rules.ninja instead of "Release", even though the PowerShell variable
+    # itself held the correct value right up to the call. Some difference
+    # between a transplanted .NET environment block and a native cmd.exe
+    # inherited one confuses CMake's Ninja generator. Running vcvars and the
+    # tool invocation in the same native cmd.exe process sidesteps it — same
+    # reasoning as the 2>nul fix above, but for a correctness bug instead of a
+    # false-positive terminating error.
+
     if ($vsGenerator) {
         # Try with detected generator
         if ($vsGenerator -eq "Ninja") {
-            cmake .. -G $vsGenerator -DCMAKE_BUILD_TYPE=$Config
+            if ($vcvarsPath) {
+                $configureCmd = "call `"$vcvarsPath`" 2>nul && `"$vsCMake`" .. -G Ninja -DCMAKE_BUILD_TYPE=$Config"
+                cmd /c $configureCmd
+            } else {
+                & $vsCMake .. -G Ninja -DCMAKE_BUILD_TYPE=$Config
+            }
         }
         elseif ($vsToolset) {
             cmake .. -G $vsGenerator -A x64 -T $vsToolset
         } else {
             cmake .. -G $vsGenerator -A x64
         }
-        
-        if ($LASTEXITCODE -ne 0) {
+
+        # Ninja has no -A/platform concept or toolset — retrying with -A x64
+        # is only meaningful for the Visual Studio solution generators above.
+        if ($LASTEXITCODE -ne 0 -and $vsGenerator -ne "Ninja") {
             # Try without toolset
             Write-Host "Retrying without toolset specification..." -ForegroundColor Yellow
             cmake .. -G $vsGenerator -A x64
@@ -192,7 +226,12 @@ try {
     
     if ($vsGenerator -eq "Ninja") {
         Push-Location $BuildDir
-        ninja
+        if ($vcvarsPath) {
+            $buildCmd = "call `"$vcvarsPath`" 2>nul && `"$vsNinjaExe`""
+            cmd /c $buildCmd
+        } else {
+            & $vsNinjaExe
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "Build failed"
         }
@@ -215,8 +254,9 @@ try {
         Write-Host "Git commit created" -ForegroundColor Green
     }
     
+    $ErrorActionPreference = "Stop"
     Push-Location $BuildDir
-    
+
 } catch {
     Write-Host ""
     Write-Host "=== Build Failed ===" -ForegroundColor Red
