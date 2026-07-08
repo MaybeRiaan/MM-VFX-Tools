@@ -1,4 +1,4 @@
-/*  EdgeRepair.cpp — Stage 1: params + inflated checkout + tiling debug mode.
+/*  EdgeRepair.cpp — Stage 3: core matte + distance field + pull–push fill.
 
     Edge Repair extends trusted interior color across contaminated matte
     edges (keying halos, motion-blur rims) along a single per-frame Euclidean
@@ -9,13 +9,12 @@
     (Erode/Extend/Detail/Alpha Choke/View Mode, disk IDs 101-105); premult is
     internal-only, no knob.
 
-    THIS STAGE: the five params are registered and the inflated PreRender
-    checkout is implemented, but no image algorithm runs yet — every View
-    Mode renders passthrough. The one thing that DOES run is the tiling debug
-    visualization (compile-time switch ER_TILING_DEBUG), whose whole job is to
-    prove the inflation is correct: it makes any missing inflated border show
-    up as a hard seam at tile boundaries. Stages 2-4 replace the passthrough
-    body with the real pipeline.
+    THIS STAGE: Core Matte, Distance Field, and Extended Colour view modes
+    render their real pipelines (MM_CoreMatte.h + MM_DistanceField.h from
+    Stage 2, MM_PullPush.h from Stage 3 — the unlimited pull–push fill of
+    trusted core colour, shown straight/unpremultiplied). Result is still
+    passthrough; Stage 4 wires the distance-weighted composite + Detail +
+    Alpha Choke there.
 
     THE #1 CORRECTNESS PROPERTY — input-rect inflation. Unlike ModernEdgeBlur
     (which deliberately does NO inflation), every pixel of Edge Repair's
@@ -42,6 +41,7 @@
 #include "common/MM_Common.h"
 #include "common/MM_DistanceField.h"
 #include "common/MM_CoreMatte.h"
+#include "common/MM_PullPush.h"
 
 #include <cmath>
 #include <cstring>
@@ -292,6 +292,20 @@ struct ER_DistViewRefcon {
     A_long          outW;
 };
 
+// Extended Colour (Stage 3): the pull–push fill result — straight
+// (unpremultiplied) RGB, shown fully opaque. Deliberately UNLIMITED: this
+// view exists to inspect raw fill quality everywhere, so the Extend clamp
+// (which only governs how far the result is USED in the Stage 4 composite)
+// does not apply here.
+struct ER_ExtViewRefcon {
+    const float    *ext;        // srcW*srcH*3 straight RGB
+    A_long          srcW;
+    A_long          srcOX, srcOY;
+    PF_EffectWorld *out_world;
+    PF_PixelFormat  fmt;
+    A_long          outW;
+};
+
 extern "C" {
 
 static PF_Err
@@ -327,6 +341,25 @@ ER_DistViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*ite
     for (A_long ox = 0; ox < W; ++ox, dst += 4) {
         const float v = mm::ClampF(srow[ox] * rc->invMaxDisplay, 0.f, 1.f);
         dst[0] = 1.f; dst[1] = v; dst[2] = v; dst[3] = v;
+    }
+
+    void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
+    mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+    return PF_Err_NONE;
+}
+
+static PF_Err
+ER_ExtViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iterationsL*/)
+{
+    const ER_ExtViewRefcon *rc = static_cast<const ER_ExtViewRefcon*>(refconPV);
+    const A_long W = rc->outW;
+    const float *srow = rc->ext + ((size_t)(oy + rc->srcOY) * rc->srcW + rc->srcOX) * 3;
+
+    thread_local std::vector<float> rowv;
+    if ((A_long)rowv.size() < W * 4) rowv.resize((size_t)W * 4);
+    float *dst = rowv.data();
+    for (A_long ox = 0; ox < W; ++ox, dst += 4, srow += 3) {
+        dst[0] = 1.f; dst[1] = srow[0]; dst[2] = srow[1]; dst[3] = srow[2];
     }
 
     void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
@@ -603,10 +636,35 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 mm::ForEachRow(in_data, outH, &rc, ER_DistViewRow);
                 break;
             }
+            case ER_VIEW_EXTENDED_COLOUR: {
+                // Stage 3: the unlimited pull–push fill of trusted core
+                // colour over the full inflated source, cropped to output by
+                // the view callback. srcBuf is AE-native premultiplied, which
+                // is exactly what PullPushFill wants; the fill unpremultiplies
+                // internally, so `ext` is straight RGB.
+                std::vector<float> ext;
+                try {
+                    ext.resize(srcN * 3);   // value-init → black
+                } catch (const std::bad_alloc &) {
+                    err = PF_Err_OUT_OF_MEMORY;
+                    goto cleanup;
+                }
+                // Empty core → no trusted colour exists anywhere; leave the
+                // zero-init black rather than showing garbage (same guard
+                // philosophy as the Distance Field view).
+                mm::PullPushFill(srcBuf.data(), core.data(), ext.data(),
+                                 (int)srcW, (int)srcH);
+
+                ER_ExtViewRefcon rc;
+                rc.ext = ext.data(); rc.srcW = srcW;
+                rc.srcOX = srcOX; rc.srcOY = srcOY;
+                rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
+                mm::ForEachRow(in_data, outH, &rc, ER_ExtViewRow);
+                break;
+            }
             case ER_VIEW_RESULT:
-            case ER_VIEW_EXTENDED_COLOUR:
             default: {
-                // Passthrough until Stages 3-4 wire up fill + composite.
+                // Passthrough until Stage 4 wires up the composite.
                 ER_PassRefcon rc;
                 rc.src = srcBuf.data(); rc.srcW = srcW;
                 rc.srcOX = srcOX; rc.srcOY = srcOY;
