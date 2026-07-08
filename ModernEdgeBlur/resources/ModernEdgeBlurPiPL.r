@@ -10,7 +10,7 @@
 #define	MINOR_VERSION	2
 #define	BUG_VERSION		0
 #define	STAGE_VERSION	0	// PF_Stage_DEVELOP (enum value 0) — must match ModernEdgeBlur.h
-#define	BUILD_VERSION	9
+#define	BUILD_VERSION	10
 
 #ifndef AE_OS_WIN
 	#include <AE_General.r>
