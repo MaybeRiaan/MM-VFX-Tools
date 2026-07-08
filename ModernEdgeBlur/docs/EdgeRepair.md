@@ -156,14 +156,29 @@ before continuing. Keep every stage compiling and loadable in AE.
   (`tests/test_distancefield.cpp` + `tests/build_tests.ps1`, no AE needed)
   — PASSED, worst |diff| = 0 across filled circle, 1px line, checkerboard,
   single/no/full-seed, two-corners, non-convex random fields, vs a
-  brute-force O(n^2) reference. **AE visual check of the two new view modes
-  was requested but not yet confirmed by the user as of 2026-07-06** — do
-  this first in the next session before moving on.
-- **Stage 3 — Pull–push fill (CPU, float32 only).** NOT STARTED. View Mode =
-  Extended Colour shows the unlimited unpremultiplied fill. *Gate:* visual
-  compare against reference edge-extension output on real keyed plates; no
-  blockiness, no colour bleeding from zero-alpha garbage pixels (coverage
-  weighting must be correct).
+  brute-force O(n^2) reference. AE visual check: **PASSED, user-confirmed
+  2026-07-08** — Core Matte erode/grow uniform with no faceting; Distance
+  Field radially even. (User flagged a "bunching" crease converging into a
+  sharp matte corner — that is the field's medial axis, where distance
+  wavefronts from the corner's two edges collide along the angle bisector.
+  Expected/correct for an exact EDT on a sharp corner; the failure signature
+  would have been faceting on the smooth regions instead. Re-check blend
+  continuity across that ridge at the Stage 4 gate.)
+- **Stage 3 — Pull–push fill (CPU, float32 only).** BUILT, commit `06bf37e`
+  (v1.0.0.6). `src/common/MM_PullPush.h` (AE-free, Gortler hole-filling
+  form): mip pull of (premult RGB, coverage=alpha) over CORE pixels only,
+  bilinear push fills only coverage-0 texels from the already-fully-covered
+  coarser level, unpremultiply at the end; total fill guaranteed when any
+  core pixel exists. View Mode = Extended Colour shows the unlimited
+  (pre-`Extend`-clamp) straight-RGB fill, opaque; empty core renders black.
+  Headless test `tests/test_pullpush.cpp` PASSED: constant-colour exactness
+  (odd dims, varying alpha), bit-identical output under invalid-pixel
+  garbage, convex-hull no-overshoot, proximity to nearest trusted block,
+  semi-transparent unpremult recovery, full-valid passthrough, single-seed +
+  1-wide strips, zero-alpha "valid" guard. *Gate (PENDING user visual
+  check):* compare against reference edge-extension output on real keyed
+  plates; no blockiness, no colour bleeding from zero-alpha garbage pixels
+  (coverage weighting must be correct).
 - **Stage 4 — Composite + Detail + Alpha Choke.** NOT STARTED. Full Result
   mode: distance-driven blend, frequency separation, choke, alpha
   passthrough (internal premultiply/unpremultiply happens here — see
