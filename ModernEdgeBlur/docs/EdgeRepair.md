@@ -242,14 +242,25 @@ before continuing. Keep every stage compiling and loadable in AE.
   steps against the surviving soft skirt (documented simplification in
   `MM_Composite.h`).
 
-  *Gate (PENDING re-check on v1.0.0.8):* motion-blurred bright-background
+  **Gate round 2 (2026-07-09, v1.0.0.8): both round-1 fixes verified by the
+  user** — (a) constant-colour solid + feathered mask: perfectly smooth
+  gradient, zero colour introduced; (b) shift test: passes. **One further
+  real bug found on a real-world plate and fixed in v1.0.0.9:** a light
+  blue-grey rim at defaults — the Detail low-pass was ALPHA-WEIGHTED, which
+  skews `low` toward the opaque side at edge pixels, so `hi = orig - low`
+  captured the contamination difference instead of texture and Detail=100
+  (the default) re-added the keyer fringe on top of the decontaminated
+  base. Fix: `low` is now the brief's literal plain `gaussianBlur(origRGB)`
+  (well-posed in straight-alpha worlds). Related observation from the same
+  round: a fat dark repaint band at high Erode (8.2) — partly consequence
+  of fighting the rim bug with Erode, partly inherent: eroded-away OPAQUE
+  pixels are by definition untrusted and get their shading replaced by flat
+  extension colour. Expect far less Erode to be needed post-fix.
+
+  *Gate (PENDING re-check on v1.0.0.9):* motion-blurred bright-background
   plate over dark shows no fringe and no dead-smooth synthetic zone; Alpha
   Choke=0 produces bit-identical alpha to input; Detail 0 vs 100 differs
-  only inside the blend band. Empirical checks for the two fixes: (a) a
-  constant-colour solid with a feathered mask must show ZERO RGB variation
-  across the feather in Result at defaults (any darkening = premult
-  regression); (b) toggling the effect on a layer larger than the comp must
-  not shift the image. NOTE for Stage 5: the Gaussian/EDT/fill run
+  only inside the blend band. NOTE for Stage 5: the Gaussian/EDT/fill run
   single-threaded and allocate per frame — Result at 4K float will be slow
   (seconds/frame); that is Stage 5's whole job, judge Stage 4 on
   correctness only.

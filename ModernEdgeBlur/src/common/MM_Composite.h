@@ -17,11 +17,17 @@
     ── In-band RGB composite (straight/unpremultiplied space) ───────────────
         out = lerp(low, ext, w) + lerp(1, detail, w) * hi
     where
-        low    = alpha-weighted Gaussian low-pass of the plate's straight RGB
+        low    = PLAIN (unweighted) Gaussian low-pass of the plate's straight
+                 RGB — per the brief's `gaussianBlur(origRGB, r)`. It must
+                 NOT be alpha-weighted: weighting skews `low` toward the
+                 opaque side at edges, so hi captures the contamination
+                 difference instead of texture and Detail re-adds the fringe
+                 (Stage 4 gate round 2 finding). Straight-alpha worlds have
+                 RGB defined everywhere, so the plain blur is well-posed.
         ext    = pull–push extended trusted colour (straight)
         hi     = origStraight - low  (the plate's high-frequency texture;
-                 callers must force hi = 0 where alpha ~ 0 — no plate
-                 detail exists there)
+                 callers must force hi = 0 where alpha ~ 0 — those pixels'
+                 RGB may be unmatted garbage in some sources)
         detail = Detail param / 100
     Behaviour: at the band's outer edge (w -> 0) out -> low + hi = orig
     exactly, for ANY detail value — the Detail attenuation is itself

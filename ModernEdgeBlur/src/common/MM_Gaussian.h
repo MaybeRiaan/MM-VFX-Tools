@@ -1,15 +1,13 @@
 /*  MM_Gaussian.h — separable Gaussian blur, AE-free and header-only
     (unit-testable headlessly — see tests/test_gaussian.cpp).
 
-    Used by Edge Repair's Detail frequency split: the "low" band is an
-    ALPHA-WEIGHTED low-pass of the plate's straight colour, computed as
-        low = blur(premultRGB) / blur(alpha)
-    (blur each premultiplied channel and the alpha plane separately with the
-    same kernel, then divide, guarding blur(alpha) ~ 0). That weighting is
-    what keeps zero-alpha garbage pixels out of the low band — the same
-    premult→blur→unpremult discipline the rest of the suite follows. This
-    header provides only the planar blur passes; the caller composes the
-    weighted divide.
+    Used by Edge Repair's Detail frequency split: the "low" band is a PLAIN
+    Gaussian low-pass of the plate's straight RGB (the brief's
+    `gaussianBlur(origRGB, r)` — unweighted; see MM_Composite.h for why an
+    alpha-weighted variant is wrong there). This header provides only the
+    planar blur passes; callers compose whatever weighting their maths
+    needs (the weighted-divide property is still covered by the unit test
+    as a primitive guarantee).
 
     Border policy: clamp-to-edge (replicate the outermost sample). Kernel:
     half-width = ceil(radius) taps each side, sigma = radius/2, normalized

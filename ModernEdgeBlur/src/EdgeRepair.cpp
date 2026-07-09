@@ -847,32 +847,28 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                     }
                 }
                 if (doBand) {
-                    // low = blur(a * straightRGB) / blur(a) per channel —
-                    // premult→blur→unpremult (the ModernEdgeBlur black-halo
-                    // lesson): the source is STRAIGHT alpha, so the coverage
-                    // weighting must be applied here, before blurring, or
-                    // zero-alpha garbage leaks into the low band. Where no
-                    // alpha lives within the kernel, fall back to the
-                    // extension so `low` is defined everywhere the band
-                    // can reach.
+                    // low = gaussianBlur(straight RGB), PLAIN and unweighted
+                    // — exactly what the brief specifies. In a straight-alpha
+                    // world the plate's RGB is defined everywhere, so this is
+                    // well-posed, and it is the ONLY split for which
+                    // hi = orig - low is genuinely zero-mean local texture.
+                    // (Stage 4 gate round 2 finding: an alpha-WEIGHTED blur
+                    // here skews `low` toward the opaque side at edges, so hi
+                    // captured the contamination difference instead of
+                    // texture, and Detail=100 — the default — re-added the
+                    // very fringe being repaired as a light rim.)
                     try {
-                        std::vector<float> plane(srcN), tmp(srcN), ba(srcN);
+                        std::vector<float> plane(srcN), tmp(srcN);
                         const std::vector<float> kern =
                             mm::BuildGaussianKernel(ER_TEXTURE_BLUR_RADIUS);
 
-                        for (size_t i = 0; i < srcN; ++i) ba[i] = srcBuf[i * 4 + 0];
-                        mm::GaussianBlurH(ba.data(), tmp.data(), (int)srcW, (int)srcH, kern);
-                        mm::GaussianBlurV(tmp.data(), ba.data(), (int)srcW, (int)srcH, kern);
-
                         for (int ch = 0; ch < 3; ++ch) {
                             for (size_t i = 0; i < srcN; ++i)
-                                plane[i] = srcBuf[i * 4 + 1 + ch] * srcBuf[i * 4 + 0];
+                                plane[i] = srcBuf[i * 4 + 1 + ch];
                             mm::GaussianBlurH(plane.data(), tmp.data(), (int)srcW, (int)srcH, kern);
                             mm::GaussianBlurV(tmp.data(), plane.data(), (int)srcW, (int)srcH, kern);
                             for (size_t i = 0; i < srcN; ++i)
-                                low[i * 3 + ch] = ba[i] > 1e-6f
-                                    ? plane[i] / ba[i]
-                                    : ext[i * 3 + ch];
+                                low[i * 3 + ch] = plane[i];
                         }
                     } catch (const std::bad_alloc &) {
                         err = PF_Err_OUT_OF_MEMORY;
