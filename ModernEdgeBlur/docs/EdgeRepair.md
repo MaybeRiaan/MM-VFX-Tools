@@ -175,10 +175,17 @@ before continuing. Keep every stage compiling and loadable in AE.
   (odd dims, varying alpha), bit-identical output under invalid-pixel
   garbage, convex-hull no-overshoot, proximity to nearest trusted block,
   semi-transparent unpremult recovery, full-valid passthrough, single-seed +
-  1-wide strips, zero-alpha "valid" guard. *Gate (PENDING user visual
-  check):* compare against reference edge-extension output on real keyed
-  plates; no blockiness, no colour bleeding from zero-alpha garbage pixels
-  (coverage weighting must be correct).
+  1-wide strips, zero-alpha "valid" guard. *Gate (PASSED, user-confirmed
+  2026-07-09 on real keyed plates):* full-frame fill, no blockiness, no
+  zero-alpha bleed, Erode changes the colour source, corners fan cleanly.
+  Two expected-behaviour observations recorded: (1) a near-edge "glow" —
+  the outermost trusted core pixels still carry background contamination at
+  small Erode; confirmed it RECEDES as Erode increases (the knob working as
+  designed — deeper core = cleaner source). (2) far from the core the fill
+  converges to the coverage-weighted global average colour (the 1x1 mip) —
+  inherent to pull–push, harmless because Stage 4 only uses the band
+  d <= Extend; visible only in the deliberately-unclamped Extended Colour
+  view.
 - **Stage 4 — Composite + Detail + Alpha Choke.** NOT STARTED. Full Result
   mode: distance-driven blend, frequency separation, choke, alpha
   passthrough (internal premultiply/unpremultiply happens here — see
