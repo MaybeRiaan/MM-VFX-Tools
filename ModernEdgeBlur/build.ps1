@@ -12,6 +12,13 @@ $ErrorActionPreference = "Stop"
 # Paths
 $ProjectRoot = $PSScriptRoot
 $VersionHeader = Join-Path $ProjectRoot "src\ModernEdgeBlur.h"
+# The PiPL carries its OWN copy of the version defines and AE compares the
+# packed AE_Effect_Version integer from BOTH sides at load. If they drift by
+# even one build number AE rejects the effect with a misleading "version
+# mismatch. Code version is 1.2 and PiPL version is 1.2" (it prints only
+# MAJOR.MINOR but compares the full packed value). So every bump must touch
+# BOTH files - see Update-BuildVersion.
+$PiplResource = Join-Path $ProjectRoot "resources\ModernEdgeBlurPiPL.r"
 $BuildDir = Join-Path $ProjectRoot "build"
 $GitRepo = Join-Path $ProjectRoot ".git"
 
@@ -35,15 +42,19 @@ function Get-CurrentVersion {
     }
 }
 
-# Function to update build version in ModernEdgeBlur.h
+# Function to update build version in ModernEdgeBlur.h and the PiPL
 function Update-BuildVersion {
     param([int]$NewBuild)
-    
-    $content = Get-Content $VersionHeader -Raw
-    $content = $content -replace '(#define\s+BUILD_VERSION\s+)\d+', "`${1}$NewBuild"
-    Set-Content $VersionHeader -Value $content -NoNewline
-    
-    Write-Host "Updated BUILD_VERSION to $NewBuild" -ForegroundColor Green
+
+    # Bump BOTH the header and the PiPL - AE compares the packed version from
+    # each and rejects on any drift (see $PiplResource note above).
+    foreach ($file in @($VersionHeader, $PiplResource)) {
+        $content = Get-Content $file -Raw
+        $content = $content -replace '(#define\s+BUILD_VERSION\s+)\d+', "`${1}$NewBuild"
+        Set-Content $file -Value $content -NoNewline
+    }
+
+    Write-Host "Updated BUILD_VERSION to $NewBuild (header + PiPL)" -ForegroundColor Green
 }
 
 # Get current version
@@ -249,7 +260,7 @@ try {
     if ((Test-Path $GitRepo) -and (-not $NoBuildIncrement)) {
         Write-Host ""
         Write-Host "Committing version update to git..." -ForegroundColor Cyan
-        git add $VersionHeader
+        git add $VersionHeader $PiplResource
         git commit -m "Build v$versionString - Auto-increment build version"
         Write-Host "Git commit created" -ForegroundColor Green
     }
