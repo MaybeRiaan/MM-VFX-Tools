@@ -17,10 +17,16 @@
     anchored at the ALPHA'S OWN edge (per the 2026-07-09 decision — extra
     EDT, Erode-independent, profile-preserving). All per-pixel formulas live
     in src/common/MM_Composite.h — that header is the CPU/GPU lockstep
-    contract. Internal premult flow: AE hands premultiplied pixels; the
-    composite unpremultiplies per pixel (guard a=0), works in straight
-    space, and re-premultiplies by the (possibly choked) output alpha.
-    Remaining: Stage 5 = CPU perf, Stage 6 = GPU.
+    contract.
+
+    ALPHA CONVENTION (fixed at the Stage 4 gate — the "dark edge" bug): AE
+    effect worlds are STRAIGHT (unmatted) alpha, in AND out — the same
+    lesson ModernEdgeBlur's black-halo bug taught (premult→blur→unpremult).
+    The brief's original "AE hands premultiplied pixels" claim was wrong.
+    So: px RGB is straight colour; wherever the maths must be coverage-
+    weighted (pull–push level-0 init, the Detail low-pass) the premultiply
+    happens INTERNALLY and is divided back out; the output RGB is never
+    scaled by alpha. Remaining: Stage 5 = CPU perf, Stage 6 = GPU.
 
     THE #1 CORRECTNESS PROPERTY — input-rect inflation. Unlike ModernEdgeBlur
     (which deliberately does NO inflation), every pixel of Edge Repair's
@@ -88,11 +94,18 @@ static A_long ER_InflateRadius(const ER_Params &p)
     return r < 0 ? 0 : r;
 }
 
-// Stashed by PreRender, read by SmartRender. Just the inflation amount — the
-// source-world origin offset is recovered from the checked-out world itself
-// in SmartRender, so nothing here needs to survive that isn't a plain scalar.
+// Stashed by PreRender, read by SmartRender. The two checkout rects are the
+// ONLY reliable way to map output pixels to source pixels: inferring the
+// offset from buffer-size differences (the original approach) silently
+// assumed AE clamps the inflated request symmetrically — when it clamps one
+// side only (layer extending past the comp on one side, tiled requests) the
+// inferred offset was wrong by up to the full inflation radius and the whole
+// image shifted. Found at the Stage 4 gate as a visible layer shift on
+// effect toggle.
 typedef struct {
-    A_long inflate;   // px added on every side in PreRender
+    A_long   inflate;   // px added on every side in PreRender
+    PF_LRect inRect;    // in_result.result_rect — the source world's rect
+    PF_LRect outRect;   // output result rect (post-clamp) — the out world's rect
 } ER_PreRenderData;
 
 // AE calls this to free the block we handed it via
@@ -382,7 +395,7 @@ ER_ExtViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iter
 // the alpha-edge field, then inside the band 0 < d <= Extend replace the
 // plate's low frequencies with the extension and lay the plate's own high
 // frequencies back on top scaled by Detail. Straight-space maths from
-// MM_Composite.h; premult in/out. Null pointers switch features off:
+// MM_Composite.h; STRAIGHT alpha in and out. Null pointers switch features off:
 //   dist/ext/low == null → band inactive (Extend 0, or empty core)
 //   chokeField   == null → choke inactive (choke 0, or no seeds)
 // The w<=0, newA==a fast path copies the source premult VERBATIM — that is
@@ -390,7 +403,7 @@ ER_ExtViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iter
 // alpha" hold bitwise, not just approximately.
 // ---------------------------------------------------------------------------
 struct ER_ResultRefcon {
-    const float    *src;        // inflated premult ARGB
+    const float    *src;        // inflated STRAIGHT-alpha ARGB
     const float    *dist;       // core distance field (null = band off)
     const float    *ext;        // straight extended colour (null = band off)
     const float    *low;        // straight low-pass, ext fallback baked in (null = band off)
@@ -439,25 +452,26 @@ ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*itera
             if (d > 0.f) w = mm::BlendWeight(d, rc->extendF);
         }
 
+        // STRAIGHT alpha throughout (AE's effect-world convention — see the
+        // file header): px[1..3] ARE the straight colour, and the output RGB
+        // is never scaled by alpha. Premultiplying here was the Stage 4 gate
+        // "dark edge along the alpha boundary" bug — every semi-transparent
+        // pixel came out darkened by exactly its alpha.
         if (w <= 0.f) {
             if (newA == a) {
-                // Bitwise passthrough — no unpremult round trip.
+                // Bitwise passthrough.
                 dst[0] = px[0]; dst[1] = px[1]; dst[2] = px[2]; dst[3] = px[3];
-            } else if (a > 1e-6f) {
-                // Alpha changed, colour didn't: rescale premult directly.
-                const float s = newA / a;
-                dst[0] = newA;
-                dst[1] = px[1] * s; dst[2] = px[2] * s; dst[3] = px[3] * s;
             } else {
-                // Grown alpha over a zero-alpha pixel — the extension is the
-                // only colour that exists for it.
+                // Choke changed alpha; colour is alpha-independent, so it
+                // stays — except a grown zero-alpha pixel, whose own RGB is
+                // undefined garbage: the extension is its only real colour.
                 dst[0] = newA;
-                if (rc->ext && newA > 0.f) {
-                    dst[1] = rc->ext[i * 3 + 0] * newA;
-                    dst[2] = rc->ext[i * 3 + 1] * newA;
-                    dst[3] = rc->ext[i * 3 + 2] * newA;
+                if (a <= 1e-6f && rc->ext) {
+                    dst[1] = rc->ext[i * 3 + 0];
+                    dst[2] = rc->ext[i * 3 + 1];
+                    dst[3] = rc->ext[i * 3 + 2];
                 } else {
-                    dst[1] = dst[2] = dst[3] = 0.f;
+                    dst[1] = px[1]; dst[2] = px[2]; dst[3] = px[3];
                 }
             }
         } else {
@@ -466,18 +480,17 @@ ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*itera
             const float *L = rc->low + i * 3;
             float hi[3];
             if (a > 1e-6f) {
-                const float inv = 1.f / a;
                 for (int c = 0; c < 3; ++c)
-                    hi[c] = px[1 + c] * inv - L[c];
+                    hi[c] = px[1 + c] - L[c];
             } else {
                 hi[0] = hi[1] = hi[2] = 0.f;   // no plate detail at a = 0
             }
             float outS[3];
             mm::ComposeBandRGB(L, E, hi, w, rc->detail01, outS);
             dst[0] = newA;
-            dst[1] = outS[0] * newA;
-            dst[2] = outS[1] * newA;
-            dst[3] = outS[2] * newA;
+            dst[1] = outS[0];
+            dst[2] = outS[1];
+            dst[3] = outS[2];
         }
     }
 
@@ -571,11 +584,13 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
     ERR(ReadParams(in_data, &p));
     const A_long inflate = err ? 0 : ER_InflateRadius(p);
 
-    // Stash the inflation amount for SmartRender. AE owns this pointer once
-    // assigned and frees it via our PF_Cmd_SMART_PRE_RENDER cleanup contract.
+    // Stash the inflation amount for SmartRender (rects filled in below,
+    // once the checkout reports what AE will actually return). AE owns this
+    // pointer once assigned and frees it via our cleanup contract.
     ER_PreRenderData *prd = static_cast<ER_PreRenderData*>(
         malloc(sizeof(ER_PreRenderData)));
     if (prd) {
+        memset(prd, 0, sizeof(*prd));
         prd->inflate = inflate;
         extra->output->pre_render_data = prd;
         extra->output->delete_pre_render_data_func = ER_DeletePreRenderData;
@@ -591,10 +606,9 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
         req.rect.right  += inflate;
         req.rect.bottom += inflate;
     }
-    // Internal-only premult handling: we ask AE for premultiplied pixels
-    // (its native delivery) and hand them back premultiplied. No preserve
-    // override — that is a user-facing footage-interpretation knob we do not
-    // expose.
+    // No footage-interpretation override: AE effect worlds are STRAIGHT
+    // alpha in and out (see the file header — coverage weighting happens
+    // internally where the maths needs it, never at the AE boundary).
 
     PF_CheckoutResult in_result;
     ERR(extra->cb->checkout_layer(in_data->effect_ref,
@@ -612,6 +626,15 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
     if (extra->output->result_rect.top    < out_req.top)    extra->output->result_rect.top    = out_req.top;
     if (extra->output->result_rect.right  > out_req.right)  extra->output->result_rect.right  = out_req.right;
     if (extra->output->result_rect.bottom > out_req.bottom) extra->output->result_rect.bottom = out_req.bottom;
+
+    // Record the actual rects: the source world SmartRender checks out
+    // corresponds to in_result.result_rect, the output world to our clamped
+    // result_rect. Their origin difference IS the output→source offset —
+    // no size-based inference (see ER_PreRenderData note).
+    if (prd && !err) {
+        prd->inRect  = in_result.result_rect;
+        prd->outRect = extra->output->result_rect;
+    }
 
     return err;
 }
@@ -656,16 +679,19 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         const A_long outW = out_world->width;
         const A_long outH = out_world->height;
 
-        // Output→source origin offset. AE gives the inflated source its own
-        // extent; the output's top-left sits `inflate` pixels in from the
-        // source's top-left, BUT only as far as the layer edge allowed the
-        // inflation to actually happen. Recover the true offset from how much
-        // bigger the source came back on each leading edge, capped at the
-        // requested inflate and floored at 0. Using the size difference keeps
-        // us correct when AE clamped the inflated request at the layer
-        // boundary (source smaller than out+2*inflate on that side).
-        A_long srcOX = inflate, srcOY = inflate;
-        if (srcOX > (srcW - outW)) srcOX = srcW - outW;   // clamped at left/right layer edge
+        // Output→source origin offset, from the ACTUAL checkout rects stashed
+        // in PreRender: output pixel (0,0) sits at source pixel
+        // (outRect.left - inRect.left, outRect.top - inRect.top). The old
+        // size-difference inference silently assumed symmetric clamping and
+        // shifted the image when AE clamped the inflated request on one side
+        // only (Stage 4 gate finding). Defensive clamps keep addressing in
+        // bounds if the delivered worlds ever disagree with the rects.
+        A_long srcOX = 0, srcOY = 0;
+        if (prd) {
+            srcOX = prd->outRect.left - prd->inRect.left;
+            srcOY = prd->outRect.top  - prd->inRect.top;
+        }
+        if (srcOX > (srcW - outW)) srcOX = srcW - outW;
         if (srcOY > (srcH - outH)) srcOY = srcH - outH;
         if (srcOX < 0) srcOX = 0;
         if (srcOY < 0) srcOY = 0;
@@ -720,9 +746,8 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
             goto cleanup;
         }
 
-        // Extract the straight-alpha plane from the inflated source. (AE
-        // hands premultiplied pixels; alpha itself is identical either way,
-        // so no unpremult is needed just to threshold it.)
+        // Extract the alpha plane from the inflated source (straight-alpha
+        // worlds — the alpha channel is the coverage, used directly).
         std::vector<float>   alphaPlane;
         std::vector<uint8_t> core;
         std::vector<float>   dist;
@@ -822,11 +847,14 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                     }
                 }
                 if (doBand) {
-                    // low = blur(premult)/blur(alpha) per channel — the
-                    // alpha-weighted split that keeps zero-alpha garbage out
-                    // of the low band (see MM_Gaussian.h). Where no alpha
-                    // lives within the kernel, fall back to the extension so
-                    // `low` is defined everywhere the band can reach.
+                    // low = blur(a * straightRGB) / blur(a) per channel —
+                    // premult→blur→unpremult (the ModernEdgeBlur black-halo
+                    // lesson): the source is STRAIGHT alpha, so the coverage
+                    // weighting must be applied here, before blurring, or
+                    // zero-alpha garbage leaks into the low band. Where no
+                    // alpha lives within the kernel, fall back to the
+                    // extension so `low` is defined everywhere the band
+                    // can reach.
                     try {
                         std::vector<float> plane(srcN), tmp(srcN), ba(srcN);
                         const std::vector<float> kern =
@@ -838,7 +866,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
 
                         for (int ch = 0; ch < 3; ++ch) {
                             for (size_t i = 0; i < srcN; ++i)
-                                plane[i] = srcBuf[i * 4 + 1 + ch];
+                                plane[i] = srcBuf[i * 4 + 1 + ch] * srcBuf[i * 4 + 0];
                             mm::GaussianBlurH(plane.data(), tmp.data(), (int)srcW, (int)srcH, kern);
                             mm::GaussianBlurV(tmp.data(), plane.data(), (int)srcW, (int)srcH, kern);
                             for (size_t i = 0; i < srcN; ++i)

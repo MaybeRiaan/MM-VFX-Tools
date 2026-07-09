@@ -73,11 +73,16 @@ negative dilates it outward (not one-directional).
 reintroduced without an explicit new ask:**
 - **Softness / falloff / edge-blur** — a separate suite plugin
   (ModernEdgeBlur) owns edge shaping. Not this tool's job.
-- **Premultiplied as a user parameter** — internal only. AE hands the effect
-  premultiplied pixels and expects them back premultiplied:
-  unpremultiply on input (guard alpha=0), do the extend/Detail math in
-  unpremult space, re-premultiply on output. No knob, no override of AE's
-  footage interpretation.
+- **Premultiplied as a user parameter** — internal only. No knob, no
+  override of AE's footage interpretation. **[CORRECTED 2026-07-09 — the
+  original brief text here claimed "AE hands the effect premultiplied
+  pixels"; that is WRONG and caused the Stage 4 round-1 "dark edge along
+  the alpha boundary" bug.]** AE effect worlds are STRAIGHT (unmatted)
+  alpha, in AND out — the same convention ModernEdgeBlur's black-halo bug
+  established (premult→blur→unpremult). Wherever the maths must be
+  coverage-weighted (pull–push level-0 init, the Detail low-pass Gaussian)
+  the premultiply happens INTERNALLY and is divided back out; output RGB is
+  never scaled by alpha.
 - External matte/layer parameters, "recompose with original," channel
   selectors, invert toggles, grain/noise synthesis (Detail supersedes it), GPU
   code before Stage 6.
@@ -213,13 +218,41 @@ before continuing. Keep every stage compiling and loadable in AE.
   Headless tests `tests/test_gaussian.cpp` + `tests/test_composite.cpp`
   PASSED (kernel/constant/impulse/linearity/weighted-divide; blend-weight
   endpoints+monotonicity, w=0 exact-orig for any Detail, outer-edge
-  continuity, choke identity/ramp/zero, grow no-harden). *Gate (PENDING
-  user visual check):* motion-blurred bright-background plate over dark
-  shows no fringe and no dead-smooth synthetic zone; Alpha Choke=0 produces
-  bit-identical alpha to input; Detail 0 vs 100 differs only inside the
-  blend band. NOTE for Stage 5: the Gaussian/EDT/fill run single-threaded
-  and allocate per frame — Result at 4K float will be slow (seconds/frame);
-  that is Stage 5's whole job, judge Stage 4 on correctness only.
+  continuity, choke identity/ramp/zero, grow no-harden).
+
+  **Gate round 1 (2026-07-09, v1.0.0.7): FAILED — two real bugs, both fixed
+  in v1.0.0.8:**
+  1. *Dark edge along the alpha boundary* — the composite premultiplied its
+     output (and unpremultiplied its input), but AE effect worlds are
+     STRAIGHT alpha (see the corrected Parameters note above). Every
+     semi-transparent pixel came out darkened by exactly its alpha. Fix:
+     straight-in/straight-out everywhere; pull–push and the Detail low-pass
+     premultiply internally only (`MM_PullPush.h` contract updated + its
+     test; `EdgeRepair.cpp` ResultRow no longer scales RGB by alpha).
+  2. *Layer shifts on effect toggle* — SmartRender inferred the
+     output→source offset from buffer-size differences, which assumed AE
+     clamps the inflated checkout symmetrically; one-sided clamping (layer
+     larger than comp on one side, tiles) shifted the image by up to the
+     inflation radius. Fix: PreRender stashes `in_result.result_rect` and
+     the clamped output rect in pre_render_data; SmartRender derives the
+     offset from the rect origins.
+  Also recorded from round 1 (not bugs, by-design v1 semantics to revisit):
+  choke-in truncates the soft skirt with a 1px ramp (Simple Choker-like —
+  user provisionally OK with it); grow produces a full-opacity collar that
+  steps against the surviving soft skirt (documented simplification in
+  `MM_Composite.h`).
+
+  *Gate (PENDING re-check on v1.0.0.8):* motion-blurred bright-background
+  plate over dark shows no fringe and no dead-smooth synthetic zone; Alpha
+  Choke=0 produces bit-identical alpha to input; Detail 0 vs 100 differs
+  only inside the blend band. Empirical checks for the two fixes: (a) a
+  constant-colour solid with a feathered mask must show ZERO RGB variation
+  across the feather in Result at defaults (any darkening = premult
+  regression); (b) toggling the effect on a layer larger than the comp must
+  not shift the image. NOTE for Stage 5: the Gaussian/EDT/fill run
+  single-threaded and allocate per frame — Result at 4K float will be slow
+  (seconds/frame); that is Stage 5's whole job, judge Stage 4 on
+  correctness only.
 - **Stage 5 — CPU performance.** NOT STARTED. Parallelize EDT rows/columns
   and pull–push levels, reuse scratch buffers, early-out passthrough when
   Extend=0 and Alpha Choke=0. *Gate:* <~40ms/frame at 4K float on a modern

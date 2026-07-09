@@ -37,7 +37,8 @@ static void Check(bool ok, const char *name, const char *detail)
     if (!ok) ++g_fail;
 }
 
-// Build an ARGB buffer (premultiplied) from straight colour + alpha lambdas.
+// Build an ARGB buffer (STRAIGHT RGB + alpha — AE's effect-world convention,
+// matching PullPushFill's input contract) from colour + alpha lambdas.
 template <typename FA, typename FC>
 static vector<float> MakeARGB(int W, int H, FA alphaAt, FC colourAt)
 {
@@ -49,9 +50,9 @@ static vector<float> MakeARGB(int W, int H, FA alphaAt, FC colourAt)
             float rgb[3];
             colourAt(x, y, rgb);
             argb[i + 0] = a;
-            argb[i + 1] = rgb[0] * a;
-            argb[i + 2] = rgb[1] * a;
-            argb[i + 3] = rgb[2] * a;
+            argb[i + 1] = rgb[0];
+            argb[i + 2] = rgb[1];
+            argb[i + 3] = rgb[2];
         }
     return argb;
 }
@@ -205,14 +206,15 @@ int main()
         vector<float> out((size_t)W * H * 3);
         mm::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
 
+        // Straight in → straight out: every valid pixel's own colour comes
+        // back through the internal premult/unpremult round trip.
         double worst = 0.0;
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x) {
                 const size_t i = (size_t)y * W + x;
-                const float a = argb[i * 4 + 0];
                 for (int ch = 0; ch < 3; ++ch)
                     worst = std::fmax(worst, std::fabs(
-                        (double)out[i * 3 + ch] - (double)(argb[i * 4 + 1 + ch] / a)));
+                        (double)out[i * 3 + ch] - (double)argb[i * 4 + 1 + ch]));
             }
         char d[64]; snprintf(d, sizeof d, "worst|diff|=%.3g", worst);
         Check(worst < 1e-5, "full-valid-passthrough", d);

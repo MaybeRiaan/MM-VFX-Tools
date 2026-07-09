@@ -3,22 +3,24 @@
 
     This is Edge Repair's ONLY fill engine (the distance field never fills
     colour itself — it only drives erode/extend/choke/blend). The job: given
-    a premultiplied ARGB image and a validity mask (the core matte), produce
-    a straight-RGB colour defined at EVERY pixel, where invalid pixels get a
-    smooth extension of the nearest/weighted trusted colour. The fill runs
-    effectively unlimited; the caller decides how far the result is *used*
-    (the Extend clamp happens downstream, not here).
+    a STRAIGHT-alpha ARGB image (AE's effect-world convention) and a
+    validity mask (the core matte), produce a straight-RGB colour defined at
+    EVERY pixel, where invalid pixels get a smooth extension of the
+    nearest/weighted trusted colour. The fill runs effectively unlimited;
+    the caller decides how far the result is *used* (the Extend clamp
+    happens downstream, not here).
 
     Algorithm (Gortler et al. pull–push, hole-filling form):
 
     PULL — build a mip chain of (premult R, premult G, premult B, coverage).
-      Level 0: valid pixels contribute their premultiplied RGB with coverage
-      = alpha; invalid pixels contribute (0,0,0,0). Each coarser texel is the
-      plain average of its up-to-4 children — because colour is premultiplied
-      by coverage, that average IS the coverage-weighted mean of the trusted
-      colour beneath it, and zero-alpha/invalid garbage contributes exactly
-      nothing (this is the "coverage weighting has to be right" property the
-      Stage 3 gate names).
+      Level 0: valid pixels contribute their straight RGB premultiplied
+      INTERNALLY by coverage = alpha; invalid pixels contribute (0,0,0,0).
+      Each coarser texel is the plain average of its up-to-4 children —
+      because colour is premultiplied by coverage inside the chain, that
+      average IS the coverage-weighted mean of the trusted colour beneath
+      it, and zero-alpha/invalid garbage contributes exactly nothing (this
+      is the "coverage weighting has to be right" property the Stage 3 gate
+      names).
 
     PUSH — from coarsest to finest, fill ONLY invalid texels (coverage == 0)
       with a clamped bilinear sample of the coarser level; texels with any
@@ -90,8 +92,12 @@ inline void Bilinear4(const PPLevel &L, double u, double v, float out[4])
 } // namespace detail_pp
 
 // Pull–push fill.
-//   argb  : W*H*4 interleaved A,R,G,B in [0,1]-ish float, RGB premultiplied
-//           by A (AE's native delivery — matches mm::UnpackRow layout).
+//   argb  : W*H*4 interleaved A,R,G,B in [0,1]-ish float, RGB in STRAIGHT
+//           (unmatted) form — AE's effect-world convention (matches
+//           mm::UnpackRow layout; see ModernEdgeBlur's black-halo history:
+//           AE effects receive and must return straight alpha). The
+//           coverage premultiply happens INTERNALLY at level-0 init; the
+//           mip chain itself is premultiplied throughout.
 //   valid : W*H mask; nonzero marks a TRUSTED pixel (the core matte). Pixels
 //           outside the mask are never read — garbage RGB there cannot leak.
 //           A "valid" pixel with alpha <= 0 carries no colour information and
@@ -111,16 +117,18 @@ inline bool PullPushFill(const float *argb, const uint8_t *valid,
     chain[0].H = H;
     chain[0].px.assign(N * 4, 0.f);
 
-    // Level 0: trusted pixels contribute (premult RGB, alpha); all else 0.
+    // Level 0: trusted pixels contribute (straight RGB * alpha, alpha) —
+    // the internal premultiply that makes every later average and bilinear
+    // fetch coverage-weighted; all else 0.
     bool any = false;
     for (size_t i = 0; i < N; ++i) {
         if (!valid[i]) continue;
         const float a = argb[i * 4 + 0];
         if (a <= 0.f) continue;   // zero coverage — no colour to trust
         float *t = &chain[0].px[i * 4];
-        t[0] = argb[i * 4 + 1];
-        t[1] = argb[i * 4 + 2];
-        t[2] = argb[i * 4 + 3];
+        t[0] = argb[i * 4 + 1] * a;
+        t[1] = argb[i * 4 + 2] * a;
+        t[2] = argb[i * 4 + 3] * a;
         t[3] = a;
         any = true;
     }
