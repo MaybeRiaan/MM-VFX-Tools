@@ -257,10 +257,33 @@ before continuing. Keep every stage compiling and loadable in AE.
   pixels are by definition untrusted and get their shading replaced by flat
   extension colour. Expect far less Erode to be needed post-fix.
 
-  *Gate (PENDING re-check on v1.0.0.9):* motion-blurred bright-background
-  plate over dark shows no fringe and no dead-smooth synthetic zone; Alpha
-  Choke=0 produces bit-identical alpha to input; Detail 0 vs 100 differs
-  only inside the blend band. NOTE for Stage 5: the Gaussian/EDT/fill run
+  **Gate round 3 (2026-07-09, v1.0.0.9): user clarified the primary use
+  case is LIGHT WRAP decontamination** (not defocus softness — that's edge
+  extend + soft matting). Findings, with the deciding algebra:
+  - At Detail 0 the composite reduces EXACTLY to `lerp(orig, ext, w)` (the
+    low-pass cancels) — and the user confirmed Erode 2 / Detail 0 fully
+    removes the wrap rim → the core pipeline (core → fill → weighted
+    replacement) is verified correct.
+  - At Detail 100 the composite is `orig + w*(ext - low)` — a purely
+    LOW-frequency correction. A 2-4px wrap rim is high-frequency at texture
+    radius 8, so Detail 100 mathematically cannot remove it; it rides on
+    the darker repaired base and reads worse than source (jagged key
+    structure). Fix in v1.0.0.10: `ER_TEXTURE_BLUR_RADIUS` 8 → 4 (in-spec
+    bottom of the brief's ~4-8 range) — the radius IS the cutoff between
+    "texture Detail keeps" and "contamination the repair removes". If rims
+    still persist at Detail 100, going below 4 is a spec conversation
+    (frequency alone cannot separate wrap rims from same-scale motion-blur
+    micro-detail).
+  - Erode > 2 producing a dark edge on the test pole plate is NOT a bug:
+    the pole has genuine rim lighting; eroding past the wrap declares those
+    lit pixels untrusted and the extension repaints them with deeper body
+    colour. Erode should be set just past the wrap (2 on this plate).
+
+  *Gate (PENDING re-check on v1.0.0.10):* light-wrap plate — rim gone at
+  Detail 0 (already confirmed), substantially reduced at Detail 100 vs
+  v1.0.0.9; grain still visible in the band at Detail 100; no dead-smooth
+  synthetic zone; Alpha Choke=0 bit-identical alpha; Detail 0 vs 100
+  differs only inside the band. NOTE for Stage 5: the Gaussian/EDT/fill run
   single-threaded and allocate per frame — Result at 4K float will be slow
   (seconds/frame); that is Stage 5's whole job, judge Stage 4 on
   correctness only.

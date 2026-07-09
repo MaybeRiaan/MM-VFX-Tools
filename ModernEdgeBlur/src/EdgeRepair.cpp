@@ -64,11 +64,22 @@
 #include <vector>
 #include <new>
 
-// Fixed texture-frequency-split blur radius (px). The Detail high-pass in
-// Stage 4 subtracts a small Gaussian of this radius from the plate; it
-// contributes to the inflation radius because that Gaussian reads neighbors.
-// Exposed nowhere — a fixed sensible value per the brief.
-static const float ER_TEXTURE_BLUR_RADIUS = 8.0f;
+// Fixed texture-frequency-split blur radius (px). The Detail high-pass
+// subtracts a Gaussian of this radius from the plate; it contributes to the
+// inflation radius because that Gaussian reads neighbors. Exposed nowhere —
+// a fixed value inside the brief's "~4-8px" range.
+//
+// This radius IS the cutoff between "texture Detail preserves" and
+// "contamination the repair removes": at Detail 100 the composite reduces to
+// out = orig + w*(ext - low), a purely LOW-frequency correction, so any
+// feature narrower than this radius (grain, but also a narrow light-wrap
+// rim) rides through untouched. Stage 4 gate round 3 (2026-07-09): at 8.0
+// a 2-4px wrap rim survived Detail 100 and read worse than source; dropped
+// to the in-spec bottom 4.0 so rim-scale features fall into the repaired
+// low band while ~1px grain still survives. If wrap rims still persist at
+// Detail 100, going below 4 needs a spec conversation (frequency alone
+// cannot separate wrap rims from same-scale motion-blur micro-detail).
+static const float ER_TEXTURE_BLUR_RADIUS = 4.0f;
 
 // Tiling debug visualization. 1 = every View Mode renders the Stage 1 seam-
 // test pattern (see ER_TileDebugRow); 0 = the real pipeline/view modes run.
