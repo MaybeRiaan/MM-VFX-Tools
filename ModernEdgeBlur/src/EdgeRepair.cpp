@@ -1,4 +1,4 @@
-/*  EdgeRepair.cpp — Stage 3: core matte + distance field + pull–push fill.
+/*  EdgeRepair.cpp — Stage 4: full Result composite.
 
     Edge Repair extends trusted interior color across contaminated matte
     edges (keying halos, motion-blur rims) along a single per-frame Euclidean
@@ -9,12 +9,18 @@
     (Erode/Extend/Detail/Alpha Choke/View Mode, disk IDs 101-105); premult is
     internal-only, no knob.
 
-    THIS STAGE: Core Matte, Distance Field, and Extended Colour view modes
-    render their real pipelines (MM_CoreMatte.h + MM_DistanceField.h from
-    Stage 2, MM_PullPush.h from Stage 3 — the unlimited pull–push fill of
-    trusted core colour, shown straight/unpremultiplied). Result is still
-    passthrough; Stage 4 wires the distance-weighted composite + Detail +
-    Alpha Choke there.
+    THIS STAGE: all four view modes are real. Result runs the composite —
+    in the band 0 < d <= Extend the plate's low frequencies are replaced by
+    the pull–push extension weighted by distance, the plate's high
+    frequencies (texture/grain, from an alpha-weighted Gaussian split) ride
+    on top scaled by Detail, and Alpha Choke remaps alpha along a field
+    anchored at the ALPHA'S OWN edge (per the 2026-07-09 decision — extra
+    EDT, Erode-independent, profile-preserving). All per-pixel formulas live
+    in src/common/MM_Composite.h — that header is the CPU/GPU lockstep
+    contract. Internal premult flow: AE hands premultiplied pixels; the
+    composite unpremultiplies per pixel (guard a=0), works in straight
+    space, and re-premultiplies by the (possibly choked) output alpha.
+    Remaining: Stage 5 = CPU perf, Stage 6 = GPU.
 
     THE #1 CORRECTNESS PROPERTY — input-rect inflation. Unlike ModernEdgeBlur
     (which deliberately does NO inflation), every pixel of Edge Repair's
@@ -42,6 +48,8 @@
 #include "common/MM_DistanceField.h"
 #include "common/MM_CoreMatte.h"
 #include "common/MM_PullPush.h"
+#include "common/MM_Gaussian.h"
+#include "common/MM_Composite.h"
 
 #include <cmath>
 #include <cstring>
@@ -370,6 +378,117 @@ ER_ExtViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iter
 } // extern "C"
 
 // ---------------------------------------------------------------------------
+// Result (Stage 4) — the real composite. Per-pixel: choke the alpha along
+// the alpha-edge field, then inside the band 0 < d <= Extend replace the
+// plate's low frequencies with the extension and lay the plate's own high
+// frequencies back on top scaled by Detail. Straight-space maths from
+// MM_Composite.h; premult in/out. Null pointers switch features off:
+//   dist/ext/low == null → band inactive (Extend 0, or empty core)
+//   chokeField   == null → choke inactive (choke 0, or no seeds)
+// The w<=0, newA==a fast path copies the source premult VERBATIM — that is
+// what makes "untouched outside the band" and "Choke 0 → bit-identical
+// alpha" hold bitwise, not just approximately.
+// ---------------------------------------------------------------------------
+struct ER_ResultRefcon {
+    const float    *src;        // inflated premult ARGB
+    const float    *dist;       // core distance field (null = band off)
+    const float    *ext;        // straight extended colour (null = band off)
+    const float    *low;        // straight low-pass, ext fallback baked in (null = band off)
+    const float    *chokeField; // alpha-edge EDT (null = choke off)
+    float           extendF;
+    float           detail01;   // Detail param / 100
+    float           chokeF;     // signed px; nonzero only when chokeField set
+    A_long          srcW;
+    A_long          srcOX, srcOY;
+    PF_EffectWorld *out_world;
+    PF_PixelFormat  fmt;
+    A_long          outW;
+};
+
+extern "C" {
+
+static PF_Err
+ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iterationsL*/)
+{
+    const ER_ResultRefcon *rc = static_cast<const ER_ResultRefcon*>(refconPV);
+    const A_long W = rc->outW;
+    const size_t base = (size_t)(oy + rc->srcOY) * rc->srcW + rc->srcOX;
+
+    thread_local std::vector<float> rowv;
+    if ((A_long)rowv.size() < W * 4) rowv.resize((size_t)W * 4);
+    float *dst = rowv.data();
+
+    for (A_long ox = 0; ox < W; ++ox, dst += 4) {
+        const size_t i  = base + (size_t)ox;
+        const float *px = rc->src + i * 4;
+        const float  a  = px[0];
+
+        // Alpha first: choke along the alpha-edge field.
+        float newA = a;
+        if (rc->chokeField) {
+            newA = rc->chokeF > 0.f
+                 ? mm::ChokeInAlpha(a, rc->chokeField[i], rc->chokeF)
+                 : mm::GrowAlpha(a, rc->chokeField[i], -rc->chokeF);
+        }
+
+        // Band weight — only strictly OUTSIDE the core (d > 0); the core is
+        // trusted and never recomposited.
+        float w = 0.f;
+        if (rc->dist) {
+            const float d = rc->dist[i];
+            if (d > 0.f) w = mm::BlendWeight(d, rc->extendF);
+        }
+
+        if (w <= 0.f) {
+            if (newA == a) {
+                // Bitwise passthrough — no unpremult round trip.
+                dst[0] = px[0]; dst[1] = px[1]; dst[2] = px[2]; dst[3] = px[3];
+            } else if (a > 1e-6f) {
+                // Alpha changed, colour didn't: rescale premult directly.
+                const float s = newA / a;
+                dst[0] = newA;
+                dst[1] = px[1] * s; dst[2] = px[2] * s; dst[3] = px[3] * s;
+            } else {
+                // Grown alpha over a zero-alpha pixel — the extension is the
+                // only colour that exists for it.
+                dst[0] = newA;
+                if (rc->ext && newA > 0.f) {
+                    dst[1] = rc->ext[i * 3 + 0] * newA;
+                    dst[2] = rc->ext[i * 3 + 1] * newA;
+                    dst[3] = rc->ext[i * 3 + 2] * newA;
+                } else {
+                    dst[1] = dst[2] = dst[3] = 0.f;
+                }
+            }
+        } else {
+            // In-band composite (MM_Composite.h contract), straight space.
+            const float *E = rc->ext + i * 3;
+            const float *L = rc->low + i * 3;
+            float hi[3];
+            if (a > 1e-6f) {
+                const float inv = 1.f / a;
+                for (int c = 0; c < 3; ++c)
+                    hi[c] = px[1 + c] * inv - L[c];
+            } else {
+                hi[0] = hi[1] = hi[2] = 0.f;   // no plate detail at a = 0
+            }
+            float outS[3];
+            mm::ComposeBandRGB(L, E, hi, w, rc->detail01, outS);
+            dst[0] = newA;
+            dst[1] = outS[0] * newA;
+            dst[2] = outS[1] * newA;
+            dst[3] = outS[2] * newA;
+        }
+    }
+
+    void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
+    mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+    return PF_Err_NONE;
+}
+
+} // extern "C"
+
+// ---------------------------------------------------------------------------
 // Plugin entry points
 // ---------------------------------------------------------------------------
 
@@ -578,14 +697,28 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         }
 #else
         // -----------------------------------------------------------------
-        // Stage 2 pipeline (partial): core matte + the single driving
-        // distance field, computed over the FULL inflated source so the
-        // field is correct right to the output edge, then cropped to output
-        // by the view callbacks. Result and Extended Colour are still
-        // passthrough (their pipeline arrives in Stages 3-4); Core Matte and
-        // Distance Field are real.
+        // Pipeline: core matte + the single driving distance field, computed
+        // over the FULL inflated source so the field is correct right to the
+        // output edge, then cropped to output by the view callbacks. All
+        // four view modes are real as of Stage 4.
         // -----------------------------------------------------------------
         const size_t srcN = (size_t)srcW * srcH;
+
+        // Result-mode early-out: Extend <= 0 and Choke == 0 means the effect
+        // does nothing at all — skip every field/fill computation and pass
+        // through bitwise (also the first of the Stage 5 perf early-outs).
+        const bool chokeActive = (p.chokeF >= 0.01 || p.chokeF <= -0.01);
+        const bool resultView  = (p.viewL != ER_VIEW_CORE_MATTE &&
+                                  p.viewL != ER_VIEW_DISTANCE_FIELD &&
+                                  p.viewL != ER_VIEW_EXTENDED_COLOUR);
+        if (resultView && p.extendF <= 0.0 && !chokeActive) {
+            ER_PassRefcon rc;
+            rc.src = srcBuf.data(); rc.srcW = srcW;
+            rc.srcOX = srcOX; rc.srcOY = srcOY;
+            rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
+            mm::ForEachRow(in_data, outH, &rc, ER_PassRow);
+            goto cleanup;
+        }
 
         // Extract the straight-alpha plane from the inflated source. (AE
         // hands premultiplied pixels; alpha itself is identical either way,
@@ -664,12 +797,108 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
             }
             case ER_VIEW_RESULT:
             default: {
-                // Passthrough until Stage 4 wires up the composite.
-                ER_PassRefcon rc;
-                rc.src = srcBuf.data(); rc.srcW = srcW;
-                rc.srcOX = srcOX; rc.srcOY = srcOY;
+                // ---------------------------------------------------------
+                // Stage 4 — the real composite. Build the per-feature inputs
+                // (extension, low-pass, choke field), then one threaded
+                // per-row pass does the straight-space maths from
+                // MM_Composite.h and re-premultiplies.
+                // ---------------------------------------------------------
+                bool doBand = haveField && p.extendF > 0.0;
+
+                // Pull–push extension + alpha-weighted low-pass — the two
+                // colour sources of the band composite.
+                std::vector<float> ext, low;
+                if (doBand) {
+                    try {
+                        ext.resize(srcN * 3);
+                        low.resize(srcN * 3);
+                    } catch (const std::bad_alloc &) {
+                        err = PF_Err_OUT_OF_MEMORY;
+                        goto cleanup;
+                    }
+                    if (!mm::PullPushFill(srcBuf.data(), core.data(),
+                                          ext.data(), (int)srcW, (int)srcH)) {
+                        doBand = false;   // no trusted colour anywhere
+                    }
+                }
+                if (doBand) {
+                    // low = blur(premult)/blur(alpha) per channel — the
+                    // alpha-weighted split that keeps zero-alpha garbage out
+                    // of the low band (see MM_Gaussian.h). Where no alpha
+                    // lives within the kernel, fall back to the extension so
+                    // `low` is defined everywhere the band can reach.
+                    try {
+                        std::vector<float> plane(srcN), tmp(srcN), ba(srcN);
+                        const std::vector<float> kern =
+                            mm::BuildGaussianKernel(ER_TEXTURE_BLUR_RADIUS);
+
+                        for (size_t i = 0; i < srcN; ++i) ba[i] = srcBuf[i * 4 + 0];
+                        mm::GaussianBlurH(ba.data(), tmp.data(), (int)srcW, (int)srcH, kern);
+                        mm::GaussianBlurV(tmp.data(), ba.data(), (int)srcW, (int)srcH, kern);
+
+                        for (int ch = 0; ch < 3; ++ch) {
+                            for (size_t i = 0; i < srcN; ++i)
+                                plane[i] = srcBuf[i * 4 + 1 + ch];
+                            mm::GaussianBlurH(plane.data(), tmp.data(), (int)srcW, (int)srcH, kern);
+                            mm::GaussianBlurV(tmp.data(), plane.data(), (int)srcW, (int)srcH, kern);
+                            for (size_t i = 0; i < srcN; ++i)
+                                low[i * 3 + ch] = ba[i] > 1e-6f
+                                    ? plane[i] / ba[i]
+                                    : ext[i * 3 + ch];
+                        }
+                    } catch (const std::bad_alloc &) {
+                        err = PF_Err_OUT_OF_MEMORY;
+                        goto cleanup;
+                    }
+                }
+
+                // Alpha Choke field — anchored at the ALPHA'S OWN edge (see
+                // MM_Composite.h; 2026-07-09 decision): choke-in measures to
+                // the nearest zero-alpha pixel, grow to the nearest solid
+                // (a > 0.5) pixel. Only computed when the knob is touched —
+                // choke == 0 never reaches this path, which is what makes
+                // the bit-identical-alpha gate hold.
+                std::vector<float> chokeField;
+                bool haveChoke = false;
+                if (chokeActive) {
+                    try {
+                        std::vector<uint8_t> seeds(srcN);
+                        chokeField.resize(srcN);
+                        const bool in = p.chokeF > 0.0;
+                        bool any = false;
+                        for (size_t i = 0; i < srcN; ++i) {
+                            const float a = srcBuf[i * 4 + 0];
+                            const uint8_t s = in ? (a <= 0.001f ? 1 : 0)
+                                                 : (a >  0.5f   ? 1 : 0);
+                            seeds[i] = s;
+                            if (s) any = true;
+                        }
+                        // No seeds → nothing to measure from (fully-opaque
+                        // frame for choke-in; no solid region for grow):
+                        // choke is a well-defined no-op.
+                        if (any) {
+                            mm::EuclideanDistanceTransform(seeds.data(),
+                                chokeField.data(), (int)srcW, (int)srcH);
+                            haveChoke = true;
+                        }
+                    } catch (const std::bad_alloc &) {
+                        err = PF_Err_OUT_OF_MEMORY;
+                        goto cleanup;
+                    }
+                }
+
+                ER_ResultRefcon rc;
+                rc.src        = srcBuf.data();
+                rc.dist       = doBand ? dist.data() : nullptr;
+                rc.ext        = doBand ? ext.data()  : nullptr;
+                rc.low        = doBand ? low.data()  : nullptr;
+                rc.chokeField = haveChoke ? chokeField.data() : nullptr;
+                rc.extendF    = (float)p.extendF;
+                rc.detail01   = (float)(p.detailF / 100.0);
+                rc.chokeF     = haveChoke ? (float)p.chokeF : 0.f;
+                rc.srcW = srcW; rc.srcOX = srcOX; rc.srcOY = srcOY;
                 rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
-                mm::ForEachRow(in_data, outH, &rc, ER_PassRow);
+                mm::ForEachRow(in_data, outH, &rc, ER_ResultRow);
                 break;
             }
         }

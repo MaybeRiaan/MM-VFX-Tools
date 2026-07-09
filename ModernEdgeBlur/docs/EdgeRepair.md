@@ -186,15 +186,40 @@ before continuing. Keep every stage compiling and loadable in AE.
   inherent to pull–push, harmless because Stage 4 only uses the band
   d <= Extend; visible only in the deliberately-unclamped Extended Colour
   view.
-- **Stage 4 — Composite + Detail + Alpha Choke.** NOT STARTED. Full Result
-  mode: distance-driven blend, frequency separation, choke, alpha
-  passthrough (internal premultiply/unpremultiply happens here — see
-  Parameters). Enable 8/16bpc via dispatch. Tune defaults so dropping the
-  effect on a typical keyed plate with zero adjustment visibly fixes the
-  edge. *Gate:* motion-blurred bright-background plate over dark shows no
-  fringe and no dead-smooth synthetic zone; Alpha Choke=0 produces
+- **Stage 4 — Composite + Detail + Alpha Choke.** BUILT (v1.0.0.7). Full
+  Result mode. Per-pixel formulas live in `src/common/MM_Composite.h` — the
+  documented CPU/GPU lockstep contract:
+  - Blend: `w(d) = 1 - smoothstep(0, Extend, d)`; in the band,
+    `out = lerp(low, ext, w) + lerp(1, detail, w) * hi` in straight space,
+    where `low` = alpha-weighted Gaussian split (`src/common/MM_Gaussian.h`,
+    blur(premult)/blur(alpha), radius `ER_TEXTURE_BLUR_RADIUS`) and
+    `hi = origStraight - low` (forced 0 at alpha~0). Detail attenuation is
+    itself weighted by `w`, so the band's outer edge is seamless at any
+    Detail — that's what makes the "differs only inside the band" gate hold.
+    Core (d = 0) and beyond-band pixels take a bitwise-verbatim copy path.
+  - Alpha Choke (per 2026-07-09 decision): anchored at the ALPHA'S OWN edge,
+    not the core field — Erode-independent, profile-preserving. Choke-in:
+    `newA = a * clamp01(dOut - c)`, dOut = EDT to nearest zero-alpha pixel
+    (shaves the outermost c px, keeps the rest of the profile). Grow:
+    dilates the solid (a>0.5) matte with a 1px soft rim, solid interior
+    gated to identity (semi-opaque solids must not harden; rim fills toward
+    1.0 — documented v1 simplification). The extra EDT runs ONLY when
+    Choke != 0; Choke == 0 skips the path entirely → bit-identical alpha by
+    construction. Grown zero-alpha pixels take the extension as their colour.
+  - Early-out: Result view with Extend <= 0 and Choke == 0 is a full bitwise
+    passthrough with no field computation.
+  - 8/16/32bpc all flow through the same float pipeline via pack/unpack (no
+    separate dispatch needed).
+  Headless tests `tests/test_gaussian.cpp` + `tests/test_composite.cpp`
+  PASSED (kernel/constant/impulse/linearity/weighted-divide; blend-weight
+  endpoints+monotonicity, w=0 exact-orig for any Detail, outer-edge
+  continuity, choke identity/ramp/zero, grow no-harden). *Gate (PENDING
+  user visual check):* motion-blurred bright-background plate over dark
+  shows no fringe and no dead-smooth synthetic zone; Alpha Choke=0 produces
   bit-identical alpha to input; Detail 0 vs 100 differs only inside the
-  blend band.
+  blend band. NOTE for Stage 5: the Gaussian/EDT/fill run single-threaded
+  and allocate per frame — Result at 4K float will be slow (seconds/frame);
+  that is Stage 5's whole job, judge Stage 4 on correctness only.
 - **Stage 5 — CPU performance.** NOT STARTED. Parallelize EDT rows/columns
   and pull–push levels, reuse scratch buffers, early-out passthrough when
   Extend=0 and Alpha Choke=0. *Gate:* <~40ms/frame at 4K float on a modern
