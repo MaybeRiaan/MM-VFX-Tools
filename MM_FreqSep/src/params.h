@@ -144,18 +144,17 @@ enum {
 // ---------------------------------------------------------------------------
 enum {
 	FS_INPUT = 0,
-	FS_USE_LAYER_MASKS,	// 1 — use the effect layer's own alpha (masks) as matte
-	FS_MATTE_LAYER,		// 2
-	FS_MATTE_CHANNEL,	// 3
-	FS_MATTE_FIT,		// 4
-	FS_RADIUS,			// 5
-	FS_METHOD,			// 6
-	FS_LO_SMOOTH,		// 7
-	FS_LO_COLOR_ONLY,	// 8
-	FS_HI_TEXTURE,		// 9
-	FS_MIX,				// 10
-	FS_VIEW,			// 11
-	FS_CURVE,			// 12
+	FS_MATTE_LAYER,		// 1
+	FS_MATTE_CHANNEL,	// 2
+	FS_MATTE_FIT,		// 3
+	FS_RADIUS,			// 4
+	FS_METHOD,			// 5
+	FS_LO_SMOOTH,		// 6
+	FS_LO_COLOR_ONLY,	// 7
+	FS_HI_TEXTURE,		// 8
+	FS_MIX,				// 9
+	FS_VIEW,			// 10
+	FS_CURVE,			// 11
 	FS_NUM_PARAMS
 };
 
@@ -172,8 +171,7 @@ enum {
 	FS_HI_TEXTURE_DISK_ID      = 108,
 	FS_MIX_DISK_ID             = 109,
 	FS_VIEW_DISK_ID            = 110,
-	FS_CURVE_DISK_ID           = 111,
-	FS_USE_LAYER_MASKS_DISK_ID = 112
+	FS_CURVE_DISK_ID           = 111
 };
 
 // Snapshot of the checked-out param values for one render. Built fresh per
@@ -189,7 +187,6 @@ typedef struct FS_Params {
 	A_long		colorOnlyB;		// checkbox 0/1    (inert)
 	A_long		viewL;			// FS_VIEW_*
 	A_long		curveL;			// FS_CURVE_*      (inert)
-	A_long		useLayerMasksB;	// checkbox 0/1 — use effect layer's own alpha
 } FS_Params;
 
 extern "C" {

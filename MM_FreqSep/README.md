@@ -18,12 +18,12 @@ Testing & manual checklist: [docs/testing.md](docs/testing.md).
   radius, View popup (Result / Low / High / Matte).
 - **Phase 3 (matte driver)** — done: Matte Layer checked out in PreRender under
   its own checkout id, sampled per output pixel (bilinear), channel selection
-  (alpha/luma ± invert, luma **coverage-gated**), Fit-to-Layer stretch mapped in
-  **full-res layer space** (resolution- and tile-invariant; Center/Top-Left also
-  implemented). No layer → matte = 1.0. Matte modulates the final blend
-  (`out = lerp(src, proc, matte·mix)`) and drives the Matte view.
-  **Use Layer Masks** checkbox drives the effect from the effect layer's own
-  alpha (its masks), overriding the external matte.
+  (alpha/luma ± invert, luma **coverage-gated** = `luma(RGB)·alpha`),
+  Fit-to-Layer stretch mapped in **full-res layer space** (resolution- and
+  tile-invariant; Center/Top-Left also implemented). No layer → matte = 1.0.
+  Matte modulates the final blend (`out = lerp(src, proc, matte·mix)`) and
+  drives the Matte view. (A "Use Layer Masks" option is deferred — the external
+  Matte Layer with a masked driver covers the same workflow.)
 - Phases 4+ (guided filter, Color Only, Working Curve, GPU) — not started; code
   is structured so they slot in (`curve.cpp` is a stub; `Separation Method`
   popup routes non-Gaussian to the Gaussian fallback).

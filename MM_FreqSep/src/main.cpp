@@ -51,12 +51,6 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	// --- Matte driver -----------------------------------------------------
 
 	AEFX_CLR_STRUCT(def);
-	// When on, the effect layer's OWN alpha (which already carries its masks,
-	// baked in by AE before we receive the input) drives the effect — no
-	// external driver layer needed. Overrides the Matte Layer when both are set.
-	PF_ADD_CHECKBOX("Use Layer Masks", "", FALSE, 0, FS_USE_LAYER_MASKS_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
 	// PF_LayerDefault_NONE → user starts with no matte; render treats that
 	// as matte = 1.0 (effect applies everywhere).
 	PF_ADD_LAYER("Matte Layer", PF_LayerDefault_NONE, FS_MATTE_LAYER_DISK_ID);

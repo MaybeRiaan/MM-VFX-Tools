@@ -80,35 +80,30 @@ struct FS_MatteField {
 	bool         active  = false;
 };
 
-// Extract the matte weight from an interpolated ARGB sample. RGB is
-// PREMULTIPLIED (the layer's visible-over-black appearance) and `a` is the
-// interpolated alpha.
+// Extract the matte weight from an interpolated ARGB sample. `r,g,b` is the
+// driver's COLOR as delivered by AE and `a` the interpolated alpha.
 //
-// LUMA is gated by coverage — weight = straightLuma × alpha — so the driver's
-// transparent regions contribute NO effect and its brightness modulates within
-// covered regions ("paint bright where I want the effect; unmasked = none").
-// Because the taps are premultiplied, premultLuma already equals
-// straightLuma × alpha, so for non-inverted luma we read it directly. For
-// LUMA INVERTED the inversion must apply to the STRAIGHT luma BEFORE the alpha
-// gate — otherwise transparent areas (straightLuma undefined, premult 0) would
-// invert to 1 and drive the effect everywhere the driver is empty. We recover
-// straight luma by dividing the premult luma by alpha (guarded), invert, then
-// re-gate by alpha.
+// LUMA is ALWAYS gated by coverage: weight = luma(RGB) × alpha. This is the
+// critical fix — AE commonly hands an effect a precomp/layer with STRAIGHT
+// (un-premultiplied) color, i.e. the layer's fill color spans the whole frame
+// and only the ALPHA carries the mask shapes. Reading luma(RGB) alone then
+// lights up the entire bounding box (the "white square" bug). Multiplying by
+// alpha collapses it to exactly the shapes the Alpha channel shows, feathers
+// correctly through partial alpha, and is harmless if RGB happened to arrive
+// premultiplied (already ≤ its straight value). Transparent driver regions
+// (alpha 0) contribute NO effect. LUMA INVERTED inverts the color luma, THEN
+// gates by alpha, so empty regions stay 0 (not 1).
 // Rec.709 weights. Inputs in [0,1]; result in [0,1]. Not clamped here.
 inline float MatteChannelValue(float a, float r, float g, float b, int channel)
 {
-	const float premLuma = 0.2126f * r + 0.7152f * g + 0.0722f * b;  // = straight·a
+	const float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
 	switch (channel) {
 		case FS_MATTE_CHAN_ALPHA_INV_:
 			return 1.f - a;
 		case FS_MATTE_CHAN_LUMA_:
-			return premLuma;                       // straightLuma × alpha
-		case FS_MATTE_CHAN_LUMA_INV_: {
-			// (1 - straightLuma) × alpha, with straightLuma = premLuma / a.
-			if (a <= 1e-6f) return 0.f;            // no coverage → no effect
-			const float straight = premLuma / a;
-			return (1.f - straight) * a;
-		}
+			return luma * a;                       // coverage-gated brightness
+		case FS_MATTE_CHAN_LUMA_INV_:
+			return (1.f - luma) * a;               // invert brightness, then gate
 		case FS_MATTE_CHAN_ALPHA_:
 		default:
 			return a;

@@ -136,18 +136,12 @@ plugins folder; if AE was open, restart it.
 
 ### G. Matte driver (Phase 3)
 
-**Use Layer Masks** (checkbox, top of the effect):
-- [ ] Draw one or more masks directly on the **effect layer** (not a separate
-      driver). Turn **Use Layer Masks ON**. The effect is confined to the mask
-      shapes — outside them the output equals the source. **View ▸ Matte**
-      shows the layer's mask-derived alpha. Overrides the external Matte Layer.
-- [ ] With no masks on the layer (full alpha), Use Layer Masks ON → effect
-      applies everywhere (matte = 1 across the opaque layer).
-
 **Luma matte + alpha (the C4 fix):**
-- [ ] Driver with partial/zero alpha, Channel = **Luma**: transparent regions
-      contribute **no effect** (luma is gated by coverage — luma × alpha), and
-      brightness modulates within covered areas. No square/hard-edge artifact.
+- [ ] Driver precomp with straight color (e.g. white solid + feathered masks,
+      background transparent), Channel = **Luma**: the result must match the
+      **Alpha** channel's shapes — NOT a full white square. Luma is
+      `luma(RGB) × alpha`, so transparent regions read 0 and the feather comes
+      from the alpha.
 - [ ] Channel = **Luma Inverted** on the same driver: transparent regions still
       contribute **no effect** (not full effect) — inversion applies to the
       covered brightness only.

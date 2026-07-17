@@ -90,12 +90,6 @@ ReadParams(PF_InData *in_data, FS_Params *p)
 	p->colorOnlyB = def.u.bd.value;
 	ERR2(PF_CHECKIN_PARAM(in_data, &def));
 
-	AEFX_CLR_STRUCT(def);
-	ERR(PF_CHECKOUT_PARAM(in_data, FS_USE_LAYER_MASKS, in_data->current_time,
-		in_data->time_step, in_data->time_scale, &def));
-	p->useLayerMasksB = def.u.bd.value;
-	ERR2(PF_CHECKIN_PARAM(in_data, &def));
-
 	// The Matte Layer param itself is checked out via checkout_layer in
 	// PreRender (not here) — a layer param needs the render-graph checkout.
 
@@ -315,7 +309,6 @@ struct FS_ComposeRefcon {
 	A_long               viewL;   // FS_VIEW_*
 	A_long               curveL;  // FS_CURVE_* (identity stub this session)
 	const fs::FS_MatteField *matte; // matte sampler (inactive → 1.0 everywhere)
-	bool                 useLayerMasks; // matte = source's own straight alpha
 	PF_EffectWorld      *out_world;
 	PF_PixelFormat       fmt;
 	A_long               outW;
@@ -365,12 +358,8 @@ FS_ComposeRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iter
 		}
 
 		// Matte weight for this output pixel, shared by the Matte view and the
-		// Result recombine. "Use Layer Masks" overrides the external matte:
-		// the effect layer's OWN alpha (masks baked in by AE) becomes the
-		// matte, so the effect is confined to the layer's mask shapes. `a` is
-		// the source pixel's premultiplied alpha == its straight coverage.
-		const float matteW = rc->useLayerMasks ? a
-											   : fs::SampleMatte(*rc->matte, (int)ox, (int)oy);
+		// Result recombine. No matte layer selected → SampleMatte returns 1.
+		const float matteW = fs::SampleMatte(*rc->matte, (int)ox, (int)oy);
 
 		switch (rc->viewL) {
 			case FS_VIEW_LOW:
@@ -522,9 +511,7 @@ FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 		// pass, so it lives at this scope.
 		fs::FS_MatteField matte;   // active=false by default → SampleMatte()==1
 		std::vector<float> matteBuf;
-		// Use Layer Masks overrides the external matte entirely (the compose
-		// loop reads the source's own alpha), so skip the matte-layer unpack.
-		if (!p.useLayerMasksB && prd && prd->matteCheckedOut) {
+		if (prd && prd->matteCheckedOut) {
 			PF_EffectWorld *matte_world = nullptr;
 			PF_Err merr = extra->cb->checkout_layer_pixels(
 				in_data->effect_ref, FS_CHECKOUT_MATTE, &matte_world);
@@ -588,7 +575,6 @@ FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 			rc.viewL   = p.viewL;
 			rc.curveL  = p.curveL;
 			rc.matte   = &matte;
-			rc.useLayerMasks = (p.useLayerMasksB != 0);
 			rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
 			mm::ForEachRow(in_data, outH, &rc, FS_ComposeRow);
 		}

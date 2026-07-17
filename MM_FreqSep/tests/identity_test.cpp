@@ -152,39 +152,41 @@ static void test_high_view_gain()
 	check(worst <= 1e-6, "high view: texGain scales the displayed detail band", worst);
 }
 
-// Property 5: matte channel extraction (all four modes) from a straight RGBA.
+// Property 5: matte channel extraction (all four modes). RGB is the delivered
+// COLOR, `a` the alpha; Luma is luma(RGB) × alpha. Opaque mid-grey: a=1, RGB
+// 0.5 → luma 0.5.
 static void test_matte_channel()
 {
-	// Inputs are PREMULTIPLIED. Opaque mid-grey: a=1, straight color 0.5 →
-	// premult RGB 0.5. straightLuma(0.5) = 0.5.
 	const float a = 1.0f, r = 0.5f, g = 0.5f, b = 0.5f;
-	const double sLuma = 0.2126 * 0.5 + 0.7152 * 0.5 + 0.0722 * 0.5;   // = 0.5
+	const double luma = 0.2126 * 0.5 + 0.7152 * 0.5 + 0.0722 * 0.5;   // = 0.5
 	double worst = 0.0;
 	worst = std::fmax(worst, std::fabs((double)fs::MatteChannelValue(a,r,g,b, fs::FS_MATTE_CHAN_ALPHA_)     - a));
 	worst = std::fmax(worst, std::fabs((double)fs::MatteChannelValue(a,r,g,b, fs::FS_MATTE_CHAN_ALPHA_INV_) - (1.0 - a)));
-	worst = std::fmax(worst, std::fabs((double)fs::MatteChannelValue(a,r,g,b, fs::FS_MATTE_CHAN_LUMA_)      - sLuma));              // ×a=1
-	worst = std::fmax(worst, std::fabs((double)fs::MatteChannelValue(a,r,g,b, fs::FS_MATTE_CHAN_LUMA_INV_)  - (1.0 - sLuma)));      // ×a=1
+	worst = std::fmax(worst, std::fabs((double)fs::MatteChannelValue(a,r,g,b, fs::FS_MATTE_CHAN_LUMA_)      - luma * a));
+	worst = std::fmax(worst, std::fabs((double)fs::MatteChannelValue(a,r,g,b, fs::FS_MATTE_CHAN_LUMA_INV_)  - (1.0 - luma) * a));
 	check(worst <= 1e-6, "matte channel: alpha/alpha-inv/luma/luma-inv extracted correctly", worst);
 }
 
-// Property 5b: Luma channels are gated by coverage — a TRANSPARENT sample
-// (premult 0, a 0) contributes NO effect for both Luma and Luma Inverted.
-// This is the C4 fix: without the gate, Luma Inverted would read 1 (full
-// effect) everywhere the driver is empty.
+// Property 5b: THE C4 "white square" case. A precomp with STRAIGHT color:
+// white fills the whole frame (RGB=1), masks live in the ALPHA. In the
+// transparent background RGB is still 1.0 but alpha is 0 — Luma MUST read 0
+// there (luma × alpha), collapsing the white square to the mask shapes. Also
+// checks a feather midpoint and Luma Inverted staying 0 where empty.
 static void test_matte_luma_coverage_gate()
 {
-	const float a = 0.f, r = 0.f, g = 0.f, b = 0.f;   // fully transparent tap
-	const float lu  = fs::MatteChannelValue(a,r,g,b, fs::FS_MATTE_CHAN_LUMA_);
-	const float lui = fs::MatteChannelValue(a,r,g,b, fs::FS_MATTE_CHAN_LUMA_INV_);
-	// Half-covered bright pixel: a=0.5, straight white → premult 0.5. Luma
-	// should be straightLuma(1.0)*0.5 = 0.5; Luma Inv = (1-1.0)*0.5 = 0.
-	const float ha = 0.5f, hp = 0.5f;   // premult white at half coverage
-	const float hlu  = fs::MatteChannelValue(ha,hp,hp,hp, fs::FS_MATTE_CHAN_LUMA_);
-	const float hlui = fs::MatteChannelValue(ha,hp,hp,hp, fs::FS_MATTE_CHAN_LUMA_INV_);
+	// Transparent background of a straight-color precomp: white RGB, alpha 0.
+	const float lu  = fs::MatteChannelValue(0.f, 1.f,1.f,1.f, fs::FS_MATTE_CHAN_LUMA_);
+	const float lui = fs::MatteChannelValue(0.f, 1.f,1.f,1.f, fs::FS_MATTE_CHAN_LUMA_INV_);
+	// Feather midpoint: white RGB, alpha 0.5 → luma 1.0 × 0.5 = 0.5; inv = 0.
+	const float flu  = fs::MatteChannelValue(0.5f, 1.f,1.f,1.f, fs::FS_MATTE_CHAN_LUMA_);
+	const float flui = fs::MatteChannelValue(0.5f, 1.f,1.f,1.f, fs::FS_MATTE_CHAN_LUMA_INV_);
+	// Fully inside mask: white, alpha 1 → luma 1.
+	const float ilu  = fs::MatteChannelValue(1.f, 1.f,1.f,1.f, fs::FS_MATTE_CHAN_LUMA_);
 	const bool ok = (lu == 0.f) && (lui == 0.f) &&
-					(std::fabs(hlu - 0.5f) <= 1e-5f) && (std::fabs(hlui - 0.f) <= 1e-5f);
-	check(ok, "matte luma: coverage-gated (transparent -> 0 for luma and luma-inv)",
-		  (double)lui);
+					(std::fabs(flu - 0.5f) <= 1e-5f) && (std::fabs(flui - 0.f) <= 1e-5f) &&
+					(std::fabs(ilu - 1.0f) <= 1e-5f);
+	check(ok, "matte luma: straight-white background reads 0 (no square), feathers via alpha",
+		  (double)lu);
 }
 
 // Property 6: no matte selected -> SampleMatte returns 1.0 (effect everywhere).
