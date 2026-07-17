@@ -21,7 +21,7 @@ if errorlevel 1 exit /b 1
 cd /d "$outDir"
 cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
    /I "$Root\sdk\Headers" /I "$Root\sdk\Headers\SP" /I "$Root\sdk\Util" /I "$Root\src" ^
-   "$PSScriptRoot\identity_test.cpp" "$Root\src\blur.cpp" "$Root\src\matte.cpp" ^
+   "$PSScriptRoot\identity_test.cpp" "$Root\src\blur.cpp" "$Root\src\guided.cpp" "$Root\src\matte.cpp" ^
    /Fe:"$exe"
 if errorlevel 1 exit /b 1
 "@

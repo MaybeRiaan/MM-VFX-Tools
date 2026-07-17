@@ -5,17 +5,20 @@
     ranges/defaults, param indices, disk IDs, and the checked-out param
     snapshot struct shared by PreRender and SmartRender.
 
-    Session scope (Phase 1+2): params 1-11 all registered; ACTIVE this
-    session are Separation Radius, Low Band Smooth, High Band Texture, Mix,
-    View. Matte Layer/Channel/Fit, Separation Method (non-Gaussian), Color
-    Only, and Working Curve are registered-but-inert so their disk IDs are
-    locked from the first shipped build.
+    Params (Phase 4): Matte Layer/Channel/Fit, Separation Radius, Separation
+    Method (Gaussian / Guided Filter), Edge Preservation (Guided ε, greyed for
+    Gaussian), Low Band Smooth, High Band Texture, Mix, View are all ACTIVE.
+    Working Curve remains registered-but-inert (curve.cpp is a stub, later
+    phase). Low Band: Color Only was removed — it's being spun out into a
+    standalone MM chroma-evening effect (see docs/mm-freqsep-plan.md).
 */
 
 #pragma once
 
 #ifndef MM_FREQSEP_PARAMS_H
 #define MM_FREQSEP_PARAMS_H
+
+#include <cmath>   // FS_EdgeToEps (exp/log) — exponential slider→eps mapping
 
 typedef unsigned char		u_char;
 typedef unsigned short		u_short;
@@ -105,16 +108,32 @@ enum {
 #define FS_MATTE_FIT_DFLT	FS_MATTE_FIT_FIT
 #define FS_MATTE_FIT_ITEMS	"Fit to Layer|Center|Top-Left"
 
-// Separation Method popup (1-based). Only Gaussian runs this session;
-// Bilateral/Guided fall back to Gaussian until Phase 4.
+// Separation Method popup (1-based). Gaussian = creamy/soft (halos on hard
+// edges); Guided Filter = edge-aware (no halos). Both are deliberately kept —
+// they are different looks. Bilateral was cut (redundant with Guided).
 enum {
 	FS_METHOD_GAUSSIAN = 1,
-	FS_METHOD_BILATERAL,
 	FS_METHOD_GUIDED,
 	FS_METHOD_NUM
 };
 #define FS_METHOD_DFLT		FS_METHOD_GAUSSIAN
-#define FS_METHOD_ITEMS		"Gaussian|Bilateral|Guided Filter"
+#define FS_METHOD_ITEMS		"Gaussian|Guided Filter"
+
+// Edge Preservation (%): the guided filter's regularizer eps, exposed
+// perceptually. Only meaningful when Method = Guided Filter — greyed out for
+// Gaussian (SEND_UPDATE_PARAMS_UI mechanism, see main.cpp). The slider is
+// mapped EXPONENTIALLY to eps because eps lives in squared straight-color
+// units and its useful range spans ~3 decades; linear would cram all the
+// interesting behavior into the first few percent.
+//   0%   → strongest edge preservation (tiny eps: keep almost every edge,
+//          maximal halo suppression, least cross-edge smoothing)
+//   100% → weakest (large eps: Guided approaches the matched Gaussian)
+// eps(s) = EPS_MIN * (EPS_MAX/EPS_MIN)^(s/100).
+#define FS_EDGE_MIN			0.0
+#define FS_EDGE_MAX			100.0
+#define FS_EDGE_DFLT		35.0
+#define FS_EDGE_EPS_MIN		1.0e-4
+#define FS_EDGE_EPS_MAX		1.0e-1
 
 // View popup (1-based). High Band displays hi + 0.5 for inspection.
 // Matte stubs to white until Phase 3.
@@ -139,8 +158,10 @@ enum {
 #define FS_CURVE_ITEMS		"None|sRGB|ACEScct"
 
 // ---------------------------------------------------------------------------
-// Param indices (0 = implicit input layer). On-screen order — never change
-// once shipped.
+// Param indices (0 = implicit input layer). On-screen order. Pre-release: no
+// shipped comps exist except throwaway test comps, so this order (and the disk
+// IDs below) may still be changed freely — Edge Preservation sits right after
+// Separation Method, where it belongs. Once a real build ships, lock both.
 // ---------------------------------------------------------------------------
 enum {
 	FS_INPUT = 0,
@@ -149,8 +170,8 @@ enum {
 	FS_MATTE_FIT,		// 3
 	FS_RADIUS,			// 4
 	FS_METHOD,			// 5
-	FS_LO_SMOOTH,		// 6
-	FS_LO_COLOR_ONLY,	// 7
+	FS_EDGE,			// 6 — Edge Preservation (Guided ε); greyed for Gaussian
+	FS_LO_SMOOTH,		// 7
 	FS_HI_TEXTURE,		// 8
 	FS_MIX,				// 9
 	FS_VIEW,			// 10
@@ -158,16 +179,17 @@ enum {
 	FS_NUM_PARAMS
 };
 
-// Disk IDs — forever. Never reorder, never reuse; new params append with new
-// IDs only.
+// Disk IDs. Pre-release these can still change (see the index note above);
+// they map on-screen order → saved value, so kept parallel to the indices for
+// readability. Lock them at first ship.
 enum {
 	FS_MATTE_LAYER_DISK_ID     = 101,
 	FS_MATTE_CHANNEL_DISK_ID   = 102,
 	FS_MATTE_FIT_DISK_ID       = 103,
 	FS_RADIUS_DISK_ID          = 104,
 	FS_METHOD_DISK_ID          = 105,
-	FS_LO_SMOOTH_DISK_ID       = 106,
-	FS_LO_COLOR_ONLY_DISK_ID   = 107,
+	FS_EDGE_DISK_ID            = 106,
+	FS_LO_SMOOTH_DISK_ID       = 107,
 	FS_HI_TEXTURE_DISK_ID      = 108,
 	FS_MIX_DISK_ID             = 109,
 	FS_VIEW_DISK_ID            = 110,
@@ -181,13 +203,25 @@ typedef struct FS_Params {
 	PF_FpLong	smoothF;		// %
 	PF_FpLong	textureF;		// %
 	PF_FpLong	mixF;			// %
-	A_long		matteChanL;		// FS_MATTE_CHAN_* (inert)
-	A_long		matteFitL;		// FS_MATTE_FIT_*  (inert)
-	A_long		methodL;		// FS_METHOD_*     (Gaussian only this session)
-	A_long		colorOnlyB;		// checkbox 0/1    (inert)
+	A_long		matteChanL;		// FS_MATTE_CHAN_*
+	A_long		matteFitL;		// FS_MATTE_FIT_*
+	A_long		methodL;		// FS_METHOD_* (Gaussian / Guided)
 	A_long		viewL;			// FS_VIEW_*
 	A_long		curveL;			// FS_CURVE_*      (inert)
+	PF_FpLong	edgeF;			// Edge Preservation %, 0-100 (Guided only)
 } FS_Params;
+
+// Edge Preservation slider % → guided-filter eps. Exponential (see FS_EDGE_*
+// in this header): eps = EPS_MIN * (EPS_MAX/EPS_MIN)^(s/100). AE-free so both
+// the render path and any test can share it.
+inline double FS_EdgeToEps(double edgePct)
+{
+	double s = edgePct / 100.0;
+	if (s < 0.0) s = 0.0; else if (s > 1.0) s = 1.0;
+	const double ratio = FS_EDGE_EPS_MAX / FS_EDGE_EPS_MIN;
+	// pow via exp/log — <cmath> is already pulled in by the SDK headers above.
+	return FS_EDGE_EPS_MIN * exp(s * log(ratio));
+}
 
 extern "C" {
 	DllExport PF_Err EffectMain(

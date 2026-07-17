@@ -22,9 +22,10 @@ Matte-driven frequency separation effect for After Effects (C++ AE SDK, MM suite
 | 2 | Matte Channel | Popup | Alpha / Alpha Inverted / Luma / Luma Inverted |
 | 3 | Matte Fit | Popup | Fit to Layer (stretch) / Center / Top-Left — v1 can ship Fit only |
 | 4 | Separation Radius | Float slider (px) | The frequency cut. Must scale by downsample factor |
-| 5 | Separation Method | Popup | Gaussian / Bilateral / Guided Filter |
-| 6 | Low Band: Smooth | Float 0–100 | Extra smoothing of tone band (second blur or edge-aware) |
-| 7 | Low Band: Color Only | Checkbox | Smooth chroma, preserve luma structure |
+| 5 | Separation Method | Popup | ~~Gaussian / Bilateral / Guided Filter~~ → **Gaussian / Guided Filter** (Bilateral cut) |
+| — | **Edge Preservation** | Float 0–100 | **Added Phase 4.** Guided filter's ε (exponential map); greyed for Gaussian. Sits under Method. |
+| 6 | Low Band: Smooth | Float 0–100 | Extra smoothing of tone band (second Gaussian) |
+| 7 | ~~Low Band: Color Only~~ | ~~Checkbox~~ | **CUT** — moved to standalone MM Skin Color (§6) |
 | 8 | High Band: Texture | Float 0–200% | Gain on detail band |
 | 9 | Mix | Float 0–100% | Final blend vs source |
 | 10 | View | Popup | Result / Low Band / High Band / Matte — essential FS workflow tool |
@@ -73,9 +74,11 @@ Edge correctness: blur must be alpha-weighted (normalize by blurred alpha) or fr
 - Deliverable: paint a white solid with masks as driver → effect confined to mask shapes.
 
 ### Phase 4 — Band processing quality
-- Low band: extra smooth pass; Color Only mode (blur in a luma/chroma decomposition, keep luma from base lo).
-- High band texture gain.
-- Bilateral and Guided Filter separation methods (guided filter: O(1) via box-filter formulation, works well in float).
+- Low band: extra smooth pass ✅ (Phase 2 second Gaussian). **Color Only mode — CUT.** It was built (low-band luma/chroma split, unit-tested) then removed: as a *low-band-only* operation it only reaches low-frequency color variation, which underwhelms on real skin (blotchiness is mid/high frequency, in the high band it never touches). More importantly it doesn't use the frequency split at all — it's a whole-image "keep luma, smooth chroma" operation — so it belongs in its own effect, not as a checkbox inside an FS plugin. Spinning out as a standalone **MM Skin Color** (edge-aware chroma evening via the shared `guided.h`); see §6.
+- High band texture gain ✅ (Phase 2).
+- **Guided Filter** separation method ✅ — O(1) box-filter formulation, self-guided (guide == input), per-channel, alpha-weighted (`src/guided.h`/`.cpp`, unit-tested in `tests/identity_test.cpp` against a brute-force reference + edge-preservation/smoothing-extreme controls). Kept **alongside** Gaussian (different looks: Gaussian creamy/soft, Guided edge-aware/no-halo). Separation Radius maps to a variance-matched box radius so the slider means the same smoothing scale on either method.
+- **Edge Preservation** slider ✅ — the guided filter's ε, exposed 0–100 with an exponential slider→ε map (`FS_EdgeToEps`). Greyed out (PF_PUI_DISABLED) when Method = Gaussian via `PF_OutFlag_SEND_UPDATE_PARAMS_UI` + USER_CHANGED_PARAM / UPDATE_PARAMS_UI → `PF_UpdateParamUI`.
+- **Bilateral cut** — removed from the Method popup entirely (redundant with Guided). Popup is now Gaussian | Guided Filter.
 - Deliverable: side-by-side vs Photoshop FS retouch on test portrait — halos visibly reduced with Guided.
 
 ### Phase 5 — GPU render + performance
@@ -105,6 +108,7 @@ Edge correctness: blur must be alpha-weighted (normalize by blurred alpha) or fr
 - [ ] Matte layer checkout at wrong time/rect → one-frame-late mattes
 - [ ] Globals in render path → MFR crashes
 - [ ] High band clamped before recombine → texture loss (never clamp intermediates)
+- [ ] Renumbering param **disk IDs** (even pre-release) orphans saved values in existing comps → params silently read as default and look "stuck". RULE: disk IDs are **append-only, leave gaps** — never renumber to close a hole. (Bit us removing Color Only: View shifted 111→110, its saved value orphaned, all View modes appeared dead until the effect was re-applied.)
 
 ## 5. Resolved decisions & v1 scope (locked 2026-07-16)
 
@@ -112,5 +116,27 @@ Edge correctness: blur must be alpha-weighted (normalize by blurred alpha) or fr
 - Color space: space-agnostic core + **Working Curve popup (None / sRGB / ACEScct)**.
 - **GPU from day one** — GPU path lands in Phase 5, immediately after CPU reference passes identity tests; CPU float path doubles as the mandatory fallback and validation reference.
 - Standalone repo `MM_FreqSep` now; monorepo + `mm_common` extraction in Phase 8.
-- v1 ships: Gaussian + Guided separation (Bilateral may slip to v1.1), Matte Fit = Fit-to-Layer only, params 1–11, presets, no paint/heal tools (parametric processing only — FS clone/heal is a stills workflow, out of scope for a temporal effect).
+- v1 ships: **Gaussian + Guided separation** (Bilateral cut — redundant with Guided), Matte Fit = Fit-to-Layer only, 11 params, presets, no paint/heal tools (parametric processing only — FS clone/heal is a stills workflow, out of scope for a temporal effect).
+- **Low Band: Color Only cut** (2026-07-17) — see Phase 4 note; moved to a standalone sibling effect (§6).
+
+## 6. Sibling effect: MM Skin Color (chroma evening) — planned
+
+Spun out of the cut Color Only checkbox. A standalone MM effect, NOT frequency
+separation: it flattens skin **color** (redness, blotchiness) while preserving
+**luminance** structure, across all frequencies — the operation most "skin color
+evening" tools actually perform.
+
+Why standalone, not a checkbox here:
+- It doesn't use the frequency split (whole-image luma/chroma), so it would
+  ignore Separation Radius / Method / Texture / Mix — confusing inside an FS UI.
+- It wants its OWN radius + edge control, ideally **edge-aware chroma smoothing
+  via the guided filter** (`guided.h`, already built + tested here) so color
+  evens within the face but doesn't bleed across the jaw into the background.
+- The MM suite already plans `mm_common` sharing (`guided.h`, luma/chroma
+  helpers) in Phase 8 — this is exactly that reuse.
+
+Design sketch (to flesh out before any code): Amount, Chroma Radius, Edge-Aware
+toggle (+ its own edge/ε), the same Matte driver as this plugin, luma/chroma in
+Rec.709. Guided-chroma core is reusable from here. Status: **design item, not
+started** — the user has a related tool in mind it should pair with.
 

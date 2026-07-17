@@ -40,6 +40,7 @@
 #define NOMINMAX
 #include "params.h"
 #include "blur.h"
+#include "guided.h"
 #include "matte.h"
 #include "curve.h"
 #include "fs_core.h"
@@ -78,17 +79,12 @@ ReadParams(PF_InData *in_data, FS_Params *p)
 	FS_GET_FLOAT(FS_LO_SMOOTH,  smoothF)
 	FS_GET_FLOAT(FS_HI_TEXTURE, textureF)
 	FS_GET_FLOAT(FS_MIX,        mixF)
+	FS_GET_FLOAT(FS_EDGE,       edgeF)
 	FS_GET_POPUP(FS_MATTE_CHANNEL, matteChanL)
 	FS_GET_POPUP(FS_MATTE_FIT,     matteFitL)
 	FS_GET_POPUP(FS_METHOD,        methodL)
 	FS_GET_POPUP(FS_VIEW,          viewL)
 	FS_GET_POPUP(FS_CURVE,         curveL)
-
-	AEFX_CLR_STRUCT(def);
-	ERR(PF_CHECKOUT_PARAM(in_data, FS_LO_COLOR_ONLY, in_data->current_time,
-		in_data->time_step, in_data->time_scale, &def));
-	p->colorOnlyB = def.u.bd.value;
-	ERR2(PF_CHECKIN_PARAM(in_data, &def));
 
 	// The Matte Layer param itself is checked out via checkout_layer in
 	// PreRender (not here) — a layer param needs the render-graph checkout.
@@ -120,15 +116,27 @@ FS_EffectiveSigmas(PF_InData *in_data, const FS_Params *p,
 	*smX  = sm  * dsx;  *smY  = sm  * dsy;
 }
 
-// Per-axis inflation: cascaded Gaussian supports ADD (smooth reads lo, lo
-// reads src), so the read reach is ceil(3*sigma_sep) + ceil(3*sigma_smooth).
+// Per-axis inflation: the SEPARATION read reach plus the Low Band Smooth read
+// reach (the smooth pass reads lo pixels which themselves read src pixels, so
+// the supports ADD). The separation reach depends on Method — Gaussian is
+// ceil(3*sigma), Guided is 2r (two cascaded box windows, see GuidedSupport).
+// Smooth is always a Gaussian on the band, whatever the separation method.
 static void
 FS_InflateAmount(PF_InData *in_data, const FS_Params *p, A_long *ix, A_long *iy)
 {
 	double sepX, sepY, smX, smY;
 	FS_EffectiveSigmas(in_data, p, &sepX, &sepY, &smX, &smY);
-	*ix = fs::GaussianSupport(sepX) + fs::GaussianSupport(smX);
-	*iy = fs::GaussianSupport(sepY) + fs::GaussianSupport(smY);
+
+	A_long sepInfX, sepInfY;
+	if (p->methodL == FS_METHOD_GUIDED) {
+		sepInfX = fs::GuidedSupport(fs::GuidedRadius(sepX));
+		sepInfY = fs::GuidedSupport(fs::GuidedRadius(sepY));
+	} else {
+		sepInfX = fs::GaussianSupport(sepX);
+		sepInfY = fs::GaussianSupport(sepY);
+	}
+	*ix = sepInfX + fs::GaussianSupport(smX);
+	*iy = sepInfY + fs::GaussianSupport(smY);
 }
 
 // checkout_layer IDs. The input reuses its param index (FS_INPUT=0); the
@@ -488,13 +496,24 @@ FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 		}
 
 		// Frequency split on the FULL inflated buffer so lo is correct right
-		// up to the output edge. Separation Method: Gaussian is the Phase 2
-		// reference; Bilateral/Guided fall back to it until Phase 4.
+		// up to the output edge. Separation Method: Gaussian (creamy/soft) or
+		// Guided Filter (edge-aware, no halos). Both deliver the low band in
+		// the same premultiplied "blurred-alpha" form the compose pass
+		// renormalizes, so nothing downstream changes with the method.
 		double sepX, sepY, smX, smY;
 		FS_EffectiveSigmas(in_data, &p, &sepX, &sepY, &smX, &smY);
 
-		fs::GaussianBlurARGB(in_data, srcBuf.data(), tmpBuf.data(), loBuf.data(),
-							 srcW, srcH, sepX, sepY);
+		if (p.methodL == FS_METHOD_GUIDED) {
+			const A_long rx = fs::GuidedRadius(sepX);
+			const A_long ry = fs::GuidedRadius(sepY);
+			const float eps = (float)FS_EdgeToEps(p.edgeF);
+			ERR(fs::GuidedFilterARGB(in_data, srcBuf.data(), loBuf.data(),
+									 srcW, srcH, rx, ry, eps));
+			if (err) goto cleanup;   // OUT_OF_MEMORY from scratch alloc
+		} else {
+			fs::GaussianBlurARGB(in_data, srcBuf.data(), tmpBuf.data(), loBuf.data(),
+								 srcW, srcH, sepX, sepY);
+		}
 
 		// Low Band Smooth: cascaded second Gaussian on the band itself
 		// (in place — blur.h guarantees dst-aliases-src safety).

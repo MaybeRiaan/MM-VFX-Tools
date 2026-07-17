@@ -1,4 +1,4 @@
-# MM FreqSep — Testing (Phase 1–3)
+# MM FreqSep — Testing (Phase 1–4)
 
 Two layers of verification: an **automated AE-free unit test** for the core
 math and rect reasoning, and a **manual AE checklist** for the parts that only
@@ -21,13 +21,24 @@ cd MM_FreqSep\tests
 .\run_tests.ps1
 ```
 
-Exit code 0 = all pass. Current output:
+Exit code 0 = all pass. Current output (21 tests):
 
 ```
   PASS  identity: gain=1,m=1 -> out==src (per channel <=1e-6)
   PASS  split: (src-lo)+lo == src (<=1e-6)
   PASS  alpha-weighted edge: straight color ~= opaque value (no fringe)
   PASS  control: un-renormalized value IS a fringe (darker)
+  ...
+  PASS  guided: O(1) box formulation matches brute-force reference
+  PASS  guided: constant image is a fixed point (any eps)
+  PASS  guided low-eps: step edge preserved (no halo)
+  PASS  control: matched Gaussian smears that same edge
+  PASS  guided high-eps ~ matched Gaussian on a step (same scale)
+  PASS  control: high-eps guided really is smoothing
+  PASS  guided alpha edge: straight color ~= opaque value (no fringe)
+  PASS  control: coverage alpha at the edge really dropped
+  PASS  guided: support = 2r, sigma->radius mapping pinned
+  PASS  guided r=0: exact copy (identity)
 ```
 
 What each asserts:
@@ -42,6 +53,12 @@ What each asserts:
 | matte channel | alpha / alpha-inv / luma (Rec.709) / luma-inv extracted correctly | Phase 3 channel selection. |
 | matte inactive | `SampleMatte` returns 1.0 with no layer | Matte Layer = None must apply the effect everywhere. |
 | matte fit | a 2×2 matte fit across a 100×100 output reads ~0 left / ~1 right | Fit-to-Layer stretch + edge-clamp sampling. |
+| guided vs reference | O(1) box guided filter matches a brute-force double-precision reference on a noisy image with an alpha ramp (≤1e-3) | Proves the summed-area formulation IS the guided filter, exercising the alpha-weighted paths, not just the opaque fast path. |
+| guided constant | a constant image is a fixed point for any ε | Guards the variance-cancellation and normalization plumbing. |
+| guided edge-preserving | a hard step edge survives low-ε Guided (≤0.01) while the variance-matched Gaussian smears it (>0.15) | The reason Guided exists — the jawline halo in miniature; the control proves the two methods genuinely differ. |
+| guided smoothing extreme | high-ε Guided ≈ the variance-matched Gaussian on a step (≤0.03) | Confirms Separation Radius means the same smoothing *scale* on either method, so toggling Method compares looks not amounts. |
+| guided alpha edge | straight color at an opaque/transparent boundary stays the opaque value (no fringe); coverage alpha there really drops | The Gaussian path's anti-fringe invariant carried over to Guided. |
+| guided radius mapping | `GuidedSupport = 2r`, σ→radius mapping pinned, r=0 is an exact copy | Locks the PreRender inflation (2r cascade) and the identity chain. |
 
 ### How rect handling was verified
 
@@ -84,10 +101,14 @@ plugins folder; if AE was open, restart it.
 ### A. Load & params (Phase 1 milestone)
 - [ ] Effect appears under **Effect ▸ MM ▸ Skin Retouch**.
 - [ ] Apply to any layer — all 11 params visible in this order: Matte Layer,
-      Matte Channel, Matte Fit, Separation Radius, Separation Method, Low Band
-      Smooth, Low Band: Color Only, High Band Texture, Mix, View, Working Curve.
-- [ ] Defaults: Radius 8, Method Gaussian, Smooth 0, Texture 100, Mix 100,
-      View Result, Curve None, Matte Layer None.
+      Matte Channel, Matte Fit, Separation Radius, Separation Method, **Edge
+      Preservation**, Low Band Smooth, High Band Texture, Mix, View, Working
+      Curve. (Edge Preservation sits directly under Method. There is no "Low
+      Band: Color Only" checkbox — it was cut and moved to a standalone effect.)
+- [ ] Separation Method popup has exactly two items: **Gaussian | Guided Filter**
+      (Bilateral removed).
+- [ ] Defaults: Radius 8, Method Gaussian, Edge Preservation 35 (greyed),
+      Smooth 0, Texture 100, Mix 100, View Result, Curve None, Matte Layer None.
 - [ ] Default state renders a **passthrough** (output looks identical to input).
 
 ### B. Identity (Phase 2, 32bpc)
@@ -174,12 +195,70 @@ plugins folder; if AE was open, restart it.
 - [ ] **Animated / transformed matte**: keyframe the driver layer's position or
       a mask — the affected region tracks it frame-accurately (no one-frame lag).
 
+### H. Separation Method — Guided Filter & Edge Preservation (Phase 4)
+
+**Grey-out (the UI contract):**
+- [ ] With Method = **Gaussian**, **Edge Preservation is greyed out** (visible
+      but disabled — can't be dragged).
+- [ ] Switch Method to **Guided Filter** → Edge Preservation becomes **active**
+      immediately (no need to click away / re-open the effect).
+- [ ] Switch back to Gaussian → it greys out again.
+- [ ] Save the comp, reopen it with Method = Guided → Edge Preservation loads
+      **already enabled** (UPDATE_PARAMS_UI path, not just the interactive edit).
+- [ ] Undo across a Method change → the grey state follows the undone value.
+
+**Guided vs Gaussian (the halo test — the headline deliverable):**
+- [ ] Portrait or footage with a **contrasty jawline / hairline** against a
+      darker background. Radius ~15, View Result, Texture 0 (max smoothing to
+      make the halo obvious).
+- [ ] Method = **Gaussian**: a **halo** (light/dark ring) bleeds across the
+      hard edge — tone from one side leaks onto the other. This is expected
+      and is the Gaussian "look".
+- [ ] Method = **Guided Filter**: at low Edge Preservation the **halo
+      disappears** — the low band respects the edge, no cross-contamination —
+      while flat skin is still smoothed. This is the whole point of Guided.
+- [ ] **Same slider = same scale**: toggling Method at a fixed Radius changes
+      the *character* (halo vs no-halo), not the overall amount of smoothing.
+
+**Edge Preservation sweep:**
+- [ ] View ▸ Low Band, Method Guided, Radius ~15. Drag Edge Preservation
+      **0 → 100**: at 0 hard edges stay crisp in the low band (strongest
+      preservation); climbing toward 100 the low band progressively resembles
+      the plain Gaussian blur (edges soften). The change should feel roughly
+      **even across the slider** (exponential ε map), not all bunched at one end.
+- [ ] Downsample invariance: at a fixed Radius + Edge value, the Guided look
+      holds its relative strength Full → Half → Quarter (radius is variance-
+      matched and scaled by downsample, same as Gaussian).
+- [ ] Edge fringing (§E) with Method = Guided: feathered/transparent boundaries
+      still show **no halo** (Guided is alpha-weighted too).
+
+### I. Low Band Smooth visibility (the Texture-100 trap)
+
+> ⚠️ **You cannot see a Low Band Smooth change in the Result view at Texture
+> 100 / Mix 100.** The recombine is `out = lo + gain·hi` with `hi = src − lo`;
+> at gain 1 the low band cancels exactly (`out = src` — the identity property).
+> Low Band Smooth only alters `lo`, so it's invisible until you break that
+> cancellation: **set View ▸ Low Band**, or **lower High Band Texture**
+> (Texture 0 → Result equals the low band). This bit the first manual tester.
+
+- [ ] **View ▸ Low Band**, Radius ~15, drag Low Band Smooth 0 → 100: the tone
+      band progressively softens. At Texture 0 in Result view the same softening
+      shows in the output; at Texture 100 it does not (identity — expected).
+
+> **Note:** "Low Band: Color Only" was removed this session. As a low-band-only
+> operation it only reached low-frequency color variation (blotchy skin is
+> mid/high frequency), and it doesn't use the frequency split at all — it's a
+> whole-image luma/chroma smooth. It's being spun out as a standalone
+> **MM Skin Color** effect (edge-aware chroma evening via the shared guided
+> filter). See `docs/mm-freqsep-plan.md` §6.
+
 ### Known limits this session (by design)
-- Separation Method (Bilateral/Guided), Low Band: Color Only, and Working Curve
-  are **present but inert** — wired up in Phase 4. Method other than Gaussian
-  falls back to Gaussian.
-- Low Band Smooth runs as a second Gaussian on the tone band (edge-aware
-  variant is Phase 4).
+- **Working Curve** is still **present but inert** (later phase).
+- Low Band Smooth runs as a second Gaussian on the tone band regardless of
+  separation method (edge-aware smooth variant not planned for v1).
+- Guided Filter is **per-channel self-guided** — on edges where the channels
+  disagree in contrast it can shift color slightly; the 3×3-covariance color
+  guide is the documented upgrade path if that shows up on real footage.
 - Matte Fit ships **Fit-to-Layer** as the primary path; Center / Top-Left are
   implemented (1:1 placement, out-of-bounds = no effect) but Fit is the v1
   default and the most-tested mode.

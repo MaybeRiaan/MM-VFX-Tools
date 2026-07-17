@@ -62,9 +62,10 @@ resource 'PiPL' (16000) {
 		// MUST match what GlobalSetup() sets at runtime, or AE rejects with
 		// "global outflags mismatch". See src/main.cpp GlobalSetup.
 		// out_flags  = DEEP_COLOR_AWARE | PIX_INDEPENDENT | USE_OUTPUT_EXTENT
-		//            = 0x02000000 | 0x400 | 0x40 = 0x02000440
+		//              | SEND_UPDATE_PARAMS_UI
+		//            = 0x02000000 | 0x400 | 0x40 | 0x04000000 = 0x06000440
 		AE_Effect_Global_OutFlags {
-		0x02000440
+		0x06000440
 		},
 		// out_flags2 = FLOAT_COLOR_AWARE | SUPPORTS_SMART_RENDER | SUPPORTS_THREADED_RENDERING
 		//            = 0x1000 | 0x400 | 0x08000000 = 0x08001400

@@ -23,6 +23,7 @@
 
 #include "../src/fs_core.h"
 #include "../src/blur.h"
+#include "../src/guided.h"
 #include "../src/matte.h"
 
 #include <cmath>
@@ -294,9 +295,259 @@ static void test_matte_downsample_invariant()
 		  std::fabs((double)a - (double)b));
 }
 
+// ==========================================================================
+// Guided filter (Phase 4). Same shim-driven setup: these run the REAL
+// src/guided.cpp through the serial ForEachRow above.
+// ==========================================================================
+
+// Helper: straight value of channel c at pixel i of a premult ARGB buffer.
+static float straight_at(const float *buf, size_t i, int c)
+{
+	const float a = buf[i * 4];
+	return (a > 1e-6f) ? buf[i * 4 + (size_t)c] / a : 0.f;
+}
+
+// Brute-force reference: the SAME alpha-weighted guided math as guided.cpp,
+// computed naively per window in double, O(W*H*r^2). Mirrors guided.cpp's
+// thresholds and zero extension exactly so any disagreement is a real bug in
+// the O(1) box formulation, not a semantics difference.
+static void guided_reference(const float *src, float *dst,
+							 int W, int H, int rx, int ry, float eps)
+{
+	const int N = W * H;
+	std::vector<double> A((size_t)N * 3), B((size_t)N * 3), wk((size_t)N);
+
+	for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+		double sw = 0, sp[3] = {0,0,0}, sp2[3] = {0,0,0};
+		for (int j = (y-ry < 0 ? 0 : y-ry); j <= (y+ry > H-1 ? H-1 : y+ry); ++j)
+		for (int i = (x-rx < 0 ? 0 : x-rx); i <= (x+rx > W-1 ? W-1 : x+rx); ++i) {
+			const float *s = &src[((size_t)j * W + i) * 4];
+			const double a = s[0];
+			sw += a;
+			for (int c = 0; c < 3; ++c) {
+				sp[c]  += s[c + 1];
+				sp2[c] += (a > (double)fs::FS_GUIDED_AEPS)
+					? (double)s[c + 1] * s[c + 1] / a : 0.0;
+			}
+		}
+		const size_t k = (size_t)y * W + x;
+		const double a_k = src[k * 4];
+		if (sw > (double)fs::FS_GUIDED_WEPS) {
+			wk[k] = a_k;
+			for (int c = 0; c < 3; ++c) {
+				const double mean = sp[c] / sw;
+				double var = sp2[c] / sw - mean * mean;
+				if (var < 0) var = 0;
+				const double Ak = var / (var + (double)eps);
+				A[k*3 + c] = Ak;
+				B[k*3 + c] = mean * (1.0 - Ak);
+			}
+		} else {
+			wk[k] = 0;   // guided.cpp zeroes the weight slot too
+			for (int c = 0; c < 3; ++c) { A[k*3 + c] = 0; B[k*3 + c] = 0; }
+		}
+	}
+
+	const double count = (double)(2*rx + 1) * (2*ry + 1);
+	for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+		double sw = 0, sA[3] = {0,0,0}, sB[3] = {0,0,0};
+		for (int j = (y-ry < 0 ? 0 : y-ry); j <= (y+ry > H-1 ? H-1 : y+ry); ++j)
+		for (int i = (x-rx < 0 ? 0 : x-rx); i <= (x+rx > W-1 ? W-1 : x+rx); ++i) {
+			const size_t k = (size_t)j * W + i;
+			sw += wk[k];
+			for (int c = 0; c < 3; ++c) {
+				sA[c] += wk[k] * A[k*3 + c];
+				sB[c] += wk[k] * B[k*3 + c];
+			}
+		}
+		float *d = &dst[((size_t)y * W + x) * 4];
+		if (sw > (double)fs::FS_GUIDED_WEPS) {
+			const double abar = sw / count;
+			const float  a_i  = src[((size_t)y * W + x) * 4];
+			d[0] = (float)abar;
+			for (int c = 0; c < 3; ++c) {
+				const double p = (a_i > fs::FS_GUIDED_AEPS)
+					? (double)src[((size_t)y * W + x) * 4 + c + 1] / a_i : 0.0;
+				const double q = sA[c] / sw * p + sB[c] / sw;
+				d[c + 1] = (float)(q * abar);
+			}
+		} else {
+			d[0] = d[1] = d[2] = d[3] = 0.f;
+		}
+	}
+}
+
+// Property 10: the O(1) box formulation IS the guided filter — it matches the
+// brute-force reference on a noisy image that includes an alpha ramp (so the
+// weighted paths are exercised, not just the opaque fast path).
+static void test_guided_matches_reference()
+{
+	const int W = 40, H = 28, r = 3;
+	const float eps = 0.02f;
+	std::vector<float> img((size_t)W*H*4), out((size_t)W*H*4), ref((size_t)W*H*4);
+
+	unsigned seed = 12345u;
+	auto frand = [&seed]() {
+		seed = seed * 1664525u + 1013904223u;
+		return (float)((seed >> 8) & 0xFFFFFFu) / 16777216.f;
+	};
+	for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+		const float a = (x < 12) ? (float)x / 12.f : 1.f;   // alpha ramp on the left
+		float *p = &img[((size_t)y * W + x) * 4];
+		p[0] = a; p[1] = a * frand(); p[2] = a * frand(); p[3] = a * frand();
+	}
+
+	fs::GuidedFilterARGB(nullptr, img.data(), out.data(), W, H, r, r, eps);
+	guided_reference(img.data(), ref.data(), W, H, r, r, eps);
+
+	double worst = 0.0;
+	for (size_t i = 0; i < (size_t)W * H; ++i) {
+		const float *o = &out[i * 4], *rf = &ref[i * 4];
+		if (rf[0] > 1e-4f && o[0] > 1e-4f) {
+			worst = std::fmax(worst, std::fabs((double)o[0] - (double)rf[0]));
+			for (int c = 1; c < 4; ++c)
+				worst = std::fmax(worst,
+					std::fabs((double)straight_at(out.data(), i, c)
+							- (double)straight_at(ref.data(), i, c)));
+		} else {
+			for (int c = 0; c < 4; ++c)
+				worst = std::fmax(worst, std::fabs((double)o[c] - (double)rf[c]));
+		}
+	}
+	check(worst <= 1e-3, "guided: O(1) box formulation matches brute-force reference", worst);
+}
+
+// Property 11: constant image is a fixed point for ANY eps (var == 0 → the
+// filter returns the local mean == the constant). Guards the var
+// cancellation / normalization plumbing.
+static void test_guided_constant()
+{
+	const int W = 32, H = 16;
+	std::vector<float> img((size_t)W*H*4), out((size_t)W*H*4);
+	for (size_t i = 0; i < (size_t)W * H; ++i) {
+		img[i*4] = 1.f; img[i*4+1] = img[i*4+2] = img[i*4+3] = 0.42f;
+	}
+	fs::GuidedFilterARGB(nullptr, img.data(), out.data(), W, H, 5, 5, 0.01f);
+	double worst = 0.0;
+	for (size_t i = 0; i < (size_t)W * H; ++i)
+		for (int c = 1; c < 4; ++c)
+			worst = std::fmax(worst,
+				std::fabs((double)straight_at(out.data(), i, c) - 0.42));
+	check(worst <= 1e-4, "guided: constant image is a fixed point (any eps)", worst);
+}
+
+// Property 12: THE reason Guided exists — a hard step edge with low eps comes
+// through nearly untouched (no halo), while the variance-matched Gaussian
+// smears the same edge badly. This is the jawline test in miniature.
+static void test_guided_edge_preserving()
+{
+	const int W = 64, H = 1, r = 4, edge = 32;
+	std::vector<float> img((size_t)W*4), gout((size_t)W*4), tmp((size_t)W*4), out((size_t)W*4);
+	for (int x = 0; x < W; ++x) {
+		const float p = (x < edge) ? 0.2f : 0.8f;
+		img[(size_t)x*4] = 1.f;
+		img[(size_t)x*4+1] = img[(size_t)x*4+2] = img[(size_t)x*4+3] = p;
+	}
+
+	fs::GuidedFilterARGB(nullptr, img.data(), out.data(), W, H, r, 0, 1e-4f);
+	double worst = 0.0;
+	for (int x = 0; x < W; ++x) {
+		const float p = (x < edge) ? 0.2f : 0.8f;
+		worst = std::fmax(worst,
+			std::fabs((double)straight_at(out.data(), (size_t)x, 1) - (double)p));
+	}
+	check(worst <= 0.01, "guided low-eps: step edge preserved (no halo)", worst);
+
+	// Control: the variance-matched Gaussian (sigma from inverting
+	// fs::GuidedRadius: r(r+1) = 1.5*sigma^2) smears the edge — proving the
+	// test discriminates and the two Methods really differ where it matters.
+	const double sigma = std::sqrt((double)r * (r + 1) / 1.5);
+	fs::GaussianBlurARGB(nullptr, img.data(), tmp.data(), gout.data(), W, H, sigma, 0.0);
+	double gworst = 0.0;
+	for (int x = 0; x < W; ++x) {
+		const float p = (x < edge) ? 0.2f : 0.8f;
+		gworst = std::fmax(gworst,
+			std::fabs((double)straight_at(gout.data(), (size_t)x, 1) - (double)p));
+	}
+	check(gworst > 0.15, "control: matched Gaussian smears that same edge", gworst);
+}
+
+// Property 13: at the smoothing extreme (eps >> local variance) Guided
+// approaches the variance-matched Gaussian — same smoothing SCALE, so
+// toggling Method at equal slider values compares looks, not amounts.
+// Kernel shapes differ (triangle vs Gaussian), hence the loose tolerance.
+static void test_guided_smoothing_extreme()
+{
+	const int W = 64, H = 1, r = 4, edge = 32;
+	std::vector<float> img((size_t)W*4), gout((size_t)W*4), tmp((size_t)W*4), out((size_t)W*4);
+	for (int x = 0; x < W; ++x) {
+		const float p = (x < edge) ? 0.2f : 0.8f;
+		img[(size_t)x*4] = 1.f;
+		img[(size_t)x*4+1] = img[(size_t)x*4+2] = img[(size_t)x*4+3] = p;
+	}
+
+	fs::GuidedFilterARGB(nullptr, img.data(), out.data(), W, H, r, 0, 10.f);
+	const double sigma = std::sqrt((double)r * (r + 1) / 1.5);
+	fs::GaussianBlurARGB(nullptr, img.data(), tmp.data(), gout.data(), W, H, sigma, 0.0);
+
+	double diff = 0.0, smoothed = 0.0;
+	for (int x = 0; x < W; ++x) {
+		const float p = (x < edge) ? 0.2f : 0.8f;
+		const double g = (double)straight_at(out.data(),  (size_t)x, 1);
+		const double n = (double)straight_at(gout.data(), (size_t)x, 1);
+		diff     = std::fmax(diff, std::fabs(g - n));
+		smoothed = std::fmax(smoothed, std::fabs(g - (double)p));
+	}
+	check(diff <= 0.03, "guided high-eps ~ matched Gaussian on a step (same scale)", diff);
+	check(smoothed > 0.15, "control: high-eps guided really is smoothing", smoothed);
+}
+
+// Property 14: alpha-weighted edge, guided edition — the exact invariant
+// test_alpha_weighted_edge checks for the Gaussian path. Straight color at
+// the last opaque pixel stays the opaque value (transparent neighbors carry
+// no weight), while the reported coverage alpha genuinely drops there.
+static void test_guided_alpha_edge()
+{
+	const int W = 64, H = 1, r = 4, edge = 32;
+	const float COLOR = 0.6f;
+	std::vector<float> img((size_t)W*4), out((size_t)W*4);
+	for (int x = 0; x < W; ++x) {
+		float *p = &img[(size_t)x*4];
+		if (x < edge) { p[0] = 1.f; p[1] = p[2] = p[3] = COLOR; }
+		else          { p[0] = 0.f; p[1] = p[2] = p[3] = 0.f;   }
+	}
+	fs::GuidedFilterARGB(nullptr, img.data(), out.data(), W, H, r, 0, 0.01f);
+
+	const double err = std::fabs(
+		(double)straight_at(out.data(), (size_t)(edge - 1), 1) - (double)COLOR);
+	check(err <= 1e-3, "guided alpha edge: straight color ~= opaque value (no fringe)", err);
+
+	const double abar = (double)out[(size_t)(edge - 1) * 4];
+	check(abar < 0.95, "control: coverage alpha at the edge really dropped", abar);
+}
+
+// Property 15: radius/support plumbing. GuidedSupport is the 2r cascade
+// PreRender must inflate by; GuidedRadius pins the variance-matched
+// sigma → box radius mapping; r == 0 is an exact copy (identity chain).
+static void test_guided_radius_mapping()
+{
+	bool ok = (fs::GuidedSupport(4) == 8) && (fs::GuidedSupport(0) == 0) &&
+			  (fs::GuidedRadius(0.0) == 0) && (fs::GuidedRadius(0.3) == 0) &&
+			  (fs::GuidedRadius(1.0) == 1) && (fs::GuidedRadius(8.0) == 9);
+	check(ok, "guided: support = 2r, sigma->radius mapping pinned", ok ? 0.0 : 1.0);
+
+	float img[8 * 4], out[8 * 4];
+	for (int i = 0; i < 8 * 4; ++i) img[i] = 0.125f * (float)i;
+	fs::GuidedFilterARGB(nullptr, img, out, 8, 1, 0, 0, 0.01f);
+	double worst = 0.0;
+	for (int i = 0; i < 8 * 4; ++i)
+		worst = std::fmax(worst, std::fabs((double)out[i] - (double)img[i]));
+	check(worst == 0.0, "guided r=0: exact copy (identity)", worst);
+}
+
 int main()
 {
-	std::printf("MM FreqSep Phase 2+3 core tests\n");
+	std::printf("MM FreqSep Phase 2-4 core tests\n");
 	test_identity();
 	test_split_lossless();
 	test_alpha_weighted_edge();
@@ -307,6 +558,12 @@ int main()
 	test_matte_fit();
 	test_matte_origin_offset();
 	test_matte_downsample_invariant();
+	test_guided_matches_reference();
+	test_guided_constant();
+	test_guided_edge_preserving();
+	test_guided_smoothing_extreme();
+	test_guided_alpha_edge();
+	test_guided_radius_mapping();
 	std::printf(g_failures ? "\n%d FAILURE(S)\n" : "\nAll tests passed.\n", g_failures);
 	return g_failures ? 1 : 0;
 }

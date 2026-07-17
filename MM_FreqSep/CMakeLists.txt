@@ -37,6 +37,7 @@ set(FS_SOURCES
     ${SRC_DIR}/main.cpp
     ${SRC_DIR}/smart_render.cpp
     ${SRC_DIR}/blur.cpp
+    ${SRC_DIR}/guided.cpp
     ${SRC_DIR}/matte.cpp
     ${SRC_DIR}/curve.cpp
     ${SRC_DIR}/common/MM_Common.cpp
