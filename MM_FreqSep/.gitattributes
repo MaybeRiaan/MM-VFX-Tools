@@ -1,0 +1,17 @@
+# Normalize text line endings; let Git handle CRLF conversion per-checkout.
+* text=auto
+
+# Source and docs are text.
+*.cpp   text
+*.h     text
+*.c     text
+*.md    text
+*.txt   text
+*.r     text
+*.ps1   text
+*.plist text
+
+# Binary assets — never touch line endings.
+*.exe   binary
+*.aex   binary
+*.plugin binary

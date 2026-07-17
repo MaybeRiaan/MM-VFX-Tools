@@ -1,0 +1,154 @@
+/*  main.cpp — MM FreqSep ("Skin Retouch") entry points.
+
+    Matte-driven frequency separation: split source into low (tone/color)
+    and high (texture/detail) bands, process each, recombine, blend back.
+    Full plan: docs/mm-freqsep-plan.md.
+
+    This file owns the non-render commands: About, GlobalSetup (outflags —
+    must mirror resources/MM_FreqSepPiPL.r literals exactly), ParamsSetup
+    (all 11 params, disk IDs locked), and the registration entry points.
+    Render lives in smart_render.cpp; blur kernel in blur.cpp; matte.cpp and
+    curve.cpp are Phase 3/Working-Curve stubs.
+
+    MFR-safe: no mutable global/static state anywhere in this plugin.
+*/
+
+#define NOMINMAX
+#include "params.h"
+
+static PF_Err
+About(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerDef *)
+{
+	AEGP_SuiteHandler suites(in_data->pica_basicP);
+	suites.ANSICallbacksSuite1()->sprintf(out_data->return_msg,
+		"%s v%d.%d\rMatte-driven frequency separation retouching.",
+		"Skin Retouch", MAJOR_VERSION, MINOR_VERSION);
+	return PF_Err_NONE;
+}
+
+static PF_Err
+GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerDef *)
+{
+	out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION,
+									  STAGE_VERSION, BUILD_VERSION);
+	// Must match resources/MM_FreqSepPiPL.r literals exactly (0x02000440 /
+	// 0x08001400) or AE rejects the plugin with an outflags mismatch.
+	out_data->out_flags  = PF_OutFlag_DEEP_COLOR_AWARE |
+						   PF_OutFlag_PIX_INDEPENDENT  |
+						   PF_OutFlag_USE_OUTPUT_EXTENT;
+	out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE         |
+						   PF_OutFlag2_SUPPORTS_SMART_RENDER     |
+						   PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
+	return PF_Err_NONE;
+}
+
+static PF_Err
+ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerDef *)
+{
+	PF_Err      err = PF_Err_NONE;
+	PF_ParamDef def;
+
+	// --- Matte driver -----------------------------------------------------
+
+	AEFX_CLR_STRUCT(def);
+	// When on, the effect layer's OWN alpha (which already carries its masks,
+	// baked in by AE before we receive the input) drives the effect — no
+	// external driver layer needed. Overrides the Matte Layer when both are set.
+	PF_ADD_CHECKBOX("Use Layer Masks", "", FALSE, 0, FS_USE_LAYER_MASKS_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	// PF_LayerDefault_NONE → user starts with no matte; render treats that
+	// as matte = 1.0 (effect applies everywhere).
+	PF_ADD_LAYER("Matte Layer", PF_LayerDefault_NONE, FS_MATTE_LAYER_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_POPUP("Matte Channel",
+		FS_MATTE_CHAN_NUM - 1, FS_MATTE_CHAN_DFLT,
+		FS_MATTE_CHAN_ITEMS, FS_MATTE_CHANNEL_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_POPUP("Matte Fit",
+		FS_MATTE_FIT_NUM - 1, FS_MATTE_FIT_DFLT,
+		FS_MATTE_FIT_ITEMS, FS_MATTE_FIT_DISK_ID);
+
+	// --- Separation --------------------------------------------------------
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Separation Radius",
+		FS_RADIUS_MIN, FS_RADIUS_MAX, FS_RADIUS_MIN, FS_RADIUS_SLIDER_MAX,
+		FS_RADIUS_DFLT, PF_Precision_TENTHS, 0, 0, FS_RADIUS_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_POPUP("Separation Method",
+		FS_METHOD_NUM - 1, FS_METHOD_DFLT,
+		FS_METHOD_ITEMS, FS_METHOD_DISK_ID);
+
+	// --- Band processing ----------------------------------------------------
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Low Band Smooth",
+		FS_SMOOTH_MIN, FS_SMOOTH_MAX, FS_SMOOTH_MIN, FS_SMOOTH_MAX,
+		FS_SMOOTH_DFLT, PF_Precision_TENTHS, 0, 0, FS_LO_SMOOTH_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_CHECKBOX("Low Band: Color Only", "", FALSE, 0, FS_LO_COLOR_ONLY_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("High Band Texture",
+		FS_TEXTURE_MIN, FS_TEXTURE_MAX, FS_TEXTURE_MIN, FS_TEXTURE_MAX,
+		FS_TEXTURE_DFLT, PF_Precision_TENTHS, 0, 0, FS_HI_TEXTURE_DISK_ID);
+
+	// --- Output -------------------------------------------------------------
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Mix",
+		FS_MIX_MIN, FS_MIX_MAX, FS_MIX_MIN, FS_MIX_MAX,
+		FS_MIX_DFLT, PF_Precision_TENTHS, 0, 0, FS_MIX_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_POPUP("View",
+		FS_VIEW_NUM - 1, FS_VIEW_DFLT,
+		FS_VIEW_ITEMS, FS_VIEW_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_POPUP("Working Curve",
+		FS_CURVE_NUM - 1, FS_CURVE_DFLT,
+		FS_CURVE_ITEMS, FS_CURVE_DISK_ID);
+
+	out_data->num_params = FS_NUM_PARAMS;
+	return err;
+}
+
+// ---------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------
+extern "C" DllExport PF_Err
+PluginDataEntryFunction2(PF_PluginDataPtr inPtr, PF_PluginDataCB2 inPluginDataCallBackPtr,
+	SPBasicSuite *inSPBasicSuitePtr, const char *inHostName, const char *inHostVersion)
+{
+	PF_Err result = PF_Err_NONE;
+	result = PF_REGISTER_EFFECT_EXT2(inPtr, inPluginDataCallBackPtr,
+		"Skin Retouch",		// display name
+		"MM Skin Retouch",	// match name — forever
+		"MM",				// category
+		AE_RESERVED_INFO, "EffectMain", "");
+	return result;
+}
+
+PF_Err EffectMain(PF_Cmd cmd, PF_InData *in_data, PF_OutData *out_data,
+	PF_ParamDef *params[], PF_LayerDef *output, void *extra)
+{
+	// No exceptions cross the plugin boundary — everything maps to a PF_Err.
+	PF_Err err = PF_Err_NONE;
+	try {
+		switch (cmd) {
+			case PF_Cmd_ABOUT:            err = About(in_data, out_data, params, output);					break;
+			case PF_Cmd_GLOBAL_SETUP:     err = GlobalSetup(in_data, out_data, params, output);				break;
+			case PF_Cmd_PARAMS_SETUP:     err = ParamsSetup(in_data, out_data, params, output);				break;
+			case PF_Cmd_SMART_PRE_RENDER: err = FS_PreRender(in_data, out_data, (PF_PreRenderExtra*)extra);	break;
+			case PF_Cmd_SMART_RENDER:     err = FS_SmartRender(in_data, out_data, (PF_SmartRenderExtra*)extra); break;
+		}
+	} catch (PF_Err &e) { err = e; }
+	  catch (...)       { err = PF_Err_INTERNAL_STRUCT_DAMAGED; }
+	return err;
+}
