@@ -94,7 +94,23 @@ Edge correctness: blur must be alpha-weighted (normalize by blurred alpha) or fr
 - [x] `src/gpu/kernels/fs_compose.kernel` — recombine + View modes, parity-tested to ~1ulp
 - [x] `src/gpu/kernels/fs_guided.kernel` — guided filter, 5 stages, parity-tested **bit-exact** (incl. r=24, anisotropic, eps floor)
 - [x] **All kernel math complete and validated.** 40/40 tests green with no GPU, no AE host, no Mac.
-- [ ] DX12 host: device acquire, PSO/root sig, dispatch, world↔buffer transfer
+**Usage profile (Riaan, 2026-07-18) — the constraints that shape the host design:**
+- Footage: **6K+ / mixed.** One float ARGB plane at 6K ≈ 340MB — memory, not
+  compute, is the binding constraint. GPU host must be **internally tiled**
+  (horizontal bands + blur-support overlap, reusing the PreRender inflation
+  math) from day one, not retrofitted.
+- Radius: "2–30 feels right" — but radius is in pixels and that instinct is
+  1080p-calibrated; the same look at 6K needs ~3×. Real use will hit 60–90.
+  Keep FS_RADIUS_MAX 250. Big-radius perf is the main case, not an edge case.
+- Felt pain: CPU slow only at 4K/big radius → GPU is solving render-time pain;
+  favor doing it right over doing it fast. User is explicitly not in a rush.
+- Fidelity: **identical GPU/CPU results, no silent approximations.** A
+  quarter-res "fast guided filter" (He) exists and is visibly fine but NOT
+  identical — permissible only as a future opt-in Draft toggle, never default.
+- GPU guided scratch: reduce 5 planes → 3 by writing the A/B coefficient stage
+  in place over s1/s2 (stage is pointwise — verified safe). ~1GB at 6K.
+
+- [ ] DX12 host: device acquire, PSO/root sig, dispatch, world↔buffer transfer — **tiled internally** (see usage profile)
 - [ ] `GPURender` / `PF_OutFlag2_SUPPORTS_GPU_RENDER_F32` wiring in `main.cpp`
 - [ ] Metal prologue + host (deferred until Mac access)
 - [ ] IIR recursive Gaussian on CPU (**deferred** — see tradeoff note below)
