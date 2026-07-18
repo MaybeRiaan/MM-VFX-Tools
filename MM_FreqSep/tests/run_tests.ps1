@@ -14,6 +14,10 @@ $vcvars = Join-Path $vsInstall "VC\Auxiliary\Build\vcvars64.bat"
 $outDir = Join-Path $PSScriptRoot "out"
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
 $exe = Join-Path $outDir "identity_test.exe"
+# GPU kernel parity: the .kernel bodies are platform-free by rule, so their
+# arithmetic is transcribed into C and diffed against the CPU reference here —
+# no DX12 device, no AE host, no Mac required.
+$gpuExe = Join-Path $outDir "gpu_parity_test.exe"
 
 $bat = @"
 call "$vcvars"
@@ -23,6 +27,11 @@ cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
    /I "$Root\sdk\Headers" /I "$Root\sdk\Headers\SP" /I "$Root\sdk\Util" /I "$Root\src" ^
    "$PSScriptRoot\identity_test.cpp" "$Root\src\blur.cpp" "$Root\src\guided.cpp" "$Root\src\matte.cpp" ^
    /Fe:"$exe"
+if errorlevel 1 exit /b 1
+cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
+   /I "$Root\sdk\Headers" /I "$Root\sdk\Headers\SP" /I "$Root\sdk\Util" /I "$Root\src" ^
+   "$PSScriptRoot\gpu_parity_test.cpp" "$Root\src\blur.cpp" "$Root\src\guided.cpp" "$Root\src\common\MM_Common.cpp" ^
+   /Fe:"$gpuExe"
 if errorlevel 1 exit /b 1
 "@
 
@@ -36,4 +45,10 @@ if ($code -ne 0) { throw "Test compile failed (exit $code)" }
 
 Write-Host ""
 & $exe
-exit $LASTEXITCODE
+$coreCode = $LASTEXITCODE
+
+& $gpuExe
+$gpuCode = $LASTEXITCODE
+
+if ($coreCode -ne 0) { exit $coreCode }
+exit $gpuCode

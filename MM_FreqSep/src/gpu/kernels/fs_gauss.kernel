@@ -1,0 +1,92 @@
+/*  fs_gauss.kernel — separable Gaussian over premultiplied ARGB.
+
+    PLATFORM-FREE. No #ifdef, no HLSL/MSL syntax — only the vocabulary defined
+    by the including prologue (docs/gpu-kernel-rules.md §2). Not a standalone
+    translation unit; it is #included after a prologue.
+
+    Line-by-line counterpart of fs::FS_BlurPassRow in src/blur.cpp. One dispatch
+    per axis: horizontal (src -> tmp), then vertical (tmp -> dst), matching
+    GaussianBlurARGB's two-pass structure.
+
+    THE TWO INVARIANTS THAT MUST NOT DRIFT (rules §3.1, §3.2):
+
+    1. Out-of-range taps are SKIPPED, not clamped. i0/i1 narrow the tap range
+       at buffer edges exactly as blur.cpp:71-72 does, so the effective weight
+       sum drops below 1.0 there. That reduced sum IS the premultiplied
+       coverage weight the compose pass renormalizes by. Clamp-sampling the
+       edge instead (what a texture sampler would do for free) reintroduces the
+       fringing this whole design exists to avoid.
+
+    2. Weights arrive PRE-BUILT from the CPU (gKernel), computed in double by
+       blur.cpp:BuildKernel and cast to float. Never rebuild them here in
+       float — the last-bit divergence turns the tolerance check into noise.
+
+    Buffer slots (order is part of the contract; Metal must bind identically):
+      t0  gSrc     input  plane, premultiplied ARGB float
+      t1  gKernel  2R+1 normalized weights, centered at index R
+      u0  gDst     output plane
+*/
+
+BUF_IN (gSrc,    0);
+BUF_IN (gKernel, 1);
+BUF_OUT(gDst,    0);
+
+PARAM_BLOCK_BEGIN
+    int gW;            // buffer width  in pixels
+    int gH;            // buffer height in pixels
+    int gR;            // kernel half-width; 0 means "no blur on this axis"
+    int gHorizontal;   // 1 = convolve along x, 0 = along y
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(fs_gauss_pass)
+{
+    FS_GUARD(gW, gH)
+
+    const int x = GID_X;
+    const int y = GID_Y;
+    const int R = gR;
+
+    // R == 0 is an exact copy. blur.cpp handles this by memcpy before ever
+    // dispatching, but a guard here keeps the kernel correct standalone.
+    if (R == 0) {
+        const int o = FS_IDX(x, y, gW);
+        gDst[o + 0] = gSrc[o + 0];
+        gDst[o + 1] = gSrc[o + 1];
+        gDst[o + 2] = gSrc[o + 2];
+        gDst[o + 3] = gSrc[o + 3];
+        return;
+    }
+
+    // Tap range, narrowed at the buffer edge. INVARIANT 2 above — this is the
+    // skip-don't-clamp behaviour, transcribed from blur.cpp:71-72 / 82-83.
+    int i0, i1;
+    if (gHorizontal != 0) {
+        i0 = (x - R < 0)      ? -x           : -R;
+        i1 = (x + R > gW - 1) ? (gW - 1 - x) :  R;
+    } else {
+        i0 = (y - R < 0)      ? -y           : -R;
+        i1 = (y + R > gH - 1) ? (gH - 1 - y) :  R;
+    }
+
+    // Accumulate all four premultiplied channels together. Alpha is blurred by
+    // the SAME kernel as colour — that is what makes the low band's alpha the
+    // "blurred alpha" the compose pass divides by (rules §3.5).
+    float a = 0.0f, r = 0.0f, g = 0.0f, b = 0.0f;
+
+    for (int i = i0; i <= i1; ++i) {
+        const float w = gKernel[i + R];          // centered: index R == tap 0
+        const int   o = (gHorizontal != 0)
+                      ? FS_IDX(x + i, y,     gW)
+                      : FS_IDX(x,     y + i, gW);
+        a += w * gSrc[o + 0];
+        r += w * gSrc[o + 1];
+        g += w * gSrc[o + 2];
+        b += w * gSrc[o + 3];
+    }
+
+    const int o = FS_IDX(x, y, gW);
+    gDst[o + 0] = a;   // NO clamping — intermediates stay unbounded (§3.3)
+    gDst[o + 1] = r;
+    gDst[o + 2] = g;
+    gDst[o + 3] = b;
+}

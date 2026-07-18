@@ -11,7 +11,7 @@ Matte-driven frequency separation effect for After Effects (C++ AE SDK, MM suite
 - **Internal masking is free:** AE's per-effect Compositing Options (effect masks) already let the user mask the effect within the layer. You don't build this — document it in the UI/manual. The plugin only needs the *external* matte layer param.
 - **Multi-Frame Rendering safe** from day one (`PF_OutFlag2_SUPPORTS_THREADED_RENDERING`), no mutable globals.
 - **Space-agnostic core + "Working Curve" popup (None / sRGB / ACEScct)** — Photoshop FS operates on gamma-encoded values, which is why texture/smoothing behave perceptually uniformly; None on gamma/log footage = exact PS behavior. On scene-linear pipelines (ACEScg working space), the popup internally encodes → processes → decodes so hi-band amplitude stays uniform instead of scaling with brightness (specular hammering). Curve applies to processing only; matte is sampled as-is.
-- **GPU from day one** — kernels designed GPU-first (as with MasterFilm), with the mandatory CPU float path implemented as the reference the GPU output is validated against.
+- **GPU from day one** — kernels designed GPU-first, with the mandatory CPU float path implemented as the reference the GPU output is validated against.
 - Standalone repo/target now; folds into the MM monorepo later (Phase 8).
 
 ## 1. Parameter design
@@ -82,7 +82,40 @@ Edge correctness: blur must be alpha-weighted (normalize by blurred alpha) or fr
 - Deliverable: side-by-side vs Photoshop FS retouch on test portrait — halos visibly reduced with Guided.
 
 ### Phase 5 — GPU render + performance
-- GPU render path (`PF_OutFlag2_SUPPORTS_GPU_RENDER_F32`) immediately after CPU reference passes identity tests — DirectX/Metal, kernel structure shared with MasterFilm's compute-shader approach.
+- GPU render path (`PF_OutFlag2_SUPPORTS_GPU_RENDER_F32`) immediately after CPU reference passes identity tests — DirectX (HLSL) + Metal (MSL), via AE's `PF_GPUDeviceSuite1`.
+- **Architecture: kernel math authored ONCE in a shared header, thin per-platform shims.** DX and Metal both accept a common C-like subset, so each kernel body lives in one place and cannot drift between platforms; only host plumbing (device/buffer/dispatch) is written per platform. This split is the deliverable, not just the working DX build — it becomes the template for taking the rest of the MM suite cross-platform.
+- **DirectX is the validation target; Metal is deferred, not written blind.** Revised 2026-07-18: rather than committing untestable Metal host code, Phase 5 builds DX12 for real while authoring every kernel body platform-free, against a documented ruleset (`docs/gpu-kernel-rules.md`) derived from Metal's actual requirements. Metal then becomes a mechanical port (prologue + host plumbing) rather than a re-derivation.
+- **Kernel math is validated WITHOUT a GPU.** Because `.kernel` bodies carry no platform syntax, their arithmetic is transcribed into C in `tests/gpu_parity_test.cpp` and diffed against the real `blur.cpp` / `fs_core.h` — no DX12 device, no AE host, no Mac. Algorithm error is caught here; anything left when the DX12 host lands is unambiguously plumbing. **Status: Gaussian + compose parity green (Gaussian bit-exact).**
+
+**Phase 5 progress:**
+- [x] `docs/gpu-kernel-rules.md` — the suite-wide ruleset (also the ModernEdgeBlur / EdgeRepair reference)
+- [x] `src/gpu/kernels/fs_prologue_hlsl.h` — HLSL vocabulary layer
+- [x] `src/gpu/kernels/fs_gauss.kernel` — separable Gaussian, parity-tested bit-exact
+- [x] `src/gpu/kernels/fs_compose.kernel` — recombine + View modes, parity-tested to ~1ulp
+- [x] `src/gpu/kernels/fs_guided.kernel` — guided filter, 5 stages, parity-tested **bit-exact** (incl. r=24, anisotropic, eps floor)
+- [x] **All kernel math complete and validated.** 40/40 tests green with no GPU, no AE host, no Mac.
+- [ ] DX12 host: device acquire, PSO/root sig, dispatch, world↔buffer transfer
+- [ ] `GPURender` / `PF_OutFlag2_SUPPORTS_GPU_RENDER_F32` wiring in `main.cpp`
+- [ ] Metal prologue + host (deferred until Mac access)
+- [ ] IIR recursive Gaussian on CPU (**deferred** — see tradeoff note below)
+
+> **Tradeoff logged:** the IIR (van Vliet/Deriche) CPU Gaussian is deliberately
+> deferred past the GPU work. It *approximates* a true Gaussian, so landing it
+> mid-phase would make every GPU-vs-CPU mismatch ambiguous — kernel bug, or IIR
+> approximation error? The GPU path is validated against the exact FIR reference
+> first; the CPU large-radius path is swapped afterward against a trusted second
+> implementation.
+
+> **NOT a reference: MasterFilm.** Repeatedly mis-cited in earlier planning as the
+> GPU template. It is not applicable — it's an **OpenFX plugin for Resolve**, not
+> AE SDK; it uses **fragment shaders + fullscreen quads** (GLSL `#version 410`),
+> not compute kernels; it has **no DirectX path at all** (OpenGL on Windows); and
+> its **Metal path is an unbuilt stub** (`shaders/metal/` is empty, it loads a
+> `.metallib` that is never authored, and no math is shared between its GL and
+> Metal sides). Its OFX host model (`kOfxActionCreateInstance`) does not transfer
+> to AE's `PF_SmartRenderExtra`/`PF_GPUDeviceSuite1`. MM FreqSep **defines** the
+> suite's dual-target pattern; MasterFilm is a future consumer of it, and its own
+> Mac port is a larger job than its directory layout suggests. Do not scaffold on it.
 - Separable Gaussian, box-sum guided filter, and matte blend all map cleanly to compute kernels; validate GPU vs CPU within float tolerance per band (View popup makes this easy).
 - CPU path: IIR recursive Gaussian (van Vliet/Deriche) for large radii — O(1) per pixel, matters at 4K with radius 40+.
 - Profile MFR behavior on the CPU fallback, cache-friendly row-major passes.
