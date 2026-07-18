@@ -19,6 +19,8 @@
 #include "blur.h"
 #include "fs_core.h"
 #include "guided.h"
+#include "matte.h"
+#include "gpu/mm_gpu_host.h"
 
 #include <cmath>
 #include <cstdio>
@@ -259,6 +261,347 @@ static double MaxAbsDiff(const std::vector<float> &a, const std::vector<float> &
     return m;
 }
 
+// ===========================================================================
+// Phase 5 host-side additions: fs_tile / fs_matte / full fs_compose
+// transcriptions, plus the tiled pipeline driven by the REAL tile planner
+// (src/gpu/mm_gpu_host.h — code under test, not a transcription).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Transcription of fs_tile.kernel. AE GPU worlds are BGRA float with a row
+// pitch in floats; tiles are packed ARGB. The swizzle is index reversal.
+// ---------------------------------------------------------------------------
+static void EmulateLoadTile(const float *world, int pitchFl, int worldY0,
+                            float *tile, int W, int H)
+{
+    for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+        const int t = (y * W + x) * 4;
+        const int w = (worldY0 + y) * pitchFl + x * 4;
+        tile[t + 0] = world[w + 3];
+        tile[t + 1] = world[w + 2];
+        tile[t + 2] = world[w + 1];
+        tile[t + 3] = world[w + 0];
+    }
+}
+
+static void EmulateStoreTile(const float *tile, int W, int H,
+                             float *world, int pitchFl, int worldY0)
+{
+    for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+        const int t = (y * W + x) * 4;
+        const int w = (worldY0 + y) * pitchFl + x * 4;
+        world[w + 0] = tile[t + 3];
+        world[w + 1] = tile[t + 2];
+        world[w + 2] = tile[t + 1];
+        world[w + 3] = tile[t + 0];
+    }
+}
+
+static void EmulateFillOnes(float *plane, int W, int H)
+{
+    for (int i = 0; i < W * H; ++i) plane[i] = 1.0f;
+}
+
+// Reverse of EmulateLoadTile, used to BUILD a fake AE world from an ARGB
+// plane. Slack floats beyond each row's W*4 get a sentinel so a pitch bug
+// reads garbage loudly instead of zeros quietly.
+static void MakeBGRAWorld(const std::vector<float> &argb, int W, int H,
+                          int pitchFl, std::vector<float> &world)
+{
+    world.assign((size_t)H * pitchFl, 777.0f);
+    for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+        const int t = (y * W + x) * 4;
+        const int w = y * pitchFl + x * 4;
+        world[w + 0] = argb[t + 3];
+        world[w + 1] = argb[t + 2];
+        world[w + 2] = argb[t + 1];
+        world[w + 3] = argb[t + 0];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FULL transcription of fs_compose.kernel: origin offsets, all four View
+// modes, matte plane. (EmulateComposeResult above predates this and covers
+// the offset-free Result case; kept as-is.)
+// ---------------------------------------------------------------------------
+static void EmulateComposeKernel(const float *src, const float *lo, const float *matte,
+                                 float *dst, int outW, int outH,
+                                 int srcW, int srcOX, int srcOY,
+                                 int view, float texGain, float mix)
+{
+    const float EPS = 1e-8f;
+    for (int oy = 0; oy < outH; ++oy) for (int ox = 0; ox < outW; ++ox) {
+        const int so = ((oy + srcOY) * srcW + (ox + srcOX)) * 4;
+        const int oo = (oy * outW + ox) * 4;
+
+        const float a  = src[so + 0];
+        const float la = lo [so + 0];
+
+        float s0, s1, s2;
+        if (a > EPS) { const float inva = 1.0f / a;
+            s0 = src[so+1]*inva; s1 = src[so+2]*inva; s2 = src[so+3]*inva; }
+        else { s0 = 0.f; s1 = 0.f; s2 = 0.f; }
+
+        float l0, l1, l2;
+        if (la > EPS) { const float invla = 1.0f / la;
+            l0 = lo[so+1]*invla; l1 = lo[so+2]*invla; l2 = lo[so+3]*invla; }
+        else { l0 = s0; l1 = s1; l2 = s2; }
+
+        const float matteW = matte[oy * outW + ox];
+
+        if (view == 1) {
+            dst[oo+0] = a;
+            dst[oo+1] = l0 * a; dst[oo+2] = l1 * a; dst[oo+3] = l2 * a;
+        } else if (view == 2) {
+            dst[oo+0] = 1.0f;
+            dst[oo+1] = texGain * (s0 - l0) + 0.5f;
+            dst[oo+2] = texGain * (s1 - l1) + 0.5f;
+            dst[oo+3] = texGain * (s2 - l2) + 0.5f;
+        } else if (view == 3) {
+            dst[oo+0] = 1.0f;
+            dst[oo+1] = matteW; dst[oo+2] = matteW; dst[oo+3] = matteW;
+        } else {
+            if (a > EPS) {
+                const float m = matteW * mix;
+                const float h0=s0-l0, h1=s1-l1, h2=s2-l2;
+                const float p0=l0+texGain*h0, p1=l1+texGain*h1, p2=l2+texGain*h2;
+                const float o0=s0+(p0-s0)*m, o1=s1+(p1-s1)*m, o2=s2+(p2-s2)*m;
+                dst[oo+0]=a; dst[oo+1]=o0*a; dst[oo+2]=o1*a; dst[oo+3]=o2*a;
+            } else {
+                dst[oo+0]=a; dst[oo+1]=src[so+1]; dst[oo+2]=src[so+2]; dst[oo+3]=src[so+3];
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reference compose — the CPU side, mirroring smart_render.cpp's
+// FS_ComposeRow exactly (inva formulation, fs::RecombineChannel /
+// fs::HighBandDisplay, fs::SampleMatte). viewL is the 1-BASED popup value.
+// ---------------------------------------------------------------------------
+static void RefCompose(const float *src, const float *lo,
+                       int srcW, int srcOX, int srcOY,
+                       const fs::FS_MatteField &mf, int viewL,
+                       float g, float mix,
+                       float *dst, int outW, int outH)
+{
+    const float EPS = 1e-8f;
+    for (int oy = 0; oy < outH; ++oy) {
+        const size_t off = ((size_t)(oy + srcOY) * srcW + srcOX) * 4;
+        const float *s = src + off;
+        const float *l = lo  + off;
+        float *d = dst + (size_t)oy * outW * 4;
+        for (int ox = 0; ox < outW; ++ox, s += 4, l += 4, d += 4) {
+            const float a  = s[0];
+            const float la = l[0];
+            float ss[3], ll[3];
+            if (a > EPS) { const float inva = 1.f/a;
+                ss[0]=s[1]*inva; ss[1]=s[2]*inva; ss[2]=s[3]*inva; }
+            else { ss[0]=ss[1]=ss[2]=0.f; }
+            if (la > EPS) { const float invla = 1.f/la;
+                ll[0]=l[1]*invla; ll[1]=l[2]*invla; ll[2]=l[3]*invla; }
+            else { ll[0]=ss[0]; ll[1]=ss[1]; ll[2]=ss[2]; }
+
+            const float matteW = fs::SampleMatte(mf, ox, oy);
+
+            switch (viewL) {
+                case 2:   // Low Band
+                    d[0]=a; d[1]=ll[0]*a; d[2]=ll[1]*a; d[3]=ll[2]*a;
+                    break;
+                case 3:   // High Band
+                    d[0]=1.f;
+                    d[1]=fs::HighBandDisplay(ss[0], ll[0], g);
+                    d[2]=fs::HighBandDisplay(ss[1], ll[1], g);
+                    d[3]=fs::HighBandDisplay(ss[2], ll[2], g);
+                    break;
+                case 4:   // Matte
+                    d[0]=1.f; d[1]=matteW; d[2]=matteW; d[3]=matteW;
+                    break;
+                default:  // Result
+                    if (a > EPS) {
+                        const float m = matteW * mix;
+                        d[0]=a;
+                        d[1]=fs::RecombineChannel(ss[0], ll[0], g, m)*a;
+                        d[2]=fs::RecombineChannel(ss[1], ll[1], g, m)*a;
+                        d[3]=fs::RecombineChannel(ss[2], ll[2], g, m)*a;
+                    } else {
+                        d[0]=a; d[1]=s[1]; d[2]=s[2]; d[3]=s[3];
+                    }
+                    break;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transcription of fs_matte.kernel — reads the matte's BGRA pitched world,
+// writes one band of the single-float weight plane.
+// ---------------------------------------------------------------------------
+struct MtParams {
+    int   mtW, mtH, mtPitch;
+    int   mOriginX, mOriginY, mRefW, mRefH;
+    int   outOriginX, outOriginY, srcRefW, srcRefH;
+    float dsx, dsy;
+    int   channel, fit;
+};
+
+static void EmulateMatteBand(const float *world, const MtParams &mp,
+                             int outW, int bandH, int outY0, float *dst)
+{
+    for (int by = 0; by < bandH; ++by) for (int ox = 0; ox < outW; ++ox) {
+        const int oy = by + outY0;
+
+        const float invdsx = (mp.dsx > 0.0f) ? 1.0f / mp.dsx : 1.0f;
+        const float invdsy = (mp.dsy > 0.0f) ? 1.0f / mp.dsy : 1.0f;
+        const float lx = ((float)ox + 0.5f + (float)mp.outOriginX) * invdsx;
+        const float ly = ((float)oy + 0.5f + (float)mp.outOriginY) * invdsy;
+
+        float mlx, mly;
+        if (mp.fit == 2) {          // Center
+            const float offx = ((float)mp.srcRefW - (float)mp.mRefW) * 0.5f;
+            const float offy = ((float)mp.srcRefH - (float)mp.mRefH) * 0.5f;
+            mlx = lx - offx; mly = ly - offy;
+        } else if (mp.fit == 3) {   // Top-Left
+            mlx = lx; mly = ly;
+        } else {                    // Fit to Layer
+            const float u = lx / (float)(mp.srcRefW > 0 ? mp.srcRefW : 1);
+            const float v = ly / (float)(mp.srcRefH > 0 ? mp.srcRefH : 1);
+            mlx = u * (float)mp.mRefW;
+            mly = v * (float)mp.mRefH;
+        }
+
+        const float mx = mlx * mp.dsx - (float)mp.mOriginX;
+        const float my = mly * mp.dsy - (float)mp.mOriginY;
+
+        const float fx = mx - 0.5f;
+        const float fy = my - 0.5f;
+        const int   x0 = (int)std::floor(fx);
+        const int   y0 = (int)std::floor(fy);
+        const float tx = fx - (float)x0;
+        const float ty = fy - (float)y0;
+
+        const int clampEdge = (mp.fit == 1) ? 1 : 0;
+
+        float a = 0.f, r = 0.f, g = 0.f, b = 0.f;
+        for (int j = 0; j < 2; ++j) {
+            int yy = y0 + j;
+            const float wyj = (j == 0) ? (1.0f - ty) : ty;
+            if (clampEdge) { yy = yy < 0 ? 0 : (yy >= mp.mtH ? mp.mtH - 1 : yy); }
+            else if (yy < 0 || yy >= mp.mtH) continue;
+            for (int i = 0; i < 2; ++i) {
+                int xx = x0 + i;
+                const float wxi = (i == 0) ? (1.0f - tx) : tx;
+                if (clampEdge) { xx = xx < 0 ? 0 : (xx >= mp.mtW ? mp.mtW - 1 : xx); }
+                else if (xx < 0 || xx >= mp.mtW) continue;
+                const float w = wxi * wyj;
+                const int   p = yy * mp.mtPitch + xx * 4;
+                a += w * world[p + 3];
+                r += w * world[p + 2];
+                g += w * world[p + 1];
+                b += w * world[p + 0];
+            }
+        }
+
+        const float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        float wgt;
+        if      (mp.channel == 2) wgt = 1.0f - a;
+        else if (mp.channel == 3) wgt = luma * a;
+        else if (mp.channel == 4) wgt = (1.0f - luma) * a;
+        else                      wgt = a;
+
+        dst[by * outW + ox] = wgt;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The TILED pipeline, exactly as mm_gpu_dx.cpp schedules it, driven by the
+// REAL tile planner: per band — load (swizzle) → separation → smooth →
+// matte → compose → store. This is the end-to-end proof that band margins,
+// clipping and the compose offset are right: its output must equal the
+// UNTILED reference below on every float.
+// ---------------------------------------------------------------------------
+static void RunTiledPipeline(
+    const std::vector<float> &srcWorld, int srcPitch,
+    int srcW, int outW, int srcOX,
+    bool guided, double sepSigma, int grx, int gry, float eps,
+    double smSigma,
+    int viewKernel, float g, float mix,
+    const float *matteWorld, const MtParams *mp,
+    const fsgpu::FS_TilePlan &plan,
+    std::vector<float> &outWorld, int outPitch)
+{
+    const int R  = (!guided) ? (int)fs::GaussianSupport(sepSigma) : 0;
+    const int Rs = (int)fs::GaussianSupport(smSigma);
+    std::vector<float> kSep, kSm;
+    if (R > 0)  fs::BuildGaussianKernel(sepSigma, R, kSep);   // the CPU's exact weights
+    if (Rs > 0) fs::BuildGaussianKernel(smSigma, Rs, kSm);
+
+    const size_t tileN = (size_t)plan.tileRowsMax * srcW * 4;
+    std::vector<float> A(tileN), T(tileN), L(tileN);
+    std::vector<float> outTile((size_t)plan.bandHMax * outW * 4);
+    std::vector<float> matteP((size_t)plan.bandHMax * outW);
+    if (!mp) EmulateFillOnes(matteP.data(), outW, plan.bandHMax);
+
+    for (const fsgpu::FS_TileBand &band : plan.bands) {
+        const int rows = band.srcRows;
+        EmulateLoadTile(srcWorld.data(), srcPitch, band.srcY0, A.data(), srcW, rows);
+
+        const float *lo = A.data();
+        if (guided && (grx > 0 || gry > 0)) {
+            EmulateGuided(A.data(), L.data(), srcW, rows, grx, gry, eps);
+            lo = L.data();
+        } else if (R > 0) {
+            EmulateGaussPass(A.data(), kSep.data(), T.data(), srcW, rows, R, 1);
+            EmulateGaussPass(T.data(), kSep.data(), L.data(), srcW, rows, R, 0);
+            lo = L.data();
+        }
+        if (Rs > 0) {
+            EmulateGaussPass(lo, kSm.data(), T.data(), srcW, rows, Rs, 1);
+            EmulateGaussPass(T.data(), kSm.data(), L.data(), srcW, rows, Rs, 0);
+            lo = L.data();
+        }
+
+        if (mp)
+            EmulateMatteBand(matteWorld, *mp, outW, band.outH, band.outY0, matteP.data());
+
+        EmulateComposeKernel(A.data(), lo, matteP.data(), outTile.data(),
+                             outW, band.outH, srcW, srcOX, band.loOY,
+                             viewKernel, g, mix);
+        EmulateStoreTile(outTile.data(), outW, band.outH,
+                         outWorld.data(), outPitch, band.outY0);
+    }
+}
+
+// The UNTILED reference: the REAL CPU implementations (blur.cpp /
+// guided.cpp) on the full inflated buffer + the FS_ComposeRow-equivalent
+// loop, stored to a BGRA world for a like-for-like diff. viewL is 1-based.
+static void RunUntiledReference(
+    const std::vector<float> &srcARGB, int srcW, int srcH,
+    int outW, int outH, int srcOX, int srcOY,
+    bool guided, double sepSigma, int grx, int gry, float eps,
+    double smSigma,
+    const fs::FS_MatteField &mf, int viewL, float g, float mix,
+    std::vector<float> &outWorld, int outPitch)
+{
+    std::vector<float> tmp(srcARGB.size()), lo(srcARGB.size());
+    if (guided && (grx > 0 || gry > 0)) {
+        fs::GuidedFilterARGB(nullptr, srcARGB.data(), lo.data(), srcW, srcH, grx, gry, eps);
+    } else if (!guided && fs::GaussianSupport(sepSigma) > 0) {
+        fs::GaussianBlurARGB(nullptr, srcARGB.data(), tmp.data(), lo.data(),
+                             srcW, srcH, sepSigma, sepSigma);
+    } else {
+        lo = srcARGB;
+    }
+    if (fs::GaussianSupport(smSigma) > 0) {
+        fs::GaussianBlurARGB(nullptr, lo.data(), tmp.data(), lo.data(),
+                             srcW, srcH, smSigma, smSigma);
+    }
+    std::vector<float> outARGB((size_t)outW * outH * 4);
+    RefCompose(srcARGB.data(), lo.data(), srcW, srcOX, srcOY,
+               mf, viewL, g, mix, outARGB.data(), outW, outH);
+    EmulateStoreTile(outARGB.data(), outW, outH, outWorld.data(), outPitch, 0);
+}
+
 int main()
 {
     std::printf("\nMM FreqSep - GPU kernel parity (CPU-emulated, no device)\n\n");
@@ -462,6 +805,279 @@ int main()
             boxFloat(t2.data(), boxF.data(), 0);
             const double d = MaxAbsDiff(boxRefD, boxF);
             check(d > 0.0, "control: float box accumulator DOES drift (ACCUM_T earns its keep)", d);
+        }
+    }
+
+    // =======================================================================
+    // Phase 5 host: tile plumbing, tile planner, and the tiled pipeline
+    // against the untiled CPU reference. Anything wrong in band margins,
+    // clipping, the compose offset, or the BGRA swizzle fails HERE — with no
+    // GPU and no AE host — so a mismatch in AE is D3D12 plumbing by
+    // elimination.
+    // =======================================================================
+
+    // ---- fs_tile.kernel: swizzle + pitch + band offsets -------------------
+    {
+        const int TW = 64, TH = 48;
+        std::vector<float> argb((size_t)TW * TH * 4);
+        FillRandom(argb, 999u, true);
+        std::vector<float> world;
+        MakeBGRAWorld(argb, TW, TH, TW * 4 + 12, world);
+
+        std::vector<float> tile((size_t)TW * TH * 4, -1.f);
+        EmulateLoadTile(world.data(), TW * 4 + 12, 0, tile.data(), TW, TH);
+        double d = MaxAbsDiff(tile, argb);
+
+        // Partial band at a row offset.
+        const int bH = 10, bY = 7;
+        std::vector<float> bandBuf((size_t)TW * bH * 4, -1.f);
+        EmulateLoadTile(world.data(), TW * 4 + 12, bY, bandBuf.data(), TW, bH);
+        for (int y = 0; y < bH; ++y) for (int i = 0; i < TW * 4; ++i) {
+            const double dd = std::fabs((double)bandBuf[(size_t)y * TW * 4 + i]
+                                      - (double)argb[(size_t)(y + bY) * TW * 4 + i]);
+            if (dd > d) d = dd;
+        }
+
+        // Store into a differently-pitched world, read back.
+        std::vector<float> world2((size_t)TH * (TW * 4 + 20), 777.f);
+        EmulateStoreTile(argb.data(), TW, TH, world2.data(), TW * 4 + 20, 0);
+        std::vector<float> back((size_t)TW * TH * 4);
+        EmulateLoadTile(world2.data(), TW * 4 + 20, 0, back.data(), TW, TH);
+        const double dd = MaxAbsDiff(back, argb);
+        if (dd > d) d = dd;
+
+        check(d == 0.0, "fs_tile.kernel: BGRA<->ARGB round-trip, pitched worlds, band offset", d);
+    }
+
+    // ---- FS_PlanTiles: coverage/adjacency/margin/clip invariants ----------
+    {
+        bool ok = true;
+        const struct { int outH, srcH, srcOY, margin, band; } cfgs[] = {
+            { 48,  84, 18, 18, 17 },   // interior margins both sides
+            { 48,  66,  0, 18, 16 },   // top margin fully clipped
+            { 200, 260, 30, 30, 33 },  // tall output
+            { 17,  53, 18, 18, 16 },   // single short band
+            { 1,   37, 18, 18, 16 },   // one-row output
+            { 500, 500, 0,  0,  90 },  // no margins at all
+        };
+        for (const auto &c : cfgs) {
+            const size_t bt = fsgpu::FS_TileBytesPerRow(false, 100);
+            const size_t bo = fsgpu::FS_OutBytesPerRow(64);
+            const size_t budget = 2ull * c.margin * bt + (bt + bo) * (size_t)c.band;
+            fsgpu::FS_TilePlan plan;
+            if (!fsgpu::FS_PlanTiles(c.outH, c.srcH, c.srcOY, c.margin, bt, bo,
+                                     budget, &plan)) { ok = false; continue; }
+            int next = 0;
+            for (const auto &b : plan.bands) {
+                if (b.outY0 != next) ok = false;                       // adjacency, no gaps
+                next = b.outY0 + b.outH;
+                if (b.outH <= 0 || b.outH > plan.bandHMax) ok = false;
+                if (b.srcY0 < 0 || b.srcY0 + b.srcRows > c.srcH) ok = false;
+                if (b.srcRows > plan.tileRowsMax) ok = false;
+                if (b.loOY < 0 || b.loOY + b.outH > b.srcRows) ok = false;
+                if (b.outY0 + c.srcOY >= c.margin && b.loOY != c.margin)
+                    ok = false;                                        // interior top margin intact
+            }
+            if (next != c.outH) ok = false;                            // full coverage
+        }
+        {   // budget below even the minimum band must be refused (CPU fallback)
+            fsgpu::FS_TilePlan plan;
+            if (fsgpu::FS_PlanTiles(48, 84, 18, 18, 1u << 20, 1u << 16, 1u << 20, &plan))
+                ok = false;
+        }
+        check(ok, "FS_PlanTiles: coverage/adjacency/margin/clip invariants", ok ? 0.0 : 1.0);
+    }
+
+    // ---- Tiled Gaussian + smooth vs untiled reference (3 bands, HDR) ------
+    {
+        const int outW = 64, outH = 48;
+        const double sepS = 4.0, smS = 2.0;
+        const int margin = (int)fs::GaussianSupport(sepS) + (int)fs::GaussianSupport(smS);
+        const int OX = margin, OY = margin;
+        const int srcW = outW + 2 * OX, srcH = outH + 2 * OY;
+
+        std::vector<float> srcARGB((size_t)srcW * srcH * 4);
+        FillRandom(srcARGB, 4242u, true);
+        for (size_t i = 0; i < srcARGB.size(); i += 4) {   // HDR: superwhite premult RGB
+            srcARGB[i + 1] *= 2.5f; srcARGB[i + 2] *= 2.5f; srcARGB[i + 3] *= 2.5f;
+        }
+        const int srcPitch = srcW * 4 + 16, outPitch = outW * 4 + 8;
+        std::vector<float> srcWorld;
+        MakeBGRAWorld(srcARGB, srcW, srcH, srcPitch, srcWorld);
+
+        const size_t bt = fsgpu::FS_TileBytesPerRow(false, srcW);
+        const size_t bo = fsgpu::FS_OutBytesPerRow(outW);
+        fsgpu::FS_TilePlan plan;
+        const bool planned = fsgpu::FS_PlanTiles(outH, srcH, OY, margin, bt, bo,
+            2ull * margin * bt + (bt + bo) * 17, &plan);   // → 3 bands of 16
+
+        fs::FS_MatteField noMatte;   // inactive → SampleMatte == 1.0
+        double worst = 0.0;
+        for (int view = 0; view <= 2; ++view) {            // Result / Low / High
+            std::vector<float> refW((size_t)outH * outPitch, 777.f);
+            std::vector<float> tldW((size_t)outH * outPitch, 777.f);
+            RunUntiledReference(srcARGB, srcW, srcH, outW, outH, OX, OY,
+                false, sepS, 0, 0, 0.f, smS, noMatte, view + 1, 1.37f, 0.85f,
+                refW, outPitch);
+            RunTiledPipeline(srcWorld, srcPitch, srcW, outW, OX,
+                false, sepS, 0, 0, 0.f, smS, view, 1.37f, 0.85f,
+                nullptr, nullptr, plan, tldW, outPitch);
+            const double d = MaxAbsDiff(refW, tldW);
+            if (d > worst) worst = d;
+        }
+        check(planned && plan.bands.size() >= 3 && worst <= 1e-7,
+              "tiled gauss+smooth == untiled reference (3 bands, HDR, views R/L/H)", worst);
+    }
+
+    // ---- Tiled Gaussian with margins clipped at the world edges -----------
+    // srcOX/srcOY = 0: the layer edge sits exactly at the output's top-left,
+    // so the top band has NO margin rows and tap narrowing at the tile edge
+    // must reproduce the CPU's zero-extension at the same world edge.
+    {
+        const int outW = 64, outH = 48;
+        const double sepS = 4.0;
+        const int margin = (int)fs::GaussianSupport(sepS);
+        const int srcW = outW + margin, srcH = outH + margin;   // right/bottom margin only
+
+        std::vector<float> srcARGB((size_t)srcW * srcH * 4);
+        FillRandom(srcARGB, 31337u, true);
+        const int srcPitch = srcW * 4 + 4, outPitch = outW * 4 + 12;
+        std::vector<float> srcWorld;
+        MakeBGRAWorld(srcARGB, srcW, srcH, srcPitch, srcWorld);
+
+        const size_t bt = fsgpu::FS_TileBytesPerRow(false, srcW);
+        const size_t bo = fsgpu::FS_OutBytesPerRow(outW);
+        fsgpu::FS_TilePlan plan;
+        const bool planned = fsgpu::FS_PlanTiles(outH, srcH, 0, margin, bt, bo,
+            2ull * margin * bt + (bt + bo) * 16, &plan);
+
+        fs::FS_MatteField noMatte;
+        std::vector<float> refW((size_t)outH * outPitch, 777.f);
+        std::vector<float> tldW((size_t)outH * outPitch, 777.f);
+        RunUntiledReference(srcARGB, srcW, srcH, outW, outH, 0, 0,
+            false, sepS, 0, 0, 0.f, 0.0, noMatte, 1, 1.0f, 1.0f, refW, outPitch);
+        RunTiledPipeline(srcWorld, srcPitch, srcW, outW, 0,
+            false, sepS, 0, 0, 0.f, 0.0, 0, 1.0f, 1.0f,
+            nullptr, nullptr, plan, tldW, outPitch);
+        const double d = MaxAbsDiff(refW, tldW);
+        check(planned && plan.bands.size() >= 2 && d <= 1e-7,
+              "tiled gauss: margins clipped at world edges (srcOX/srcOY = 0)", d);
+    }
+
+    // ---- Capstone: tiled guided+smooth+MATTE vs untiled reference ---------
+    {
+        const int outW = 64, outH = 48;
+        const double sepS = 6.0, smS = 1.5;
+        const int r  = (int)fs::GuidedRadius(sepS);
+        const int Rs = (int)fs::GaussianSupport(smS);
+        const int margin = 2 * r + Rs;
+        const int OX = margin, OY = margin;
+        const int srcW = outW + 2 * OX, srcH = outH + 2 * OY;
+        const float eps = 1e-3f;
+
+        std::vector<float> srcARGB((size_t)srcW * srcH * 4);
+        FillRandom(srcARGB, 60660u, true);
+        const int srcPitch = srcW * 4 + 16, outPitch = outW * 4 + 8;
+        std::vector<float> srcWorld;
+        MakeBGRAWorld(srcARGB, srcW, srcH, srcPitch, srcWorld);
+
+        // Matte: smaller layer, half-res render (ds = 0.5), luma channel, Fit.
+        const int mW = 40, mH = 30, mPitch = mW * 4 + 8;
+        std::vector<float> mARGB((size_t)mW * mH * 4);
+        FillRandom(mARGB, 777u, true);
+        std::vector<float> mWorld;
+        MakeBGRAWorld(mARGB, mW, mH, mPitch, mWorld);
+
+        MtParams mp = {};
+        mp.mtW = mW; mp.mtH = mH; mp.mtPitch = mPitch;
+        mp.mOriginX = 2;  mp.mOriginY = 1;
+        mp.mRefW = mW * 2; mp.mRefH = mH * 2;
+        mp.outOriginX = 4; mp.outOriginY = 3;
+        mp.srcRefW = outW * 2; mp.srcRefH = outH * 2;
+        mp.dsx = 0.5f; mp.dsy = 0.5f;
+        mp.channel = 3; mp.fit = 1;
+
+        fs::FS_MatteField mf;
+        mf.data = mARGB.data(); mf.W = mW; mf.H = mH;
+        mf.mOriginX = 2;  mf.mOriginY = 1;  mf.mRefW = mW * 2;  mf.mRefH = mH * 2;
+        mf.outOriginX = 4; mf.outOriginY = 3;
+        mf.srcRefW = outW * 2; mf.srcRefH = outH * 2;
+        mf.dsx = 0.5f; mf.dsy = 0.5f;
+        mf.channel = 3; mf.fit = 1; mf.active = true;
+
+        const size_t bt = fsgpu::FS_TileBytesPerRow(true, srcW);
+        const size_t bo = fsgpu::FS_OutBytesPerRow(outW);
+        fsgpu::FS_TilePlan plan;
+        const bool planned = fsgpu::FS_PlanTiles(outH, srcH, OY, margin, bt, bo,
+            2ull * margin * bt + (bt + bo) * 16, &plan);
+
+        double worst = 0.0;
+        const int views[2] = { 0, 3 };                     // Result + Matte view
+        for (int vi = 0; vi < 2; ++vi) {
+            std::vector<float> refW((size_t)outH * outPitch, 777.f);
+            std::vector<float> tldW((size_t)outH * outPitch, 777.f);
+            RunUntiledReference(srcARGB, srcW, srcH, outW, outH, OX, OY,
+                true, sepS, r, r, eps, smS, mf, views[vi] + 1, 1.2f, 0.9f,
+                refW, outPitch);
+            RunTiledPipeline(srcWorld, srcPitch, srcW, outW, OX,
+                true, sepS, r, r, eps, smS, views[vi], 1.2f, 0.9f,
+                mWorld.data(), &mp, plan, tldW, outPitch);
+            const double d = MaxAbsDiff(refW, tldW);
+            if (d > worst) worst = d;
+        }
+        check(planned && plan.bands.size() >= 3 && worst <= 1e-7,
+              "tiled guided+smooth+matte == untiled reference (Result & Matte views)", worst);
+    }
+
+    // ---- fs_matte.kernel vs fs::SampleMatte: channels × fits, banded ------
+    {
+        const int outW = 64, outH = 48;
+        const int mW = 40, mH = 30, mPitch = mW * 4 + 8;
+        std::vector<float> mARGB((size_t)mW * mH * 4);
+        FillRandom(mARGB, 51515u, true);
+        std::vector<float> mWorld;
+        MakeBGRAWorld(mARGB, mW, mH, mPitch, mWorld);
+
+        static const char *fitNames[3] = {
+            "fs_matte.kernel vs SampleMatte, Fit-to-Layer (4 channels, banded)",
+            "fs_matte.kernel vs SampleMatte, Center (4 channels, banded)",
+            "fs_matte.kernel vs SampleMatte, Top-Left (4 channels, banded)",
+        };
+        for (int fit = 1; fit <= 3; ++fit) {
+            double worst = 0.0;
+            for (int chan = 1; chan <= 4; ++chan) {
+                MtParams mp = {};
+                mp.mtW = mW; mp.mtH = mH; mp.mtPitch = mPitch;
+                mp.mOriginX = 3;  mp.mOriginY = -2;
+                mp.mRefW = mW * 3; mp.mRefH = mH * 3;
+                mp.outOriginX = 7; mp.outOriginY = 5;
+                mp.srcRefW = outW * 3; mp.srcRefH = outH * 3;
+                mp.dsx = 1.f / 3.f; mp.dsy = 1.f / 3.f;
+                mp.channel = chan; mp.fit = fit;
+
+                fs::FS_MatteField mf;
+                mf.data = mARGB.data(); mf.W = mW; mf.H = mH;
+                mf.mOriginX = 3;  mf.mOriginY = -2;
+                mf.mRefW = mW * 3; mf.mRefH = mH * 3;
+                mf.outOriginX = 7; mf.outOriginY = 5;
+                mf.srcRefW = outW * 3; mf.srcRefH = outH * 3;
+                mf.dsx = 1.f / 3.f; mf.dsy = 1.f / 3.f;
+                mf.channel = chan; mf.fit = fit; mf.active = true;
+
+                // Kernel side in two bands (band seam must be invisible).
+                std::vector<float> gpuPlane((size_t)outW * outH, -1.f);
+                EmulateMatteBand(mWorld.data(), mp, outW, 24, 0,  gpuPlane.data());
+                EmulateMatteBand(mWorld.data(), mp, outW, 24, 24, gpuPlane.data() + (size_t)24 * outW);
+
+                double d = 0.0;
+                for (int oy = 0; oy < outH; ++oy) for (int ox = 0; ox < outW; ++ox) {
+                    const double ref = (double)fs::SampleMatte(mf, ox, oy);
+                    const double dd  = std::fabs(ref - (double)gpuPlane[(size_t)oy * outW + ox]);
+                    if (dd > d) d = dd;
+                }
+                if (d > worst) worst = d;
+            }
+            check(worst <= 1e-7, fitNames[fit - 1], worst);
         }
     }
 

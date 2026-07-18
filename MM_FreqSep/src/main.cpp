@@ -31,15 +31,17 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 {
 	out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION,
 									  STAGE_VERSION, BUILD_VERSION);
-	// Must match resources/MM_FreqSepPiPL.r literals exactly (0x02000440 /
-	// 0x08001400) or AE rejects the plugin with an outflags mismatch.
+	// Must match resources/MM_FreqSepPiPL.r literals exactly (0x06000440 /
+	// 0x2A001400) or AE rejects the plugin with an outflags mismatch.
 	out_data->out_flags  = PF_OutFlag_DEEP_COLOR_AWARE     |
 						   PF_OutFlag_PIX_INDEPENDENT      |
 						   PF_OutFlag_USE_OUTPUT_EXTENT    |
 						   PF_OutFlag_SEND_UPDATE_PARAMS_UI;   // grey-out Edge Preservation
 	out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE         |
 						   PF_OutFlag2_SUPPORTS_SMART_RENDER     |
-						   PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
+						   PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
+						   PF_OutFlag2_SUPPORTS_GPU_RENDER_F32     |   // Phase 5: DX12 host
+						   PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING;     // (Metal reuses the F32 bit later)
 	return PF_Err_NONE;
 }
 
@@ -189,6 +191,13 @@ PF_Err EffectMain(PF_Cmd cmd, PF_InData *in_data, PF_OutData *out_data,
 			case PF_Cmd_PARAMS_SETUP:     err = ParamsSetup(in_data, out_data, params, output);				break;
 			case PF_Cmd_SMART_PRE_RENDER: err = FS_PreRender(in_data, out_data, (PF_PreRenderExtra*)extra);	break;
 			case PF_Cmd_SMART_RENDER:     err = FS_SmartRender(in_data, out_data, (PF_SmartRenderExtra*)extra); break;
+
+			// Phase 5 GPU path. DEVICE_SETUP compiles nothing at render time —
+			// PSOs are built once per device from DXIL embedded at build time;
+			// SMART_RENDER_GPU receives GPU worlds and runs the tiled DX12 host.
+			case PF_Cmd_GPU_DEVICE_SETUP:   err = FS_GPUDeviceSetup(in_data, out_data, (PF_GPUDeviceSetupExtra*)extra);     break;
+			case PF_Cmd_GPU_DEVICE_SETDOWN: err = FS_GPUDeviceSetdown(in_data, out_data, (PF_GPUDeviceSetdownExtra*)extra); break;
+			case PF_Cmd_SMART_RENDER_GPU:   err = FS_SmartRenderGPU(in_data, out_data, (PF_SmartRenderExtra*)extra);        break;
 
 			// Grey Edge Preservation in/out with the Method popup. USER_CHANGED
 			// fires on an interactive edit (SUPERVISE on the Method param);

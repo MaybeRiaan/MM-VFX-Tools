@@ -45,6 +45,7 @@
 #include "curve.h"
 #include "fs_core.h"
 #include "common/MM_Common.h"
+#include "gpu/mm_gpu_host.h"
 
 #include <cmath>
 #include <cstring>
@@ -273,6 +274,41 @@ FS_PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
 			prd->matteRefH = matte_result.ref_height;
 		}
 	}
+
+	// GPU render offer. PF_RenderOutputFlag_GPU_RENDER_POSSIBLE is set only
+	// when (a) AE is driving the DirectX pipeline and device setup succeeded
+	// (gpu_data non-null — it stays null on non-DX frameworks and on devices
+	// without shader doubles), and (b) the WORST-CASE tile plan for this
+	// request fits the device scratch budget — the same FS_PlanTiles the
+	// render will run, fed the same budget, so gate and render cannot
+	// disagree. Anything else renders on the proven CPU path: slower, never
+	// wrong. (Pathological case that trips (b): radius near the 250 max on
+	// 6K+ footage on a small-VRAM card.)
+#ifdef _WIN32
+	if (!err &&
+		extra->input->what_gpu == PF_GPU_Framework_DIRECTX &&
+		extra->input->gpu_data) {
+		const PF_LRect &rq = extra->input->output_request.rect;
+		const int outW = rq.right - rq.left;
+		const int outH = rq.bottom - rq.top;
+		const size_t budget = fsgpu::FS_DXScratchBudget(extra->input->gpu_data);
+		if (outW > 0 && outH > 0 && budget > 0) {
+			// Worst case: the layer honors the full inflation on both axes
+			// (real checkouts can only come back smaller). inflateY is
+			// exactly FS_TileMarginY's value — both derive from the same
+			// per-axis support terms in FS_InflateAmount.
+			const bool guided = (p.methodL == FS_METHOD_GUIDED);
+			const int srcW = outW + 2 * inflateX;
+			const int srcH = outH + 2 * inflateY;
+			fsgpu::FS_TilePlan plan;
+			if (fsgpu::FS_PlanTiles(outH, srcH, inflateY, inflateY,
+					fsgpu::FS_TileBytesPerRow(guided, srcW),
+					fsgpu::FS_OutBytesPerRow(outW), budget, &plan)) {
+				extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+			}
+		}
+	}
+#endif
 
 	return err;
 }
@@ -602,4 +638,190 @@ FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 cleanup:
 	if (wsP) ERR2(AEFX_ReleaseSuite(in_data, out_data, kPFWorldSuite, kPFWorldSuiteVersion2, ""));
 	return err;
+}
+
+// ---------------------------------------------------------------------------
+// SmartRender — GPU (PF_Cmd_SMART_RENDER_GPU).
+//
+// Assembles the platform-free FS_GPUJob — geometry, CPU-built Gaussian
+// weights (rules §3.1), tile plan, matte mapping — and hands it to the DX12
+// host. Every DECISION here (sigma scaling, srcOX/srcOY recovery, matte
+// geometry and its fallbacks, eps floor) is the same code the CPU render
+// runs, so the two paths can only diverge inside kernel execution — which is
+// exactly what the View-popup validation isolates per band.
+// ---------------------------------------------------------------------------
+PF_Err
+FS_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra)
+{
+#ifndef _WIN32
+	return PF_Err_UNRECOGNIZED_PARAM_TYPE;   // Metal host not yet written
+#else
+	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
+
+	if (extra->input->what_gpu != PF_GPU_Framework_DIRECTX ||
+		!extra->input->gpu_data)
+		return PF_Err_UNRECOGNIZED_PARAM_TYPE;
+
+	PF_WorldSuite2 *wsP = nullptr;
+	ERR(AEFX_AcquireSuite(in_data, out_data, kPFWorldSuite, kPFWorldSuiteVersion2,
+		"", reinterpret_cast<void**>(&wsP)));
+
+	PF_EffectWorld *src_world = nullptr;
+	PF_EffectWorld *out_world = nullptr;
+	ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, FS_INPUT, &src_world));
+	ERR(extra->cb->checkout_output(in_data->effect_ref, &out_world));
+
+	if (err || !wsP || !src_world || !out_world) goto cleanup;
+
+	{
+		// GPU worlds are 32f BGRA on the DirectX pipeline — anything else
+		// means the contract changed under us; refuse rather than misrender.
+		PF_PixelFormat fmt = PF_PixelFormat_INVALID;
+		ERR(wsP->PF_GetPixelFormat(out_world, &fmt));
+		if (err) goto cleanup;
+		if (fmt != PF_PixelFormat_GPU_BGRA128) {
+			err = PF_Err_UNRECOGNIZED_PARAM_TYPE;
+			goto cleanup;
+		}
+
+		FS_Params p; AEFX_CLR_STRUCT(p);
+		ERR(ReadParams(in_data, &p));
+		if (err) goto cleanup;
+
+		const FS_PreRenderData *prd =
+			static_cast<const FS_PreRenderData*>(extra->input->pre_render_data);
+		const A_long inflateX = prd ? prd->inflateX : 0;
+		const A_long inflateY = prd ? prd->inflateY : 0;
+
+		fsgpu::FS_GPUJob job;
+		job.srcW = (int)src_world->width;
+		job.srcH = (int)src_world->height;
+		job.outW = (int)out_world->width;
+		job.outH = (int)out_world->height;
+		job.srcPitchFl = (int)(src_world->rowbytes / (A_long)sizeof(float));
+		job.outPitchFl = (int)(out_world->rowbytes / (A_long)sizeof(float));
+
+		// Output→source origin offset — identical recovery to the CPU path.
+		A_long srcOX = inflateX, srcOY = inflateY;
+		if (srcOX > (job.srcW - job.outW)) srcOX = job.srcW - job.outW;
+		if (srcOY > (job.srcH - job.outH)) srcOY = job.srcH - job.outH;
+		if (srcOX < 0) srcOX = 0;
+		if (srcOY < 0) srcOY = 0;
+		job.srcOX = (int)srcOX;
+		job.srcOY = (int)srcOY;
+
+		// Separation + smooth, same sigma pipeline as the CPU render. The
+		// Gaussian weights are the EXACT CPU-built kernels (BuildGaussianKernel
+		// accumulates in double) — the GPU never rebuilds them.
+		double sepX, sepY, smX, smY;
+		FS_EffectiveSigmas(in_data, &p, &sepX, &sepY, &smX, &smY);
+
+		job.guided = (p.methodL == FS_METHOD_GUIDED);
+		if (job.guided) {
+			job.guidedRx = (int)fs::GuidedRadius(sepX);
+			job.guidedRy = (int)fs::GuidedRadius(sepY);
+			float eps = (float)FS_EdgeToEps(p.edgeF);
+			if (eps < fs::FS_GUIDED_EPS_MIN) eps = fs::FS_GUIDED_EPS_MIN;
+			job.guidedEps = eps;   // kernel takes the FLOORED eps (guided.cpp floors internally)
+			job.guidedInvCount = 1.0f /
+				(float)((2 * job.guidedRx + 1) * (2 * job.guidedRy + 1));
+		} else {
+			job.sepRx = (int)fs::GaussianSupport(sepX);
+			job.sepRy = (int)fs::GaussianSupport(sepY);
+			if (job.sepRx > 0) fs::BuildGaussianKernel(sepX, job.sepRx, job.kSepX);
+			if (job.sepRy > 0) fs::BuildGaussianKernel(sepY, job.sepRy, job.kSepY);
+		}
+		job.smoothRx = (int)fs::GaussianSupport(smX);
+		job.smoothRy = (int)fs::GaussianSupport(smY);
+		if (job.smoothRx > 0) fs::BuildGaussianKernel(smX, job.smoothRx, job.kSmX);
+		if (job.smoothRy > 0) fs::BuildGaussianKernel(smY, job.smoothRy, job.kSmY);
+
+		job.view    = (int)p.viewL - 1;   // popup is 1-based; kernel is 0-based
+		job.texGain = (float)(p.textureF / 100.0);
+		job.mix     = (float)(p.mixF / 100.0);
+
+		// Tile plan — same planner and budget PreRender's gate ran, on the
+		// real (≤ worst-case) geometry, so this cannot newly fail.
+		const int marginY = fsgpu::FS_TileMarginY(job.guided, job.sepRy,
+			job.guidedRy, job.smoothRy);
+		const size_t budget = fsgpu::FS_DXScratchBudget(extra->input->gpu_data);
+		if (!fsgpu::FS_PlanTiles(job.outH, job.srcH, job.srcOY, marginY,
+				fsgpu::FS_TileBytesPerRow(job.guided, job.srcW),
+				fsgpu::FS_OutBytesPerRow(job.outW), budget, &job.plan)) {
+			err = PF_Err_OUT_OF_MEMORY;
+			goto cleanup;
+		}
+
+		// MATTE LAYER — same checkout id, same layer-space geometry and the
+		// same degrade-to-inactive fallbacks as the CPU path. The pixels stay
+		// on the GPU; fs_matte.kernel samples the world directly.
+		PF_EffectWorld *matte_world = nullptr;
+		if (prd && prd->matteCheckedOut) {
+			PF_Err merr = extra->cb->checkout_layer_pixels(
+				in_data->effect_ref, FS_CHECKOUT_MATTE, &matte_world);
+			if (merr == PF_Err_NONE && matte_world &&
+				matte_world->width > 0 && matte_world->height > 0) {
+				const double dsx = (in_data->downsample_x.den != 0)
+					? (double)in_data->downsample_x.num / (double)in_data->downsample_x.den : 1.0;
+				const double dsy = (in_data->downsample_y.den != 0)
+					? (double)in_data->downsample_y.num / (double)in_data->downsample_y.den : 1.0;
+
+				job.matte.active     = true;
+				job.matte.mOriginX   = (int)matte_world->origin_x;
+				job.matte.mOriginY   = (int)matte_world->origin_y;
+				job.matte.mRefW      = prd->matteRefW > 0 ? (int)prd->matteRefW
+					: (int)(matte_world->width  / (dsx > 0 ? dsx : 1.0));
+				job.matte.mRefH      = prd->matteRefH > 0 ? (int)prd->matteRefH
+					: (int)(matte_world->height / (dsy > 0 ? dsy : 1.0));
+				job.matte.outOriginX = (int)out_world->origin_x;
+				job.matte.outOriginY = (int)out_world->origin_y;
+				job.matte.srcRefW    = prd->srcRefW > 0 ? (int)prd->srcRefW
+					: (int)(job.outW / (dsx > 0 ? dsx : 1.0));
+				job.matte.srcRefH    = prd->srcRefH > 0 ? (int)prd->srcRefH
+					: (int)(job.outH / (dsy > 0 ? dsy : 1.0));
+				job.matte.dsx        = (float)dsx;
+				job.matte.dsy        = (float)dsy;
+				job.matte.channel    = (int)p.matteChanL;
+				job.matte.fit        = (int)p.matteFitL;
+			} else {
+				matte_world = nullptr;   // degrade to inactive (matte == 1.0)
+			}
+		}
+
+		ERR(fsgpu::FS_DXRender(in_data, out_data, extra->input->gpu_data,
+			extra->input->device_index, job, src_world, out_world, matte_world));
+	}
+
+cleanup:
+	if (wsP) ERR2(AEFX_ReleaseSuite(in_data, out_data, kPFWorldSuite, kPFWorldSuiteVersion2, ""));
+	return err;
+#endif // _WIN32
+}
+
+// ---------------------------------------------------------------------------
+// GPU device setup/setdown — platform dispatch. Frameworks without a host
+// here (OpenCL, CUDA, Metal-for-now) get gpu_data == null with PF_Err_NONE:
+// AE then simply never offers this effect GPU render, and the CPU reference
+// carries the frame. Metal's entry lands in this switch when mm_gpu_metal.mm
+// is written.
+// ---------------------------------------------------------------------------
+PF_Err
+FS_GPUDeviceSetup(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetupExtra *extra)
+{
+#ifdef _WIN32
+	if (extra->input->what_gpu == PF_GPU_Framework_DIRECTX)
+		return fsgpu::FS_DXDeviceSetup(in_data, out_data, extra);
+#endif
+	extra->output->gpu_data = nullptr;
+	return PF_Err_NONE;
+}
+
+PF_Err
+FS_GPUDeviceSetdown(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetdownExtra *extra)
+{
+#ifdef _WIN32
+	if (extra->input->what_gpu == PF_GPU_Framework_DIRECTX)
+		return fsgpu::FS_DXDeviceSetdown(in_data, out_data, extra);
+#endif
+	return PF_Err_NONE;
 }

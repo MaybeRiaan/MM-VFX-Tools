@@ -13,6 +13,11 @@
 #ifndef FS_PROLOGUE_HLSL_H
 #define FS_PROLOGUE_HLSL_H
 
+// Token pasting through one level of expansion (so __COUNTER__ and macro
+// arguments are expanded before the paste).
+#define FS_PASTE2(a, b) a##b
+#define FS_PASTE(a, b)  FS_PASTE2(a, b)
+
 // ---------------------------------------------------------------------------
 // Threadgroup geometry. Fixed HERE, never in a kernel body — Metal will likely
 // want a different size (Apple GPUs prefer multiples of the 32-wide SIMD) and
@@ -31,14 +36,40 @@
 #define GID_X (int)fs_tid.x
 #define GID_Y (int)fs_tid.y
 
-// Buffers. StructuredBuffer<float> over AE's linear GPU world: AE hands us a
-// raw device buffer, NOT a texture — no samplers, no bilinear, no clamp-to-edge
-// behaviour. That is deliberate and load-bearing (rules §3.2): index math only,
-// so out-of-range taps can be SKIPPED exactly as blur.cpp does.
-#define BUF_IN(name, slot)  StructuredBuffer<float>   name : register(t##slot)
-#define BUF_OUT(name, slot) RWStructuredBuffer<float> name : register(u##slot)
+// ---------------------------------------------------------------------------
+// Buffers. AE hands us raw linear device buffers, NOT textures — no samplers,
+// no bilinear, no clamp-to-edge behaviour. That is deliberate and load-bearing
+// (rules §3.2): index math only, so out-of-range taps can be SKIPPED exactly
+// as blur.cpp does.
+//
+// EVERYTHING binds as a UAV (RWStructuredBuffer), including read-only inputs.
+// The host does not own the state of AE's world/scratch resources, and on
+// DX12 a resource cannot be SRV in one dispatch and UAV in the next within a
+// single submission without explicit state transitions whose before-state we
+// would have to guess. One binding class = one implicit COMMON→UNORDERED_ACCESS
+// promotion per submission and zero transitions. Declaring an input "RW" and
+// never writing it costs nothing measurable on buffer loads.
+//
+// REGISTER MAP (this IS the cross-platform binding contract):
+//   BUF_IN (name, slot)  → u(slot)      inputs  occupy u0..u3
+//   BUF_OUT(name, slot)  → u(4 + slot)  outputs occupy u4..u7
+// The Metal prologue binds the same numbering: [[buffer(slot)]] for inputs,
+// [[buffer(4 + slot)]] for outputs. Order, not spelling, is what must match.
+// ---------------------------------------------------------------------------
+#define BUF_IN(name, slot)  RWStructuredBuffer<float> name : register(FS_PASTE(u, slot))
 
-#define PARAM_BLOCK_BEGIN cbuffer FS_Params : register(b0) {
+#define FS_OUT_REG_0 u4
+#define FS_OUT_REG_1 u5
+#define FS_OUT_REG_2 u6
+#define FS_OUT_REG_3 u7
+#define BUF_OUT(name, slot) RWStructuredBuffer<float> name : register(FS_PASTE(FS_OUT_REG_, slot))
+
+// Param blocks map to root constants at b0. A kernel FILE may contain several
+// PARAM_BLOCKs (one per entry point family — fs_guided.kernel has three), so
+// each expansion mints a unique cbuffer NAME via __COUNTER__; they all share
+// register b0, which is legal because any single entry point uses exactly one
+// of them and dxc strips the unreferenced ones.
+#define PARAM_BLOCK_BEGIN cbuffer FS_PASTE(FS_Params_, __COUNTER__) : register(b0) {
 #define PARAM_BLOCK_END   };
 
 // Math intrinsics that are not 1:1 between HLSL and MSL get a wrapper. Plain
@@ -58,7 +89,8 @@
 // up to 9.5e-06 at R=25 and grows with radius, which would eat the whole 1e-5
 // tolerance. In double it is bit-exact (0.000e+00) at every size probed.
 //
-// HLSL SM6 supports double natively, so DX just uses it.
+// HLSL SM6 supports double natively (the host refuses the GPU path on devices
+// without DoublePrecisionFloatShaderOps), so DX just uses it.
 //
 // >> METAL: Apple GPUs do NOT support double in shaders. The Metal prologue
 // >> must implement these same five names as a compensated (Kahan) float sum:

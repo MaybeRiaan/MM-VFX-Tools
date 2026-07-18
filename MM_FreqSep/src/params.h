@@ -237,4 +237,10 @@ extern "C" {
 PF_Err FS_PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra);
 PF_Err FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra);
 
+// smart_render.cpp — Phase 5 GPU path (DX12 host in src/gpu/mm_gpu_dx.cpp;
+// unsupported frameworks degrade to the CPU render, never to an error).
+PF_Err FS_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra);
+PF_Err FS_GPUDeviceSetup(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetupExtra *extra);
+PF_Err FS_GPUDeviceSetdown(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetdownExtra *extra);
+
 #endif // MM_FREQSEP_PARAMS_H

@@ -30,7 +30,7 @@ cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
 if errorlevel 1 exit /b 1
 cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
    /I "$Root\sdk\Headers" /I "$Root\sdk\Headers\SP" /I "$Root\sdk\Util" /I "$Root\src" ^
-   "$PSScriptRoot\gpu_parity_test.cpp" "$Root\src\blur.cpp" "$Root\src\guided.cpp" "$Root\src\common\MM_Common.cpp" ^
+   "$PSScriptRoot\gpu_parity_test.cpp" "$Root\src\blur.cpp" "$Root\src\guided.cpp" "$Root\src\matte.cpp" "$Root\src\common\MM_Common.cpp" ^
    /Fe:"$gpuExe"
 if errorlevel 1 exit /b 1
 "@

@@ -68,9 +68,10 @@ resource 'PiPL' (16000) {
 		0x06000440
 		},
 		// out_flags2 = FLOAT_COLOR_AWARE | SUPPORTS_SMART_RENDER | SUPPORTS_THREADED_RENDERING
-		//            = 0x1000 | 0x400 | 0x08000000 = 0x08001400
+		//              | SUPPORTS_GPU_RENDER_F32 | SUPPORTS_DIRECTX_RENDERING
+		//            = 0x1000 | 0x400 | 0x08000000 | 0x02000000 | 0x20000000 = 0x2A001400
 		AE_Effect_Global_OutFlags_2 {
-		0x08001400
+		0x2A001400
 		},
 		/* [11] */
 		AE_Effect_Match_Name {

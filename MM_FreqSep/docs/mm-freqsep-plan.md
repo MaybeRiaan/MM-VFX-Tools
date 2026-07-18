@@ -110,10 +110,36 @@ Edge correctness: blur must be alpha-weighted (normalize by blurred alpha) or fr
 - GPU guided scratch: reduce 5 planes → 3 by writing the A/B coefficient stage
   in place over s1/s2 (stage is pointwise — verified safe). ~1GB at 6K.
 
-- [ ] DX12 host: device acquire, PSO/root sig, dispatch, world↔buffer transfer — **tiled internally** (see usage profile)
-- [ ] `GPURender` / `PF_OutFlag2_SUPPORTS_GPU_RENDER_F32` wiring in `main.cpp`
+- [x] **DX12 host** (`src/gpu/mm_gpu_dx.cpp`, 2026-07-18) — device acquire via
+  `PF_GPUDeviceSuite1`, PSOs from DXIL embedded at **build time** (dxc per
+  entry point — no runtime compiler, single self-contained .aex), root
+  constants + root UAV descriptors (no descriptor heaps), **internally tiled**
+  in horizontal bands with blur-support overlap (planner in the platform-free
+  `mm_gpu_host.h`), one submission + fence wait per render, per-render objects
+  only (MFR-safe). Host design decisions logged in `gpu-kernel-rules.md` §6.
+- [x] `GPURender` wiring — `PF_OutFlag2_SUPPORTS_GPU_RENDER_F32` +
+  `SUPPORTS_DIRECTX_RENDERING` in `main.cpp` AND the PiPL (0x2A001400);
+  `PF_Cmd_GPU_DEVICE_SETUP/SETDOWN/SMART_RENDER_GPU` routed; PreRender sets
+  `GPU_RENDER_POSSIBLE` only when the worst-case tile plan fits the VRAM
+  budget — infeasible frames (radius ~250 at 6K on small cards) fall back to
+  the CPU reference automatically. Devices without shader doubles (rules
+  §3.7) never get the GPU path at all.
+- [x] **Matte driver on GPU** (`fs_matte.kernel`) — beyond the original
+  milestone: Fit mapping + bilinear + channel extraction transcribed from
+  `matte.cpp`, so matte-driven renders (the actual product workflow) run on
+  the GPU too instead of silently falling back.
+- [x] **Tiling proven AE-free**: `tests/gpu_parity_test.cpp` now runs the
+  complete banded pipeline (load/swizzle → separation → smooth → matte →
+  compose → store, driven by the real `FS_PlanTiles`) against the untiled CPU
+  reference — multi-band, world-edge-clipped margins, HDR, all View modes —
+  **bit-exact (0.000e+00)**. 48/48 tests green. Any in-AE mismatch is now
+  D3D12 plumbing by elimination.
+- [ ] **In-AE validation** (hands-on, needs eyes on a monitor): View-popup
+  band diff GPU vs Software-Only per `docs/phase6-validation.md`. Milestone 1
+  = Gaussian end-to-end; the build deployed to AE 2026 carries the full path.
 - [ ] Metal prologue + host (deferred until Mac access)
-- [ ] IIR recursive Gaussian on CPU (**deferred** — see tradeoff note below)
+- [ ] IIR recursive Gaussian on CPU (**deferred** — see tradeoff note below;
+  stays sequenced AFTER the in-AE GPU validation for the same reason)
 
 > **Tradeoff logged:** the IIR (van Vliet/Deriche) CPU Gaussian is deliberately
 > deferred past the GPU work. It *approximates* a true Gaussian, so landing it
@@ -137,9 +163,14 @@ Edge correctness: blur must be alpha-weighted (normalize by blurred alpha) or fr
 - Profile MFR behavior on the CPU fallback, cache-friendly row-major passes.
 
 ### Phase 6 — Validation & QA
+**Protocol + checklist: `docs/phase6-validation.md`** (written 2026-07-18; the
+automated half — kernel/tiling/matte parity, HDR, plan invariants — already
+runs in `tests/run_tests.ps1`; the doc scripts the hands-on AE half).
 - Reference test: manual AE FS comp (duplicate + Gaussian Blur + subtract, 32bpc) must match plugin output at Working Curve = None within float tolerance; separate Photoshop side-by-side on gamma-encoded stills confirms the PS-accuracy target.
 - Matrix: 8/16/32 bpc × full/half/quarter res × ROI crops × matte present/absent/mismatched size × premultiplied footage × rotated/scaled matte layer.
 - MFR stress test, transparency edges, HDR (>1.0) sources.
+- GPU-specific additions: GPU↔CPU band diff (View popup) per method; band-seam
+  hunt at multi-tile radii on 6K; budget-fallback sanity at radius 250.
 
 ### Phase 7 — UX polish & release
 - Param grouping (Separation / Low Band / High Band / Matte / Output), sensible defaults (radius ~8px @ 1080p), tooltips.

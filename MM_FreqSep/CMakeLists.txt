@@ -32,7 +32,8 @@ set(SDK_SOURCES
     ${SDK_ROOT}/Util/Smart_Utils.cpp
 )
 
-# Plugin's own translation units.
+# Plugin's own translation units. mm_gpu_dx.cpp (DX12 host) is appended in
+# the Windows branch; the Metal host joins the Apple branch when written.
 set(FS_SOURCES
     ${SRC_DIR}/main.cpp
     ${SRC_DIR}/smart_render.cpp
@@ -90,7 +91,73 @@ if(WIN32)
         set_source_files_properties(${PIPL_RC} PROPERTIES LANGUAGE RC GENERATED TRUE)
     endif()
 
+    # =======================================================================
+    # GPU compute shaders (Phase 5): each platform-free .kernel body is
+    # compiled per entry point by dxc (prologue + body via the src/gpu/dx/
+    # shims) into DXIL embedded as C headers — no runtime shader compiler, no
+    # loose .cso assets next to the .aex. dxc.exe ships in the Windows SDK
+    # that vcvars64 puts on PATH (dxil.dll beside it signs the output).
+    # =======================================================================
+    find_program(DXC_EXECUTABLE dxc)
+    if(NOT DXC_EXECUTABLE)
+        file(GLOB _dxc_candidates
+            "C:/Program Files (x86)/Windows Kits/10/bin/10.*/x64/dxc.exe")
+        if(_dxc_candidates)
+            list(SORT _dxc_candidates)
+            list(GET _dxc_candidates -1 DXC_EXECUTABLE)
+        endif()
+    endif()
+    if(NOT DXC_EXECUTABLE)
+        message(FATAL_ERROR "dxc.exe not found (needed for the GPU kernels). Install a Windows 10/11 SDK.")
+    endif()
+    message(STATUS "dxc: ${DXC_EXECUTABLE}")
+
+    set(FS_DXIL_DIR "${CMAKE_CURRENT_BINARY_DIR}/fs_dxil")
+    file(MAKE_DIRECTORY ${FS_DXIL_DIR})
+
+    # wrapper=entry pairs; every entry point compiles separately (-E).
+    set(FS_SHADER_ENTRIES
+        fs_gauss_cs.hlsl=fs_gauss_pass
+        fs_guided_cs.hlsl=fs_guided_box
+        fs_guided_cs.hlsl=fs_guided_squares
+        fs_guided_cs.hlsl=fs_guided_ab
+        fs_guided_cs.hlsl=fs_guided_final
+        fs_compose_cs.hlsl=fs_compose
+        fs_tile_cs.hlsl=fs_load_tile
+        fs_tile_cs.hlsl=fs_store_tile
+        fs_tile_cs.hlsl=fs_fill_ones
+        fs_matte_cs.hlsl=fs_matte
+    )
+
+    file(GLOB FS_KERNEL_FILES "${SRC_DIR}/gpu/kernels/*.kernel"
+                              "${SRC_DIR}/gpu/kernels/fs_prologue_hlsl.h")
+
+    set(FS_DXIL_HEADERS "")
+    foreach(pair ${FS_SHADER_ENTRIES})
+        string(REPLACE "=" ";" pair_list ${pair})
+        list(GET pair_list 0 wrapper)
+        list(GET pair_list 1 entry)
+        set(hdr "${FS_DXIL_DIR}/${entry}.h")
+        add_custom_command(
+            OUTPUT ${hdr}
+            COMMAND ${DXC_EXECUTABLE} -T cs_6_0 -E ${entry} -O3
+                    -Fh "${hdr}" -Vn kFS_DXIL_${entry}
+                    "${SRC_DIR}/gpu/dx/${wrapper}"
+            DEPENDS "${SRC_DIR}/gpu/dx/${wrapper}" ${FS_KERNEL_FILES}
+            COMMENT "dxc ${wrapper} -E ${entry}"
+            VERBATIM
+        )
+        list(APPEND FS_DXIL_HEADERS ${hdr})
+    endforeach()
+
+    add_custom_target(fs_shaders DEPENDS ${FS_DXIL_HEADERS})
+
+    list(APPEND FS_SOURCES ${SRC_DIR}/gpu/mm_gpu_dx.cpp)
+
     add_library(${TARGET} MODULE ${FS_SOURCES} ${SDK_SOURCES} ${PIPL_RC})
+    add_dependencies(${TARGET} fs_shaders)
+    target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    target_link_libraries(${TARGET} PRIVATE d3d12.lib dxgi.lib)
 
     set_target_properties(${TARGET} PROPERTIES
         PREFIX ""

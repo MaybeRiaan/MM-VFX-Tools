@@ -26,7 +26,8 @@ A_long GaussianSupport(double sigma)
 }
 
 // Normalized sampled Gaussian, size 2R+1. R comes from GaussianSupport.
-static void BuildKernel(double sigma, A_long R, std::vector<float> &k)
+// Public (blur.h) since Phase 5: the GPU host uploads these exact weights.
+void BuildGaussianKernel(double sigma, A_long R, std::vector<float> &k)
 {
 	k.resize((size_t)(2 * R + 1));
 	double sum = 0.0;
@@ -116,11 +117,11 @@ void GaussianBlurARGB(PF_InData *in_data,
 	if (Rx > 0 && Ry > 0) {
 		// Two passes: src → tmp → dst. dst may alias src — the vertical pass
 		// only reads tmp, so src is no longer needed once it runs.
-		BuildKernel(sigmaX, Rx, kx);
+		BuildGaussianKernel(sigmaX, Rx, kx);
 		PassRefcon h{ src, tmp, W, H, kx.data(), Rx, true };
 		mm::ForEachRow(in_data, H, &h, FS_BlurPassRow);
 
-		BuildKernel(sigmaY, Ry, ky);
+		BuildGaussianKernel(sigmaY, Ry, ky);
 		PassRefcon v{ tmp, dst, W, H, ky.data(), Ry, false };
 		mm::ForEachRow(in_data, H, &v, FS_BlurPassRow);
 	} else {
@@ -128,7 +129,7 @@ void GaussianBlurARGB(PF_InData *in_data,
 		// dst == src stays safe (an in-place convolution would read
 		// already-written neighbors).
 		const bool horiz = (Rx > 0);
-		BuildKernel(horiz ? sigmaX : sigmaY, horiz ? Rx : Ry, kx);
+		BuildGaussianKernel(horiz ? sigmaX : sigmaY, horiz ? Rx : Ry, kx);
 		PassRefcon rc{ src, tmp, W, H, kx.data(), horiz ? Rx : Ry, horiz };
 		mm::ForEachRow(in_data, H, &rc, FS_BlurPassRow);
 		std::memcpy(dst, tmp, bytes);
