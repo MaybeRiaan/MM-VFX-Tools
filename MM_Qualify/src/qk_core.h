@@ -262,23 +262,22 @@ QK_FUNC float QK_RawMatte(float r, float g, float b, QK_Gates gp)
 QK_FUNC float QK_CleanClip(float m, float cleanB, float cleanW,
                            float clipB, float clipW)
 {
-    /* Clean Black: lift the black point to up to 0.85 of the range, then an
-       expanding power curve (gamma up to 4) crushes what remains below it.
-       Front-loaded: 25% already noticeably eats haze. */
+    /* Clean Black: hard black-point push (same threshold+gain shape as In/Out
+       Ratio, which reads as strong). The threshold rises with cleanB — at
+       full it sits near 0.9, so everything below ~0.9 is driven to solid
+       black through a steep transition. */
     if (cleanB > 0.0f) {
-        float lo = cleanB * 0.85f;
-        float t = (m - lo) / (1.0f - lo);
-        t = QK_SAT(t);
-        float gamma = 1.0f + 3.0f * cleanB;        /* 1 -> 4 */
-        m = QK_POW(t, gamma);
+        float thresh = 0.9f * cleanB;              /* 0 .. 0.9 */
+        float gain   = 1.0f + 12.0f * cleanB;      /* 1 .. 13 */
+        m = QK_SAT((m - thresh) * gain);
     }
-    /* Clean White: mirror — drop the white point and expand the top up to 1. */
+    /* Clean White: mirror — hard white-point push. Threshold falls with
+       cleanW; everything above the threshold is driven to solid white through
+       a steep transition. out = 1 - SAT((thresh - m) * gain). */
     if (cleanW > 0.0f) {
-        float hi = 1.0f - cleanW * 0.85f;
-        float t = m / (hi > 1e-6f ? hi : 1e-6f);
-        t = QK_SAT(t);
-        float gamma = 1.0f + 3.0f * cleanW;
-        m = 1.0f - QK_POW(1.0f - t, gamma);
+        float thresh = 1.0f - 0.9f * cleanW;       /* 1 .. 0.1 */
+        float gain   = 1.0f + 12.0f * cleanW;
+        m = 1.0f - QK_SAT((thresh - m) * gain);
     }
     /* Black/White Clip: hard levels remap [clipB, clipW] -> [0,1]. clipB is
        the black cut point (default 0), clipW the white cut point (default 1).
