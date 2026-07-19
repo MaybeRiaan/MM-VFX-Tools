@@ -30,7 +30,7 @@ Copy-Item (Join-Path $FftDir "*.c")    $work -Force
 Copy-Item (Join-Path $TpDir "*.h")     $work -Force
 Copy-Item (Join-Path $TpDir "*.c")     $work -Force
 
-$coreSrcs = "GT_FFT.cpp GT_Grain.cpp GT_Response.cpp GT_Stamp.cpp kiss_fft.c kiss_fftnd.c"
+$coreSrcs = "GT_FFT.cpp GT_Grain.cpp GT_Response.cpp GT_Stamp.cpp kiss_fft.c kiss_fftnd.c miniz.c"
 $env:GT_TEST_OUT = $OutDir
 
 $tests = Get-ChildItem $TestsDir -Filter "test_*.cpp"
@@ -39,7 +39,7 @@ foreach ($t in $tests) {
     Copy-Item $t.FullName $work -Force
     $exe = [System.IO.Path]::GetFileNameWithoutExtension($t.Name)
     Write-Host "=== Building/running $($t.Name) ===" -ForegroundColor Cyan
-    $cmd = "call `"$vcvars`" 2>nul && cd /d `"$work`" && cl /nologo /EHsc /O2 /std:c++17 $($t.Name) $coreSrcs /Fe$exe.exe && .\$exe.exe"
+    $cmd = "call `"$vcvars`" 2>nul && cd /d `"$work`" && cl /nologo /EHsc /O2 /std:c++17 /I. $($t.Name) $coreSrcs /Fe$exe.exe && .\$exe.exe"
     cmd /c $cmd
     if ($LASTEXITCODE -ne 0) { $fail++; Write-Host "$($t.Name) FAILED (exit $LASTEXITCODE)" -ForegroundColor Red }
 }
