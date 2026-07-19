@@ -548,23 +548,26 @@ PF_Err QK_DXRender(PF_InData *in_data, PF_OutData *out_data,
 					matteVA = vaS;
 				}
 
-				// Matte blur -> B1 (edge-neutral f1). Reuse M as the tmp when
-				// separable (M is dead after the blur reads it? no — the blur
-				// reads matteVA and writes B1; safe because in != tmp != out).
+				// Matte blur (edge-neutral f1). A separable pass reads neighbors,
+				// so a dispatch's input and output must never be the same plane.
+				// Ping-pong between the incoming matte plane (matteVA) and vaB1:
+				// X reads matteVA writes vaB1; Y reads vaB1 writes matteVA (free
+				// once X has consumed it). A single-axis blur lands in vaB1. This
+				// needs no third plane — in != out holds on every dispatch.
 				D3D12_GPU_VIRTUAL_ADDRESS finalMatte = matteVA;
 				if (job.blRx > 0 || job.blRy > 0) {
 					D3D12_GPU_VIRTUAL_ADDRESS cur = matteVA;
 					if (job.blRx > 0) {
 						PGauss p = { job.srcW, rows, job.blRx, 1 };
 						const D3D12_GPU_VIRTUAL_ADDRESS ins[2] = { cur, vaW + offBlX * sizeof(float) };
-						D3D12_GPU_VIRTUAL_ADDRESS dst = (job.blRy > 0) ? vaB1 : vaM;
-						if (dst == cur) dst = vaB1;
 						QK_Dispatch(cl.Get(), data->pso[QK_PSO_GAUSS_F1].Get(), &p, 4,
-							ins, 2, &dst, 1, job.srcW, rows);
-						cur = dst;
+							ins, 2, &vaB1, 1, job.srcW, rows);
+						cur = vaB1;
 					}
 					if (job.blRy > 0) {
-						D3D12_GPU_VIRTUAL_ADDRESS dst = (cur == vaB1) ? vaM : vaB1;
+						// out = matteVA when it is free (X ran, or matteVA != cur);
+						// with Y-only, cur == matteVA so we must land in vaB1.
+						D3D12_GPU_VIRTUAL_ADDRESS dst = (cur == matteVA) ? vaB1 : matteVA;
 						PGauss p = { job.srcW, rows, job.blRy, 0 };
 						const D3D12_GPU_VIRTUAL_ADDRESS ins[2] = { cur, vaW + offBlY * sizeof(float) };
 						QK_Dispatch(cl.Get(), data->pso[QK_PSO_GAUSS_F1].Get(), &p, 4,
