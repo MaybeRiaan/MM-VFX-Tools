@@ -8,10 +8,10 @@
         Q  = denoise ? gaussARGB(S, sigma_dn) : S   // QUALIFICATION input only
         G  = garbage layer weights (1.0 when none)  // sampled once, current time
         per pixel:  raw = QK_RawMatte(straight(Q)) * G
-                    M   = QK_CleanClip(raw)         // clean B/W + clip levels
+                    M   = QK_ClipMatte(raw)         // black/white clip
         temporal (optional): warm-started asymmetric IIR across the previous
             QK_TEMPORAL_WINDOW source frames — each history frame runs the
-            SAME denoise+gates+cleanclip, then S_state advances oldest->now
+            SAME denoise+gates+clip, then S_state advances oldest->now
         Mb = gaussF1(M, sigma_blur)                 // matte blur, edge-neutral
         per output pixel: m = QK_InOutRatio(Mb); QK_Compose(mode, m, ...)
 
@@ -82,8 +82,6 @@ QK_ReadParams(PF_InData *in_data, QK_Params *p)
 	QK_GET(QK_LUMA_WEIGHTS, p->lumaWL = def.u.pd.value)
 	QK_GET(QK_OUTPUT,       p->outputL = def.u.pd.value)
 	QK_GET(QK_DENOISE,      p->denoiseF = def.u.fs_d.value)
-	QK_GET(QK_CLEAN_BLACK,  p->cleanBlackF = def.u.fs_d.value)
-	QK_GET(QK_CLEAN_WHITE,  p->cleanWhiteF = def.u.fs_d.value)
 	QK_GET(QK_BLACK_CLIP,   p->blackClipF = def.u.fs_d.value)
 	QK_GET(QK_WHITE_CLIP,   p->whiteClipF = def.u.fs_d.value)
 	QK_GET(QK_BLUR,         p->blurF = def.u.fs_d.value)
@@ -310,7 +308,7 @@ struct QK_MatteRefcon {
 	float       *dst;      // f1 matte plane
 	A_long       W;
 	QK_Gates     gates;
-	float        cleanB, cleanW, clipB, clipW;
+	float        clipB, clipW;
 };
 
 struct QK_IIRRefcon {
@@ -372,7 +370,7 @@ QK_MatteRow(void *refconPV, A_long, A_long y, A_long)
 		QK_Straight(q[0], q[1], q[2], q[3], r, gg, b);
 		float m = QK_RawMatte(r, gg, b, rc->gates);
 		if (g) m *= g[x];
-		dst[x] = QK_CleanClip(m, rc->cleanB, rc->cleanW, rc->clipB, rc->clipW);
+		dst[x] = QK_ClipMatte(m, rc->clipB, rc->clipW);
 	}
 	return PF_Err_NONE;
 }
@@ -487,8 +485,6 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 
 		QK_Gates gates;
 		QK_BuildGates(p, &gates);
-		const float cleanB = (float)(p.cleanBlackF / 100.0);
-		const float cleanW = (float)(p.cleanWhiteF / 100.0);
 		const float clipB  = (float)(p.blackClipF  / 100.0);
 		const float clipW  = (float)(p.whiteClipF  / 100.0);
 
@@ -573,7 +569,7 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 		// Raw matte -> clean/clip for the CURRENT frame.
 		{
 			QK_MatteRefcon mrc{ qual, gPlane, mBuf.data(), srcW,
-			                    gates, cleanB, cleanW, clipB, clipW };
+			                    gates, clipB, clipW };
 			mm::ForEachRow(in_data, srcH, &mrc, QK_MatteRow);
 		}
 
@@ -606,7 +602,7 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 										 histBuf.data(), srcW, srcH, dnX, dnY);
 				}
 				QK_MatteRefcon hmrc{ histBuf.data(), gPlane, mhBuf.data(), srcW,
-				                     gates, cleanB, cleanW, clipB, clipW };
+				                     gates, clipB, clipW };
 				mm::ForEachRow(in_data, srcH, &hmrc, QK_MatteRow);
 
 				QK_IIRRefcon irc{ ssBuf.data(), mhBuf.data(), srcW, kA, kR,
@@ -725,8 +721,6 @@ QK_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra 
 		if (job.blRy > 0) qk::BuildGaussianKernel(blY, job.blRy, job.kBlY);
 
 		QK_BuildGates(p, &job.gates);
-		job.cleanB = (float)(p.cleanBlackF / 100.0);
-		job.cleanW = (float)(p.cleanWhiteF / 100.0);
 		job.clipB  = (float)(p.blackClipF  / 100.0);
 		job.clipW  = (float)(p.whiteClipF  / 100.0);
 		job.ratio  = (float)(p.ratioF / 100.0);

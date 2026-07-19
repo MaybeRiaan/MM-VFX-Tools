@@ -198,26 +198,9 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 		QK_DENOISE_MIN, QK_DENOISE_MAX, QK_DENOISE_MIN, QK_DENOISE_MAX,
 		QK_DENOISE_DFLT, PF_Precision_HUNDREDTHS, 0, 0, QK_DENOISE_DISK_ID);
 
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_FLOAT_SLIDERX("Clean Black",
-		QK_CLEAN_MIN, QK_CLEAN_MAX, QK_CLEAN_MIN, QK_CLEAN_MAX,
-		QK_CLEAN_DFLT, PF_Precision_TENTHS, 0, 0, QK_CLEAN_BLACK_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_FLOAT_SLIDERX("Clean White",
-		QK_CLEAN_MIN, QK_CLEAN_MAX, QK_CLEAN_MIN, QK_CLEAN_MAX,
-		QK_CLEAN_DFLT, PF_Precision_TENTHS, 0, 0, QK_CLEAN_WHITE_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_FLOAT_SLIDERX("Black Clip",
-		QK_CLIP_MIN, QK_CLIP_MAX, QK_CLIP_MIN, QK_CLIP_MAX,
-		QK_BLACK_CLIP_DFLT, PF_Precision_TENTHS, 0, 0, QK_BLACK_CLIP_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_FLOAT_SLIDERX("White Clip",
-		QK_CLIP_MIN, QK_CLIP_MAX, QK_CLIP_MIN, QK_CLIP_MAX,
-		QK_WHITE_CLIP_DFLT, PF_Precision_TENTHS, 0, 0, QK_WHITE_CLIP_DISK_ID);
-
+	// Edge shaping: Blur softens the matte edge, then In/Out Ratio chokes or
+	// spreads that softened edge. (Clean Black/White were removed — Blur +
+	// Ratio do the shaping, the clips below do the endpoint hardening.)
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Blur Radius",
 		QK_BLUR_MIN, QK_BLUR_MAX, QK_BLUR_MIN, QK_BLUR_MAX,
@@ -227,6 +210,18 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	PF_ADD_FLOAT_SLIDERX("In/Out Ratio",
 		QK_RATIO_MIN, QK_RATIO_MAX, QK_RATIO_MIN, QK_RATIO_MAX,
 		QK_RATIO_DFLT, PF_Precision_TENTHS, 0, 0, QK_RATIO_DISK_ID);
+
+	// Alpha clip: hard matte black/white point. Black Clip lifts the
+	// transparent floor to solid 0; White Clip pulls the opaque ceiling to 1.
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Black Clip",
+		QK_CLIP_MIN, QK_CLIP_MAX, QK_CLIP_MIN, QK_CLIP_MAX,
+		QK_BLACK_CLIP_DFLT, PF_Precision_TENTHS, 0, 0, QK_BLACK_CLIP_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("White Clip",
+		QK_CLIP_MIN, QK_CLIP_MAX, QK_CLIP_MIN, QK_CLIP_MAX,
+		QK_WHITE_CLIP_DFLT, PF_Precision_TENTHS, 0, 0, QK_WHITE_CLIP_DISK_ID);
 
 	// SUPERVISE so USER_CHANGED_PARAM fires — Attack/Release grey in/out.
 	AEFX_CLR_STRUCT(def);

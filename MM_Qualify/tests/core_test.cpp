@@ -168,25 +168,25 @@ static void test_raw_matte()
 }
 
 // ---------------------------------------------------------------------------
-static void test_clean_clip()
+static void test_clip()
 {
-	std::printf("clean/clip\n");
-	// Identity at 0,0,0,1.
+	std::printf("black/white clip (alpha clipping)\n");
+	// Identity at clipB=0, clipW=1.
 	for (float m = 0.f; m <= 1.f; m += 0.1f)
-		check(near(QK_CleanClip(m, 0.f, 0.f, 0.f, 1.f), m), "cleanclip identity");
-	// Clean black pushes small values to 0; 1 stays 1.
-	check(QK_CleanClip(0.05f, 0.2f, 0.f, 0.f, 1.f) < 0.05f, "clean black lowers small");
-	check(near(QK_CleanClip(1.f, 0.2f, 0.f, 0.f, 1.f), 1.f), "clean black keeps 1");
-	// Clean white pushes near-1 up to 1; 0 stays 0.
-	check(QK_CleanClip(0.95f, 0.f, 0.2f, 0.f, 1.f) > 0.95f, "clean white raises near-1");
-	check(near(QK_CleanClip(0.f, 0.f, 0.2f, 0.f, 1.f), 0.f), "clean white keeps 0");
-	// Clip levels: black clip 0.25 maps 0.25 -> 0; white clip 0.75 maps 0.75 -> 1.
-	check(near(QK_CleanClip(0.25f, 0.f, 0.f, 0.25f, 0.75f), 0.f), "black clip");
-	check(near(QK_CleanClip(0.75f, 0.f, 0.f, 0.25f, 0.75f), 1.f), "white clip");
-	check(near(QK_CleanClip(0.5f, 0.f, 0.f, 0.25f, 0.75f), 0.5f), "clip midpoint");
+		check(near(QK_ClipMatte(m, 0.f, 1.f), m), "clip identity");
+	// Black clip 0.25 maps 0.25 -> 0; white clip 0.75 maps 0.75 -> 1.
+	check(near(QK_ClipMatte(0.25f, 0.25f, 0.75f), 0.f), "black clip");
+	check(near(QK_ClipMatte(0.75f, 0.25f, 0.75f), 1.f), "white clip");
+	check(near(QK_ClipMatte(0.5f, 0.25f, 0.75f), 0.5f), "clip midpoint");
+	// Below black cut -> 0; above white cut -> 1.
+	check(near(QK_ClipMatte(0.1f, 0.25f, 0.75f), 0.f), "below black -> 0");
+	check(near(QK_ClipMatte(0.9f, 0.25f, 0.75f), 1.f), "above white -> 1");
+	// Degenerate (cuts meet) -> hard threshold.
+	check(QK_ClipMatte(0.4f, 0.5f, 0.5f) == 0.f, "threshold below");
+	check(QK_ClipMatte(0.6f, 0.5f, 0.5f) == 1.f, "threshold above");
 	// Output always in [0,1].
-	check(QK_CleanClip(-1.f, 0.f, 0.f, 0.f, 1.f) == 0.f, "clamped low");
-	check(QK_CleanClip(2.f, 0.f, 0.f, 0.f, 1.f) == 1.f, "clamped high");
+	check(QK_ClipMatte(-1.f, 0.f, 1.f) == 0.f, "clamped low");
+	check(QK_ClipMatte(2.f, 0.f, 1.f) == 1.f, "clamped high");
 }
 
 // ---------------------------------------------------------------------------
@@ -245,11 +245,13 @@ static void test_compose()
 	// Raw view uses rawM.
 	QK_Compose(QK_OUT_RAW, 0.7f, 0.42f, 1.f, 0.5f, 0.5f, 0.5f, oa, orr, og, ob);
 	check(near(orr,0.42f), "raw view");
-	// Highlight: matte 0 -> flat grey; matte 1 -> image.
-	QK_Compose(QK_OUT_HILITE, 0.f, 0.f, 1.f, 0.8f, 0.2f, 0.2f, oa, orr, og, ob);
-	check(near(orr, QK_HILITE_GREY), "hilite unselected grey");
-	QK_Compose(QK_OUT_HILITE, 1.f, 0.f, 1.f, 0.8f, 0.2f, 0.2f, oa, orr, og, ob);
-	check(near(orr, 0.8f), "hilite selected shows image");
+	// Selection Overlay: matte 1 (selected) -> full image color; matte 0
+	// (unselected) -> desaturated + dimmed image (below the source value).
+	// Opaque in both cases.
+	QK_Compose(QK_OUT_OVERLAY, 1.f, 0.f, 1.f, 0.8f, 0.2f, 0.2f, oa, orr, og, ob);
+	check(near(oa,1.f) && near(orr, 0.8f), "overlay selected shows full image");
+	QK_Compose(QK_OUT_OVERLAY, 0.f, 0.f, 1.f, 0.8f, 0.2f, 0.2f, oa, orr, og, ob);
+	check(near(oa,1.f) && orr < 0.8f && orr > 0.f, "overlay unselected dimmed");
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +294,7 @@ static void test_keyed_passthrough()
 		float m = QK_RawMatte(p.pr / (p.a > 1e-8f ? p.a : 1.f),
 		                      p.pg / (p.a > 1e-8f ? p.a : 1.f),
 		                      p.pb / (p.a > 1e-8f ? p.a : 1.f), g);
-		m = QK_CleanClip(m, 0.f, 0.f, 0.f, 1.f);   // default finesse = identity
+		m = QK_ClipMatte(m, 0.f, 1.f);   // default finesse = identity
 		float oa, orr, og, ob;
 		QK_Compose(QK_OUT_KEYED, QK_InOutRatio(m, 0.f), 0.f,
 		           p.a, p.pr, p.pg, p.pb, oa, orr, og, ob);
@@ -338,7 +340,7 @@ int main()
 	test_rgb_to_hs();
 	test_qualify_in();
 	test_raw_matte();
-	test_clean_clip();
+	test_clip();
 	test_ratio();
 	test_iir();
 	test_compose();

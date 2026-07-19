@@ -50,10 +50,10 @@
 #define QK_MODEL_HSV    0
 #define QK_MODEL_HSL    1
 
-#define QK_OUT_KEYED     0   /* Original + Alpha (keyed image)  */
-#define QK_OUT_MATTE     1
-#define QK_OUT_MATTE_INV 2
-#define QK_OUT_HILITE    3   /* flat-grey highlight preview     */
+#define QK_OUT_OVERLAY   0   /* selection overlay (image + tinted, DEFAULT) */
+#define QK_OUT_KEYED     1   /* Original + Alpha (keyed image)  */
+#define QK_OUT_MATTE     2
+#define QK_OUT_MATTE_INV 3
 #define QK_OUT_RAW       4   /* qualifier matte, pre-cleanup    */
 
 /* garbage channel, 1-based to match the popup directly */
@@ -250,38 +250,16 @@ QK_FUNC float QK_RawMatte(float r, float g, float b, QK_Gates gp)
    Identity at cleanB=cleanW=clipB=0, clipW=1.
 
    These reshape the matte's soft ramp (so they act on a FEATHERED key, not a
-   binary one). Deliberately STRONG — a little slider goes a long way, like
-   Resolve's equivalents:
-
-   Clean Black raises the black point AND applies an expanding gamma, so haze
-   in the "off" region collapses to solid black fast. At full it drives the
-   lower ~85% of the range to 0. Clean White is the mirror on the high end.
-
-   Black/White Clip are a hard levels remap of [clipB, clipW] -> [0,1] with a
-   generous gain: even a small clip visibly crushes the toe / shoulder. */
-QK_FUNC float QK_CleanClip(float m, float cleanB, float cleanW,
-                           float clipB, float clipW)
+/* Black Clip / White Clip: a hard levels remap of the matte. clipB is the
+   black cut point, clipW the white cut point (both 0..1). Pixels at or below
+   clipB go to 0 (solid transparent), at or above clipW go to 1 (solid
+   opaque), and the range between is stretched linearly across [0,1]. This is
+   the alpha-clipping stage — it hardens the matte's toe and shoulder. As the
+   two points close in, the transition steepens toward a pure threshold.
+   Identity at clipB=0, clipW=1. (Clean Black/White were removed — Blur Radius
+   + In/Out Ratio do the edge shaping; these clips do the endpoint hardening.) */
+QK_FUNC float QK_ClipMatte(float m, float clipB, float clipW)
 {
-    /* Clean Black: hard black-point push (same threshold+gain shape as In/Out
-       Ratio, which reads as strong). The threshold rises with cleanB — at
-       full it sits near 0.9, so everything below ~0.9 is driven to solid
-       black through a steep transition. */
-    if (cleanB > 0.0f) {
-        float thresh = 0.9f * cleanB;              /* 0 .. 0.9 */
-        float gain   = 1.0f + 12.0f * cleanB;      /* 1 .. 13 */
-        m = QK_SAT((m - thresh) * gain);
-    }
-    /* Clean White: mirror — hard white-point push. Threshold falls with
-       cleanW; everything above the threshold is driven to solid white through
-       a steep transition. out = 1 - SAT((thresh - m) * gain). */
-    if (cleanW > 0.0f) {
-        float thresh = 1.0f - 0.9f * cleanW;       /* 1 .. 0.1 */
-        float gain   = 1.0f + 12.0f * cleanW;
-        m = 1.0f - QK_SAT((thresh - m) * gain);
-    }
-    /* Black/White Clip: hard levels remap [clipB, clipW] -> [0,1]. clipB is
-       the black cut point (default 0), clipW the white cut point (default 1).
-       As they close in, the ramp between them steepens toward a threshold. */
     if (clipW - clipB > 1e-6f) m = (m - clipB) / (clipW - clipB);
     else                       m = (m <= clipB) ? 0.0f : 1.0f;
     return QK_SAT(m);
@@ -367,12 +345,17 @@ QK_FUNC void QK_GarbageUV(float ox, float oy,
 
 /* ---- output ------------------------------------------------------------- */
 
-#define QK_HILITE_GREY 0.5f
+/* Overlay look for UNSELECTED pixels: how far to pull them toward luma
+   (desaturate) and how much to dim. Selected pixels show full image. This is
+   the DEFAULT view so the selection is always visible while sampling — no
+   need to switch to the keyed/alpha view (and lose it) to see what you pick. */
+#define QK_OVL_DESAT  0.85f    /* 1 = fully grey unselected */
+#define QK_OVL_DIM    0.45f    /* unselected brightness multiplier */
 
 /* Compose one output pixel from the finished matte m, the raw (pre-cleanup)
-   matte rawM, and the PREMULTIPLIED source pixel. Every image-bearing mode
-   is expressed against premultiplied color directly (straight*m*a == pm*m),
-   so no unpremultiply — and no zero-alpha special case — is ever needed. */
+   matte rawM, and the PREMULTIPLIED source pixel. Image-bearing modes are
+   expressed against premultiplied color where possible; the overlay needs
+   straight color, so it unpremultiplies locally. */
 QK_FUNC void QK_Compose(int mode, float m, float rawM,
                         float a, float pr, float pg, float pb,
                         QK_OUTF(oa), QK_OUTF(orr), QK_OUTF(og), QK_OUTF(ob))
@@ -382,11 +365,24 @@ QK_FUNC void QK_Compose(int mode, float m, float rawM,
     } else if (mode == QK_OUT_MATTE_INV) {
         float im = 1.0f - m;
         oa = 1.0f; orr = im; og = im; ob = im;
-    } else if (mode == QK_OUT_HILITE) {
-        float w  = m * a;
-        float gy = QK_HILITE_GREY * (1.0f - w);
+    } else if (mode == QK_OUT_OVERLAY) {
+        /* Selection overlay: full image where selected, desaturated+dimmed
+           image where not. Opaque, so the whole frame stays visible for
+           context. Works on STRAIGHT color composited over black. */
+        float sr, sg, sb;
+        QK_Straight(a, pr, pg, pb, sr, sg, sb);
+        float y = 0.2126f * sr + 0.7152f * sg + 0.0722f * sb;
+        /* unselected look */
+        float ur = (sr + (y - sr) * QK_OVL_DESAT) * QK_OVL_DIM;
+        float ug = (sg + (y - sg) * QK_OVL_DESAT) * QK_OVL_DIM;
+        float ub = (sb + (y - sb) * QK_OVL_DESAT) * QK_OVL_DIM;
+        /* blend selected (full) over unselected by the matte, then re-apply
+           the source coverage so transparent areas of the layer read as black
+           rather than full grey (matches how the layer sits in the comp). */
         oa = 1.0f;
-        orr = gy + m * pr; og = gy + m * pg; ob = gy + m * pb;
+        orr = (ur + (sr - ur) * m) * a;
+        og  = (ug + (sg - ug) * m) * a;
+        ob  = (ub + (sb - ub) * m) * a;
     } else if (mode == QK_OUT_RAW) {
         oa = 1.0f; orr = rawM; og = rawM; ob = rawM;
     } else {   /* QK_OUT_KEYED */

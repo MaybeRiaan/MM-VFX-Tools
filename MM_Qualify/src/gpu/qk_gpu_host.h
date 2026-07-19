@@ -157,7 +157,7 @@ struct QK_GPUJob {
 
 	// Gates + per-pixel finesse.
 	QK_Gates gates = {};
-	float cleanB = 0.f, cleanW = 0.f, clipB = 0.f, clipW = 1.f;
+	float clipB = 0.f, clipW = 1.f;
 	float ratio = 0.f;
 	int   mode = 0;                 // QK_OUT_* (0-based)
 

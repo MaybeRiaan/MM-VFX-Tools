@@ -2,7 +2,7 @@
 
     PLATFORM-FREE (gpu-kernel-rules §0). Counterpart of smart_render.cpp's
     QK_MatteRow, and not merely a counterpart: it calls the SAME functions
-    (QK_Straight / QK_RawMatte / QK_CleanClip from qk_core.h), so the math
+    (QK_Straight / QK_RawMatte / QK_ClipMatte from qk_core.h), so the math
     cannot drift.
 
     Buffer slots:
@@ -22,8 +22,6 @@ PARAM_BLOCK_BEGIN
     int   gW;
     int   gRows;
     QK_GATES_DECL          /* 20 floats — order contract w/ QK_PackGates */
-    float gCleanB;
-    float gCleanW;
     float gClipB;
     float gClipW;
 PARAM_BLOCK_END
@@ -43,5 +41,5 @@ KERNEL_ENTRY(qk_matte)
 
     float m = QK_RawMatte(r, g, b, gp);
     m *= gGIn[i];
-    gMOut[i] = QK_CleanClip(m, gCleanB, gCleanW, gClipB, gClipW);
+    gMOut[i] = QK_ClipMatte(m, gClipB, gClipW);
 }

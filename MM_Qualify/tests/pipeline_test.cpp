@@ -46,7 +46,7 @@ struct Scene {
 	bool temporal;
 	int  nHist;                 // usable history frames (oldest-first)
 	QK_Gates gates;
-	float cleanB, cleanW, clipB, clipW, ratio;
+	float clipB, clipW, ratio;
 	int  mode;
 	float kA, kR;
 	bool garbageActive;
@@ -83,7 +83,7 @@ static void frameMatte(const Scene &sc, const vector<float> &frame, vector<float
 			const float *pq = &q[((size_t)y * W + x) * 4];
 			float r, g, b; QK_Straight(pq[0], pq[1], pq[2], pq[3], r, g, b);
 			float m = QK_RawMatte(r, g, b, sc.gates) * garbAt(sc, x, y);
-			mOut[(size_t)y * W + x] = QK_CleanClip(m, sc.cleanB, sc.cleanW, sc.clipB, sc.clipW);
+			mOut[(size_t)y * W + x] = QK_ClipMatte(m, sc.clipB, sc.clipW);
 		}
 }
 
@@ -191,7 +191,7 @@ static void tiledRender(const Scene &sc, vector<float> &outRGBA)
 					// garbage sampled at the world pixel (Fit-identity here)
 					const int sx = x, sy = y0 + y;
 					float m = QK_RawMatte(r, g, b, sc.gates) * garbAt(sc, sx, sy);
-					mtile[(size_t)y * W + x] = QK_CleanClip(m, sc.cleanB, sc.cleanW, sc.clipB, sc.clipW);
+					mtile[(size_t)y * W + x] = QK_ClipMatte(m, sc.clipB, sc.clipW);
 				}
 		};
 
@@ -302,7 +302,7 @@ int main()
 	auto baseScene = [&](Scene &sc) {
 		sc.srcW=W; sc.srcH=H; sc.outW=OW; sc.outH=OH; sc.srcOX=OX; sc.srcOY=OY;
 		sc.dnSigma=0; sc.blSigma=0; sc.temporal=false; sc.nHist=0;
-		sc.gates=g; sc.cleanB=0; sc.cleanW=0; sc.clipB=0; sc.clipW=1; sc.ratio=0;
+		sc.gates=g; sc.clipB=0; sc.clipW=1; sc.ratio=0;
 		sc.mode=QK_OUT_MATTE; sc.kA=1.f; sc.kR=0.15f; sc.garbageActive=false;
 		sc.frames.assign(1, {}); fillFrame(sc.frames[0], W, H, 1, false);
 		sc.garbage.clear();
@@ -319,7 +319,7 @@ int main()
 
 	// 4. Denoise + blur + clean/clip + ratio (grow).
 	{ Scene sc; baseScene(sc); sc.dnSigma=1.5; sc.blSigma=2.0;
-	  sc.cleanB=0.2f; sc.cleanW=0.15f; sc.clipB=0.05f; sc.clipW=0.9f; sc.ratio=0.4f;
+	  sc.clipB=0.05f; sc.clipW=0.9f; sc.ratio=0.4f;
 	  run("denoise+blur+clean+clip+grow", sc); }
 
 	// 5. Keyed output over HDR input.
@@ -327,7 +327,7 @@ int main()
 	  fillFrame(sc.frames[0], W, H, 7, true); run("keyed output, HDR input", sc); }
 
 	// 6. Highlight view.
-	{ Scene sc; baseScene(sc); sc.mode=QK_OUT_HILITE; sc.blSigma=1.5;
+	{ Scene sc; baseScene(sc); sc.mode=QK_OUT_OVERLAY; sc.blSigma=1.5;
 	  run("highlight view", sc); }
 
 	// 7. Qualify Raw view (recompute path).
@@ -349,7 +349,7 @@ int main()
 
 	// 10. Temporal + denoise + blur + everything, HDR.
 	{ Scene sc; baseScene(sc); sc.temporal=true; sc.nHist=5; sc.dnSigma=2.0; sc.blSigma=2.5;
-	  sc.cleanB=0.1f; sc.cleanW=0.1f; sc.clipB=0.05f; sc.clipW=0.95f; sc.ratio=-0.3f;
+	  sc.clipB=0.05f; sc.clipW=0.95f; sc.ratio=-0.3f;
 	  sc.mode=QK_OUT_KEYED;
 	  sc.frames.assign(sc.nHist+1, {});
 	  for (int i=0;i<=sc.nHist;++i) fillFrame(sc.frames[i], W, H, 31+i, true);

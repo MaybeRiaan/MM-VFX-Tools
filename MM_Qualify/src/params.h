@@ -96,17 +96,20 @@ enum {
 #define QK_LW_DFLT		QK_LW_709
 #define QK_LW_ITEMS		"Rec.709|Rec.2020|Rec.601|Average"
 
-// Output popup — order matches qk_core.h QK_OUT_* (value - 1).
+// Output popup — order matches qk_core.h QK_OUT_* (value - 1). Default is the
+// selection Overlay: the image stays visible with the selection popping in
+// full colour (unselected desaturated + dimmed), so you can keep sampling
+// without switching to the keyed/alpha view to see what you picked.
 enum {
-	QK_OUTPUT_KEYED = 1,
+	QK_OUTPUT_OVERLAY = 1,
+	QK_OUTPUT_KEYED,
 	QK_OUTPUT_MATTE,
 	QK_OUTPUT_MATTE_INV,
-	QK_OUTPUT_HILITE,
 	QK_OUTPUT_RAW,
 	QK_OUTPUT_NUM
 };
-#define QK_OUTPUT_DFLT	QK_OUTPUT_KEYED
-#define QK_OUTPUT_ITEMS	"Original + Alpha|Matte|Matte Inverted|Highlight|Qualify Raw"
+#define QK_OUTPUT_DFLT	QK_OUTPUT_OVERLAY
+#define QK_OUTPUT_ITEMS	"Selection Overlay|Original + Alpha|Matte|Matte Inverted|Qualify Raw"
 
 // Garbage channel — order matches qk_core.h QK_GCHAN_* (used 1-based).
 enum {
@@ -176,10 +179,10 @@ enum {
 #define QK_DENOISE_MAX			5.0
 #define QK_DENOISE_DFLT			0.0
 
-#define QK_CLEAN_MIN			0.0
-#define QK_CLEAN_MAX			100.0
-#define QK_CLEAN_DFLT			0.0
-
+// Black/White Clip = the alpha-clipping stage (hard matte black/white point).
+// Black Clip lifts the transparent floor; White Clip pulls the opaque ceiling
+// down. Default 0 / 100 = no clip. (Clean Black/White were removed — Blur
+// Radius + In/Out Ratio shape the edge, these clip the endpoints.)
 #define QK_CLIP_MIN				0.0
 #define QK_CLIP_MAX				100.0
 #define QK_BLACK_CLIP_DFLT		0.0
@@ -252,24 +255,22 @@ enum {
 	QK_OUTPUT,				// 27
 	QK_TOPIC_FINESSE,		// 28 "Matte Finesse"
 	QK_DENOISE,				// 29
-	QK_CLEAN_BLACK,			// 30
-	QK_CLEAN_WHITE,			// 31
+	QK_BLUR,				// 30
+	QK_RATIO,				// 31
 	QK_BLACK_CLIP,			// 32
 	QK_WHITE_CLIP,			// 33
-	QK_BLUR,				// 34
-	QK_RATIO,				// 35
-	QK_TEMPORAL,			// 36 (supervised — greys Attack/Release)
-	QK_ATTACK,				// 37
-	QK_RELEASE,				// 38
-	QK_TOPIC_FINESSE_END,	// 39
-	QK_TOPIC_GARBAGE,		// 40 "Garbage Matte"
-	QK_GARBAGE_LAYER,		// 41
-	QK_GARBAGE_CHAN,		// 42
-	QK_TOPIC_GARBAGE_END,	// 43
-	QK_TOPIC_ADV,			// 44 "Advanced (Color Science)"
-	QK_QIN,					// 45 Color Space Override
-	QK_LUMA_WEIGHTS,		// 46
-	QK_TOPIC_ADV_END,		// 47
+	QK_TEMPORAL,			// 34 (supervised — greys Attack/Release)
+	QK_ATTACK,				// 35
+	QK_RELEASE,				// 36
+	QK_TOPIC_FINESSE_END,	// 37
+	QK_TOPIC_GARBAGE,		// 38 "Garbage Matte"
+	QK_GARBAGE_LAYER,		// 39
+	QK_GARBAGE_CHAN,		// 40
+	QK_TOPIC_GARBAGE_END,	// 41
+	QK_TOPIC_ADV,			// 42 "Advanced (Color Science)"
+	QK_QIN,					// 43 Color Space Override
+	QK_LUMA_WEIGHTS,		// 44
+	QK_TOPIC_ADV_END,		// 45
 	QK_NUM_PARAMS
 };
 
@@ -306,15 +307,13 @@ enum {
 	QK_OUTPUT_DISK_ID,				// 127
 	QK_TOPIC_FINESSE_DISK_ID,		// 128
 	QK_DENOISE_DISK_ID,				// 129
-	QK_CLEAN_BLACK_DISK_ID,			// 130
-	QK_CLEAN_WHITE_DISK_ID,			// 131
+	QK_BLUR_DISK_ID,				// 130
+	QK_RATIO_DISK_ID,				// 131
 	QK_BLACK_CLIP_DISK_ID,			// 132
 	QK_WHITE_CLIP_DISK_ID,			// 133
-	QK_BLUR_DISK_ID,				// 134
-	QK_RATIO_DISK_ID,				// 135
-	QK_TEMPORAL_DISK_ID,			// 136
-	QK_ATTACK_DISK_ID,				// 137
-	QK_RELEASE_DISK_ID,				// 138
+	QK_TEMPORAL_DISK_ID,			// 134
+	QK_ATTACK_DISK_ID,				// 135
+	QK_RELEASE_DISK_ID,				// 136
 	QK_TOPIC_FINESSE_END_DISK_ID,	// 139
 	QK_TOPIC_GARBAGE_DISK_ID,		// 140
 	QK_GARBAGE_LAYER_DISK_ID,		// 141
@@ -342,10 +341,9 @@ typedef struct QK_Params {
 	A_long		outputL;		// QK_OUTPUT_* (1-based)
 	// finesse
 	PF_FpLong	denoiseF;		// sigma, full-res px
-	PF_FpLong	cleanBlackF, cleanWhiteF;	// %
-	PF_FpLong	blackClipF, whiteClipF;		// %
 	PF_FpLong	blurF;			// sigma, full-res px
 	PF_FpLong	ratioF;			// -100..100
+	PF_FpLong	blackClipF, whiteClipF;		// %
 	A_long		temporalL;		// 0/1
 	PF_FpLong	attackF, releaseF;			// %
 	// garbage

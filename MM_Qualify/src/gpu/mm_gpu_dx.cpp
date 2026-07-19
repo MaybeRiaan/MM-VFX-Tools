@@ -84,8 +84,9 @@ static const struct { const unsigned char *code; size_t size; } kQK_PSOCode[QK_P
 };
 
 // Root signature: root constants b0 + eight root UAV descriptors u0..u7.
-// Largest cbuffer is qk_compose's 8 scalars + 20 gate floats = 28 DWORDs;
-// qk_garbage is 20; qk_matte is 6 + 20 + 4 = 30. Take the max.
+// Num32BitValues must cover the largest PARAM_BLOCK: qk_compose = 7 scalars +
+// 20 gate floats = 27; qk_matte = 2 + 20 + 2 = 24; qk_garbage = 19. 30 is a
+// safe ceiling for all of them.
 enum { QK_ROOT_CONSTS = 30 };
 
 struct QK_DXData {
@@ -104,9 +105,9 @@ struct PGauss   { INT32 W, Rows, R, horiz; };
 struct PMatte {
 	INT32 W, Rows;
 	float gates[QK_GATES_FLOATS];
-	float cleanB, cleanW, clipB, clipW;
+	float clipB, clipW;
 };
-static_assert(sizeof(PMatte) == (2 + QK_GATES_FLOATS + 4) * 4, "PMatte layout");
+static_assert(sizeof(PMatte) == (2 + QK_GATES_FLOATS + 2) * 4, "PMatte layout");
 struct PIIR     { INT32 W, Rows, first; float kA, kR; };
 struct PCompose {
 	INT32 outW, outH, srcW, srcOX, srcOY, mode; float ratio;
@@ -502,7 +503,6 @@ PF_Err QK_DXRender(PF_InData *in_data, PF_OutData *out_data,
 							PMatte p = {};
 							p.W = job.srcW; p.Rows = rows;
 							std::memcpy(p.gates, gatePacked, sizeof(gatePacked));
-							p.cleanB = job.cleanB; p.cleanW = job.cleanW;
 							p.clipB = job.clipB; p.clipW = job.clipW;
 							const D3D12_GPU_VIRTUAL_ADDRESS ins[2] = { vaQ, vaG };
 							QK_Dispatch(cl.Get(), data->pso[QK_PSO_MATTE].Get(), &p,
@@ -532,7 +532,6 @@ PF_Err QK_DXRender(PF_InData *in_data, PF_OutData *out_data,
 					PMatte p = {};
 					p.W = job.srcW; p.Rows = rows;
 					std::memcpy(p.gates, gatePacked, sizeof(gatePacked));
-					p.cleanB = job.cleanB; p.cleanW = job.cleanW;
 					p.clipB = job.clipB; p.clipW = job.clipW;
 					const D3D12_GPU_VIRTUAL_ADDRESS ins[2] = { vaQ, vaG };
 					QK_Dispatch(cl.Get(), data->pso[QK_PSO_MATTE].Get(), &p,
