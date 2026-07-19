@@ -39,6 +39,13 @@ struct StampParams {
 // Deterministic per-frame randomization from (user seed, frame number).
 StampParams MakeFrameStamp(uint64_t seed, int32_t frame, int tileCount, int tileN);
 
+// Stamp ONE row (image row y, W pixels of ARGB float at rowArgb). This is
+// the unit AE's iterate_generic fans out over rows — read-only shared state,
+// each call writes only its own row.
+void StampRow(float *rowArgb, int W, int y,
+              const TileBank &bank, const ResponseCurve &resp,
+              const StampParams &sp);
+
 // Stamp rows [y0,y1) of an ARGB float image (AE order A,R,G,B per pixel),
 // in place. Per pixel with alpha > 0: unpremultiply → encode to apply space
 // → add tile grain × EvalSigma(local luma) × amount → decode → repremultiply.

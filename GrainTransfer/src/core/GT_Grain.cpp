@@ -82,19 +82,24 @@ void HighPassResidual(const float *plane, float *residual, int W, int H,
 bool MeasureGrainSpectrum(const float *const rgb[3], int W, int H,
                           int n, float blurSigma, GrainSpectrum &out)
 {
+    std::vector<float> res[3];
+    const float *resP[3];
+    for (int c = 0; c < 3; ++c) {
+        res[c].resize((size_t)W * H);
+        HighPassResidual(rgb[c], res[c].data(), W, H, blurSigma);
+        resP[c] = res[c].data();
+    }
+    return MeasureGrainSpectrumRes(resP, W, H, n, out);
+}
+
+bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
+                             int n, GrainSpectrum &out)
+{
     out = GrainSpectrum();
     if (W < n || H < n) return false;
     out.n = n;
 
-    const size_t planeN = (size_t)W * H;
     const size_t tileN = (size_t)n * n;
-
-    // Residuals for all three channels.
-    std::vector<float> res[3];
-    for (int c = 0; c < 3; ++c) {
-        res[c].resize(planeN);
-        HighPassResidual(rgb[c], res[c].data(), W, H, blurSigma);
-    }
 
     // Patch grid (non-overlapping, fully inside).
     const int px = W / n, py = H / n;
@@ -106,7 +111,7 @@ bool MeasureGrainSpectrum(const float *const rgb[3], int W, int H,
         for (int pi = 0; pi < px; ++pi) {
             double acc = 0.0;
             for (int c = 0; c < 3; ++c) {
-                const float *r = res[c].data();
+                const float *r = res[c];
                 for (int y = 0; y < n; ++y) {
                     const float *row = r + ((size_t)(pj * n + y) * W + (size_t)pi * n);
                     for (int x = 0; x < n; ++x) acc += (double)row[x] * row[x];
@@ -161,7 +166,7 @@ bool MeasureGrainSpectrum(const float *const rgb[3], int W, int H,
                 // Copy patch, subtract mean, window.
                 double mean = 0.0;
                 for (int y = 0; y < n; ++y) {
-                    const float *row = res[c].data() +
+                    const float *row = res[c] +
                         ((size_t)(pj * n + y) * W + (size_t)pi * n);
                     for (int x = 0; x < n; ++x) {
                         patch[(size_t)y * n + x] = row[x];

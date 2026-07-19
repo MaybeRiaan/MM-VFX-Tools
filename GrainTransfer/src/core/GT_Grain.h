@@ -67,6 +67,11 @@ void HighPassResidual(const float *plane, float *residual, int W, int H,
 bool MeasureGrainSpectrum(const float *const rgb[3], int W, int H,
                           int n, float blurSigma, GrainSpectrum &out);
 
+// Same, but from residuals the caller already computed (avoids re-blurring
+// when the response measurement needs the same residual planes).
+bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
+                             int n, GrainSpectrum &out);
+
 // Bake `count` RPN tiles from the measured spectrum. Per tile and channel:
 // fresh white-noise field → FFT → keep phase, impose measured magnitude →
 // inverse FFT → normalize to zero mean, unit sigma. Channels use independent
