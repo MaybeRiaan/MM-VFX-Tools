@@ -75,42 +75,57 @@ Restart After Effects. The effect appears as **Effect ▸ MM ▸ Qualify**.
 
 ### 2.0 — Smoke test (loads + passthrough)
 1. New comp, any footage layer (an 8-bit still is fine to start).
-2. Apply **MM Qualify**. Default Output is *Original + Alpha*; with default
-   gates (Hue 0–360 full circle, Sat/Luma full range) the whole image passes,
-   so **the frame should look unchanged**. If AE rejects the plugin on load,
-   the outflags literals in `resources/MM_QualifyPiPL.r` disagree with
-   `GlobalSetup()` — they are documented to match (`0x06000442` / `0x2A001400`).
+2. Apply **MM Qualify**. Default Output is *Selection Overlay*; with default
+   gates (Hue Width 360 full circle, Sat/Luma open) everything is selected,
+   so the overlay shows **the full image at true colour** (nothing dimmed).
+   If AE rejects the plugin on load, the outflags literals in
+   `resources/MM_QualifyPiPL.r` disagree with `GlobalSetup()` — they are
+   documented to match (`0x06000442` / `0x2A001400`).
 
 ### 2.1 — Gates pull a key (the Phase 1 milestone)
 Footage with a clear color region (sky, skin, a colored product).
-1. Set **Output ▸ Matte** to watch the matte directly (white = selected).
-2. **Eyedropper the Sample swatch** on the target color. With **Picker ▸ Set
-   Range** the three gates recentre on the sample and the matte should light
-   up on that color. (Sample from *Original + Alpha* output or the Layer panel
-   so the pick reads the image, not the matte.)
-3. Switch **Picker ▸ Add To Range** and click a neighboring shade — the
-   selection should *grow* to include it. **Subtract From Range** should carve
-   a sampled color back out (a full-circle hue gate becomes "everything
-   except" that neighborhood).
-4. Toggle each gate's **Enable**; drag **In/Out/In Soft/Out Soft** by hand —
+1. Leave Output on **Selection Overlay** (default) — selected pixels stay full
+   colour, unselected desaturate + dim, so you see the selection live without
+   leaving the view. (Output ▸ Matte shows the raw matte if you prefer.)
+2. **Eyedrop the "Sample" swatch** on the target colour. The three gates
+   recentre on it and that colour pops in the overlay.
+
+   **SAMPLING CAVEAT (current build).** AE's eyedropper samples the *composited
+   effect output* — i.e. the overlay, not the original pixels. For the first
+   **Sample** pick that's usually fine (the whole frame is selected, so the
+   overlay is true colour). But for **Sample +** / **Sample −**, picking a new
+   colour out of an already-dimmed region reads the *dimmed* value and mis-keys.
+   Until the custom-UI eyedropper lands (which will read the true underlying
+   pixel by click position), use the reliable workflow: **double-click the
+   layer to open the Layer panel and eyedrop there** — the Layer panel reads
+   the raw input *before* effects, so add/subtract picks are always correct.
+3. Use **Sample +** to click a neighboring shade — the selection should *grow*
+   to include it. **Sample −** should carve a sampled colour back out (a
+   full-circle hue gate becomes "everything except" that neighborhood).
+4. Toggle each gate's **Enable**; drag **Hue Center / Hue Width / Soft In /
+   Soft Out** (and the Sat/Luma **In / Out / Soft In / Soft Out**) by hand —
    soft edges should feather, not step.
-5. **Hue seam check:** find a red/magenta subject, set Hue In ≈ 340, Out ≈ 20.
-   The red should key cleanly with no hole at 0°. Animate Hue In from 300→380
-   across a color sweep — the range must track *through* red, not swing
-   backward.
-6. **Keyframe a gate** (the headline differentiator): set a keyframe on any
-   In/Out value, move in time, change it — it animates. Confirm an expression
-   can drive it too.
+5. **Hue seam check:** find a red/magenta subject and set **Hue Center ≈ 0°**
+   with a moderate **Width**. The red should key cleanly with no hole at 0°.
+   Animate Hue Center from −30° through +30° across a colour sweep — the range
+   must track *through* red, not swing backward (the seam-free win).
+6. **Keyframe a gate** (the headline differentiator): set a keyframe on Hue
+   Center/Width or any Sat/Luma bound, move in time, change it — it animates.
+   Confirm an expression can drive it too.
 
 ### 2.2 — Matte finesse holds a moving key (the Phase 2 milestone)
-Moving footage where a raw key sizzles.
+Moving footage where a raw key sizzles. Chain order: **Denoise → Blur Radius →
+In/Out Ratio → Black/White Clip** (+ Temporal). NOTE most finesse controls
+reshape the matte's *soft ramp*, so pull a key first (they do nothing on a flat
+all-selected matte).
 1. **Denoise** (pre-filter) up a little — matte edge noise should calm at the
    source, while the *image* stays sharp (it is untouched; only the
    qualification path is blurred).
-2. **Clean Black / Clean White** to solidify the core and kill speckle;
-   **Black/White Clip** to harden the endpoints.
-3. **Blur Radius** to soften the matte edge; **In/Out Ratio** to choke
-   (negative) or spread (positive) it.
+2. **Blur Radius** to soften the matte edge, then **In/Out Ratio** to choke
+   (negative) or spread (positive) that softened edge. Ratio needs the ramp
+   Blur creates — with Blur at 0 it has little to move.
+3. **Black Clip / White Clip** to harden the endpoints: Black Clip lifts the
+   transparent floor to solid 0, White Clip pulls the opaque ceiling to 1.
 4. **Temporal Stabilize** on: Attack/Release ungrey. Scrub — the matte should
    sizzle less frame-to-frame. Raise **Release Smoothing** for a stubborn edge
    letting go; **Attack** governs a new selection appearing. (Requires
