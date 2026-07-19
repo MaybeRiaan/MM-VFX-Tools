@@ -132,24 +132,40 @@ enum {
 #define QK_HUE_SOFT_MAX			180.0
 #define QK_HUE_SOFT_DFLT		5.0
 
-// Sat gate: bounds 0..1 on the slider, valid to 2 (defensive headroom).
+// Sat gate. The slider spans 0..1 (where keying happens), but a handle at an
+// EXTREME means an OPEN bound: Out at 1.0 => "no upper limit", In at 0 =>
+// "no lower limit" (QK_BuildGates maps these to +/-inf sentinels). This is
+// why the default [0,1] gate passes EVERYTHING — critical because many real
+// pixels have (correct) HSL saturation >= 1.0, chiefly NEAR-BLACK and
+// near-white chromatic pixels (dark leather, hair) on the pure-hue-to-black
+// line. Without the open bound those pixels fall outside a default 1.0 edge
+// and lose their matte (the alpha-fringe-on-dark-footage bug). Pull the top
+// handle even slightly below 1.0 and the bound becomes a real limit.
 #define QK_SAT_MIN				0.0
-#define QK_SAT_VALID_MAX		2.0
+#define QK_SAT_VALID_MAX		1.0
 #define QK_SAT_SLIDER_MAX		1.0
 #define QK_SAT_IN_DFLT			0.0
 #define QK_SAT_OUT_DFLT			1.0
 #define QK_SAT_SOFT_MAX			1.0
 #define QK_SAT_SOFT_DFLT		0.0
 
-// Luma gate: HDR-aware — bounds settable to 8.0 (float-safe superwhites).
+// Luma gate: HDR-aware, same open-bound rule. Slider 0..1; Out at 1.0 opens
+// the top so superwhite (float > 1) pixels pass at defaults, In at 0 opens
+// the bottom so pure black passes.
 #define QK_LUM_MIN				0.0
-#define QK_LUM_VALID_MAX		8.0
+#define QK_LUM_VALID_MAX		1.0
 #define QK_LUM_SLIDER_MAX		1.0
 #define QK_LUM_IN_DFLT			0.0
 #define QK_LUM_OUT_DFLT			1.0
-#define QK_LUM_SOFT_VALID_MAX	4.0
+#define QK_LUM_SOFT_VALID_MAX	1.0
 #define QK_LUM_SOFT_SLIDER_MAX	1.0
 #define QK_LUM_SOFT_DFLT		0.0
+
+// Open-bound sentinels + thresholds. A bound within EPS of its extreme is
+// treated as open (+/- BIG) in QK_BuildGates. BIG is finite and huge so the
+// gate arithmetic stays NaN-free.
+#define QK_BOUND_BIG			1.0e9
+#define QK_OPEN_EPS				1.0e-4
 
 // Matte finesse. Denoise / Blur Radius ARE Gaussian sigmas in full-res layer
 // px (downsample-scaled in the render path — never use raw values there).
@@ -347,11 +363,18 @@ inline void QK_BuildGates(const QK_Params &p, QK_Gates *g)
 	g->hueIn  = (float)(p.hueCenterF - p.hueWidthF * 0.5);
 	g->hueOut = (float)(p.hueCenterF + p.hueWidthF * 0.5);
 	g->hueInSoft = (float)p.hueInSoftF; g->hueOutSoft = (float)p.hueOutSoftF;
+	// Sat/Luma: a handle sitting at its extreme opens that bound (see
+	// QK_SAT_* / QK_LUM_* notes). Lower handle at 0 -> -BIG; upper handle at
+	// the slider max -> +BIG. This makes the default gate pass everything,
+	// including pixels whose HSL saturation is >= 1.0 (near-black chromatic)
+	// and superwhite luma > 1.0.
 	g->satEn = p.satEnL ? 1.f : 0.f;
-	g->satIn = (float)p.satInF;         g->satOut = (float)p.satOutF;
+	g->satIn  = (p.satInF  <= QK_SAT_MIN + QK_OPEN_EPS)       ? -(float)QK_BOUND_BIG : (float)p.satInF;
+	g->satOut = (p.satOutF >= QK_SAT_SLIDER_MAX - QK_OPEN_EPS) ?  (float)QK_BOUND_BIG : (float)p.satOutF;
 	g->satInSoft = (float)p.satInSoftF; g->satOutSoft = (float)p.satOutSoftF;
 	g->lumEn = p.lumEnL ? 1.f : 0.f;
-	g->lumIn = (float)p.lumInF;         g->lumOut = (float)p.lumOutF;
+	g->lumIn  = (p.lumInF  <= QK_LUM_MIN + QK_OPEN_EPS)       ? -(float)QK_BOUND_BIG : (float)p.lumInF;
+	g->lumOut = (p.lumOutF >= QK_LUM_SLIDER_MAX - QK_OPEN_EPS) ?  (float)QK_BOUND_BIG : (float)p.lumOutF;
 	g->lumInSoft = (float)p.lumInSoftF; g->lumOutSoft = (float)p.lumOutSoftF;
 
 	switch (p.lumaWL) {

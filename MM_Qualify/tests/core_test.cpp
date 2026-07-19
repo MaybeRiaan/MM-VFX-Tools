@@ -259,10 +259,25 @@ static void test_compose()
 // the plugin cannot itself introduce an alpha fringe at default settings;
 // any edge artifact seen in AE is the footage's own matte or host compositing,
 // not the effect adding coverage.
+// Build the DEFAULT gate state as QK_BuildGates would from factory params:
+// all three gates ENABLED, hue full circle, sat/luma bounds OPEN (the
+// extreme-handle sentinels). This is what the plugin actually runs at reset,
+// so the passthrough test below exercises the real default, not gates_off().
+static QK_Gates gates_default()
+{
+	QK_Gates g = {};
+	g.hueEn = 1.f; g.hueIn = -180.f; g.hueOut = 180.f;   // width 360 -> full circle
+	g.satEn = 1.f; g.satIn = -1e9f;  g.satOut = 1e9f;    // open bounds
+	g.lumEn = 1.f; g.lumIn = -1e9f;  g.lumOut = 1e9f;
+	g.lumR = 0.2126f; g.lumG = 0.7152f; g.lumB = 0.0722f;
+	g.model = QK_MODEL_HSL; g.qin = QK_QIN_ASIS;
+	return g;
+}
+
 static void test_keyed_passthrough()
 {
-	std::printf("keyed passthrough (matte==1 -> exact premult source)\n");
-	QK_Gates g = gates_off();          // no gates enabled -> RawMatte == 1
+	std::printf("keyed passthrough (default gates -> exact premult source)\n");
+	QK_Gates g = gates_default();      // real reset state: enabled, open bounds
 
 	// Sweep representative premultiplied pixels, incl. edge/superwhite/zero.
 	struct { float a, pr, pg, pb; } px[] = {
@@ -288,6 +303,32 @@ static void test_keyed_passthrough()
 }
 
 // ---------------------------------------------------------------------------
+// The dark-footage bug: near-black chromatic pixels (dark leather, hair) have
+// CORRECT HSL saturation >= 1.0 (they sit on the pure-hue-to-black line). A
+// default gate whose upper edge is a hard 1.0 rejects them -> the matte drops
+// on dark opaque pixels -> alpha holes. With the open-bound default (In 0 /
+// Out at slider max mapped to +/-BIG), every such pixel must pass (matte 1).
+static void test_dark_chromatic()
+{
+	std::printf("dark chromatic pixels pass default gates\n");
+	QK_Gates g = gates_default();
+	struct { float r, g, b; } px[] = {
+		{0.001f, 0.000f, 0.000f},   // near-black pure red — HSL sat == 1.0
+		{0.003f, 0.001f, 0.000f},   // near-black warm
+		{0.008f, 0.004f, 0.002f},   // dark leather-ish
+		{0.020f, 0.000f, 0.010f},   // dark magenta
+		{0.900f, 0.010f, 0.010f},   // bright saturated red (sanity: also passes)
+	};
+	bool ok = true;
+	for (auto &q : px) {
+		float m = QK_RawMatte(q.r, q.g, q.b, g);
+		if (m < 0.999f) { ok = false;
+			std::printf("    rgb(%.3f,%.3f,%.3f) -> matte %.4f (expected 1)\n", q.r, q.g, q.b, m); }
+	}
+	check(ok, "near-black chromatic -> matte 1 at defaults");
+}
+
+// ---------------------------------------------------------------------------
 int main()
 {
 	std::printf("=== MM Qualify core math tests ===\n");
@@ -302,6 +343,7 @@ int main()
 	test_iir();
 	test_compose();
 	test_keyed_passthrough();
+	test_dark_chromatic();
 
 	std::printf("--- %d/%d passed ---\n", g_total - g_fail, g_total);
 	if (g_fail) { std::printf("FAILED (%d)\n", g_fail); return 1; }
