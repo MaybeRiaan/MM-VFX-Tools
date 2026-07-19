@@ -350,7 +350,8 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
                            PF_OutFlag_NON_PARAM_VARY;    // grain varies per frame
     out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE          |
                            PF_OutFlag2_SUPPORTS_SMART_RENDER      |
-                           PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
+                           PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
+                           PF_OutFlag2_I_MIX_GUID_DEPENDENCIES;    // PreRender calls GuidMixInPtr
 
     AEGP_SuiteHandler suites(in_data->pica_basicP);
     PF_Handle globH = suites.HandleSuite1()->host_new_handle(sizeof(GT_GlobalData));

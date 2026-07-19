@@ -10,7 +10,7 @@
 #define	MINOR_VERSION	0
 #define	BUG_VERSION		0
 #define	STAGE_VERSION	0	// PF_Stage_DEVELOP (enum value 0) — must match GrainTransfer.h
-#define	BUILD_VERSION	3
+#define	BUILD_VERSION	5
 
 #ifndef AE_OS_WIN
 	#include <AE_General.r>
@@ -68,9 +68,10 @@ resource 'PiPL' (16000) {
 		0x02000444
 		},
 		// out_flags2 = FLOAT_COLOR_AWARE | SUPPORTS_SMART_RENDER | SUPPORTS_THREADED_RENDERING
-		//            = 0x1000 | 0x400 | 0x08000000 = 0x08001400
+		//            | I_MIX_GUID_DEPENDENCIES (PreRender calls GuidMixInPtr)
+		//            = 0x1000 | 0x400 | 0x08000000 | 0x00200000 = 0x08201400
 		AE_Effect_Global_OutFlags_2 {
-		0x08001400
+		0x08201400
 		},
 		/* [11] */
 		AE_Effect_Match_Name {
