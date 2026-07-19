@@ -1,0 +1,69 @@
+/*  qk_compose.kernel — in/out ratio + output-mode compose for one band.
+
+    PLATFORM-FREE (gpu-kernel-rules §0). Counterpart of smart_render.cpp's
+    QK_ComposeRow, calling the same QK_InOutRatio / QK_Compose — and for the
+    Qualify Raw view it RECOMPUTES the raw matte from the qualification tile
+    and garbage weights with the same QK_RawMatte call the CPU makes
+    (recompute == stored: same inputs, same function, deterministic).
+
+    Reads the tile planes through the srcOX / loOY origin offset and writes
+    an output-sized ARGB plane.
+
+    Buffer slots:
+      u0  gCSrc    pristine premult ARGB tile (CURRENT frame — loaded last)
+      u1  gCMatte  f1 final matte (blurred / stabilized)
+      u2  gCQual   qualification tile (denoised current frame)
+      u3  gCG      f1 garbage weights
+      u4  gCOut    output-sized premult ARGB
+*/
+
+#include "../../qk_core.h"
+
+BUF_IN (gCSrc,   0);
+BUF_IN (gCMatte, 1);
+BUF_IN (gCQual,  2);
+BUF_IN (gCG,     3);
+BUF_OUT(gCOut,   0);
+
+PARAM_BLOCK_BEGIN
+    int   gOutW;
+    int   gOutH;      /* band rows */
+    int   gSrcW;      /* tile stride */
+    int   gSrcOX;     /* output -> tile origin offset, x */
+    int   gSrcOY;     /* output -> tile row offset (band loOY) */
+    int   gMode;      /* QK_OUT_* */
+    float gRatio;     /* -1..1 */
+    QK_GATES_DECL     /* for the Qualify Raw recompute */
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(qk_compose)
+{
+    QK_GUARD(gOutW, gOutH)
+    const int ox = GID_X, oy = GID_Y;
+
+    const int so1 = (oy + gSrcOY) * gSrcW + (ox + gSrcOX);
+    const int so4 = so1 * 4;
+    const int oo  = QK_IDX(ox, oy, gOutW);
+
+    const float m = QK_InOutRatio(gCMatte[so1], gRatio);
+
+    float rawM = 0.0f;
+    if (gMode == QK_OUT_RAW) {
+        float r, g, b;
+        QK_Straight(gCQual[so4 + 0], gCQual[so4 + 1],
+                    gCQual[so4 + 2], gCQual[so4 + 3], r, g, b);
+        QK_Gates gp;
+        QK_GATES_LOAD(gp)
+        rawM = QK_RawMatte(r, g, b, gp) * gCG[so1];
+    }
+
+    float oa, orr, og, ob;
+    QK_Compose(gMode, m, rawM,
+               gCSrc[so4 + 0], gCSrc[so4 + 1], gCSrc[so4 + 2], gCSrc[so4 + 3],
+               oa, orr, og, ob);
+
+    gCOut[oo + 0] = oa;
+    gCOut[oo + 1] = orr;
+    gCOut[oo + 2] = og;
+    gCOut[oo + 3] = ob;
+}

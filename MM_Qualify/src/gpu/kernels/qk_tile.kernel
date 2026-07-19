@@ -1,0 +1,54 @@
+/*  qk_tile.kernel — world <-> tile data movement + f1 fill.
+
+    PLATFORM-FREE (gpu-kernel-rules §0). Worlds are PF_PixelFormat_GPU_BGRA128
+    (float BGRA, pitched rows); tiles are packed ARGB. BGRA reversed IS ARGB,
+    so the swizzle is index reversal (3 - c) — shared here, never in a host.
+
+    Entry points:
+      qk_load_tile   world rows [worldY0, worldY0+rows) -> packed ARGB tile
+      qk_store_tile  packed ARGB tile -> world rows [worldY0, ...)
+      qk_fill_ones   fill an f1 plane with 1.0 (inactive garbage weights)
+*/
+
+BUF_IN (gMoveIn,  0);
+BUF_OUT(gMoveOut, 0);
+
+PARAM_BLOCK_BEGIN
+    int gW;         /* pixels per row               */
+    int gRows;      /* rows to move                 */
+    int gWorldY0;   /* first world row              */
+    int gPitch;     /* world pitch, in floats       */
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(qk_load_tile)
+{
+    QK_GUARD(gW, gRows)
+    const int x = GID_X, y = GID_Y;
+    const int wo = (gWorldY0 + y) * gPitch + x * 4;
+    const int to = QK_IDX(x, y, gW);
+    for (int c = 0; c < 4; ++c)
+        gMoveOut[to + c] = gMoveIn[wo + (3 - c)];
+}
+
+KERNEL_ENTRY(qk_store_tile)
+{
+    QK_GUARD(gW, gRows)
+    const int x = GID_X, y = GID_Y;
+    const int to = QK_IDX(x, y, gW);
+    const int wo = (gWorldY0 + y) * gPitch + x * 4;
+    for (int c = 0; c < 4; ++c)
+        gMoveOut[wo + (3 - c)] = gMoveIn[to + c];
+}
+
+BUF_OUT(gFillDst, 0);
+
+PARAM_BLOCK_BEGIN
+    int gFW;
+    int gFRows;
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(qk_fill_ones)
+{
+    QK_GUARD(gFW, gFRows)
+    gFillDst[GID_Y * gFW + GID_X] = 1.0f;
+}

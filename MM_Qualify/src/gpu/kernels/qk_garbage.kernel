@@ -1,0 +1,92 @@
+/*  qk_garbage.kernel — garbage-matte weights for one band.
+
+    PLATFORM-FREE (gpu-kernel-rules §0). Counterpart of garbage.cpp
+    SampleGarbage + QK_GarbageRow: for every pixel of the band's source-tile
+    footprint, map through the Fit-to-Layer layer-space transform
+    (QK_GarbageUV — the shared function), bilinearly sample the garbage
+    WORLD (BGRA float, pitched, clamp-to-edge) and extract the channel
+    (QK_GarbageChannel — shared). Weights land in the f1 G plane aligned
+    with the tile.
+
+    Buffer slots:
+      u0  gGarbWorld   garbage world, BGRA128 (premultiplied)
+      u4  gGPlane      f1 weights, tile-aligned
+*/
+
+#include "../../qk_core.h"
+
+BUF_IN (gGarbWorld, 0);
+BUF_OUT(gGPlane,    0);
+
+PARAM_BLOCK_BEGIN
+    int   gW;            /* tile width (srcW)                  */
+    int   gRows;         /* tile rows                          */
+    int   gSrcY0;        /* first world row of this tile       */
+    int   gSrcOX;        /* source -> output pixel offset      */
+    int   gSrcOY;
+    int   gMtW;          /* garbage world dims + pitch (floats) */
+    int   gMtH;
+    int   gMtPitch;
+    int   gMOriginX;     /* layer-space geometry (see garbage.h) */
+    int   gMOriginY;
+    int   gMRefW;
+    int   gMRefH;
+    int   gOutOriginX;
+    int   gOutOriginY;
+    int   gSrcRefW;
+    int   gSrcRefH;
+    float gDsx;
+    float gDsy;
+    int   gChannel;      /* QK_GCHAN_* (1-based)               */
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(qk_garbage)
+{
+    QK_GUARD(gW, gRows)
+    const int x = GID_X, yr = GID_Y;
+
+    /* tile pixel -> output-buffer pixel (may be negative in the margins —
+       the linear Fit mapping extrapolates, reads clamp; matches CPU). */
+    const int ox = x - gSrcOX;
+    const int oy = (gSrcY0 + yr) - gSrcOY;
+
+    float u, v;
+    QK_GarbageUV((float)ox, (float)oy,
+                 (float)gOutOriginX, (float)gOutOriginY,
+                 (float)gSrcRefW, (float)gSrcRefH,
+                 (float)gMRefW, (float)gMRefH,
+                 (float)gMOriginX, (float)gMOriginY,
+                 gDsx, gDsy, u, v);
+
+    const float fu = QK_FLOOR(u);
+    const float fv = QK_FLOOR(v);
+    const float du = u - fu;
+    const float dv = v - fv;
+
+    const int x0 = QK_ClampI((int)fu,     0, gMtW - 1);
+    const int x1 = QK_ClampI((int)fu + 1, 0, gMtW - 1);
+    const int y0 = QK_ClampI((int)fv,     0, gMtH - 1);
+    const int y1 = QK_ClampI((int)fv + 1, 0, gMtH - 1);
+
+    const float w00 = (1.0f - du) * (1.0f - dv);
+    const float w10 = du * (1.0f - dv);
+    const float w01 = (1.0f - du) * dv;
+    const float w11 = du * dv;
+
+    /* world is BGRA: [0]=B [1]=G [2]=R [3]=A */
+    const int o00 = y0 * gMtPitch + x0 * 4;
+    const int o10 = y0 * gMtPitch + x1 * 4;
+    const int o01 = y1 * gMtPitch + x0 * 4;
+    const int o11 = y1 * gMtPitch + x1 * 4;
+
+    const float a = w00 * gGarbWorld[o00 + 3] + w10 * gGarbWorld[o10 + 3]
+                  + w01 * gGarbWorld[o01 + 3] + w11 * gGarbWorld[o11 + 3];
+    const float r = w00 * gGarbWorld[o00 + 2] + w10 * gGarbWorld[o10 + 2]
+                  + w01 * gGarbWorld[o01 + 2] + w11 * gGarbWorld[o11 + 2];
+    const float g = w00 * gGarbWorld[o00 + 1] + w10 * gGarbWorld[o10 + 1]
+                  + w01 * gGarbWorld[o01 + 1] + w11 * gGarbWorld[o11 + 1];
+    const float b = w00 * gGarbWorld[o00 + 0] + w10 * gGarbWorld[o10 + 0]
+                  + w01 * gGarbWorld[o01 + 0] + w11 * gGarbWorld[o11 + 0];
+
+    gGPlane[yr * gW + x] = QK_GarbageChannel(a, r, g, b, gChannel);
+}

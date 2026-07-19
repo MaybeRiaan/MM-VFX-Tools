@@ -1,0 +1,86 @@
+/*  qk_gauss.kernel — separable Gaussian passes.
+
+    PLATFORM-FREE (gpu-kernel-rules §0). Counterparts of blur.cpp:
+      qk_gauss_rgba  premultiplied ARGB pass — out-of-range taps SKIPPED,
+                     never clamped, NO renormalization (rules §3.2): the
+                     reduced edge sum IS the premultiplied coverage falloff
+                     the straight-color divide downstream expects.
+      qk_gauss_f1    single-float matte pass — taps skipped AND renormalized
+                     by the effective weight sum (a matte has no coverage
+                     semantics; the blur must be edge-neutral). Matches
+                     blur.cpp GaussianBlurF1 exactly.
+
+    Weights arrive from the host — the EXACT CPU-built kernels
+    (BuildGaussianKernel, double-accumulated, rules §3.1). Never rebuilt.
+
+    Buffer slots (order is contract):
+      u0  gGSrc    input plane
+      u1  gGKern   2R+1 weights, centered at [R]
+      u4  gGDst    output plane
+*/
+
+BUF_IN (gGSrc,  0);
+BUF_IN (gGKern, 1);
+BUF_OUT(gGDst,  0);
+
+PARAM_BLOCK_BEGIN
+    int gGW;       /* plane width (pixels)          */
+    int gGRows;    /* plane rows                    */
+    int gGR;       /* kernel support radius         */
+    int gGHoriz;   /* 1 = convolve along x, 0 = y   */
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(qk_gauss_rgba)
+{
+    QK_GUARD(gGW, gGRows)
+    const int x = GID_X, y = GID_Y;
+
+    int i0, i1, stride;
+    if (gGHoriz != 0) {
+        i0 = (x - gGR < 0)        ? -x               : -gGR;
+        i1 = (x + gGR > gGW - 1)  ? (gGW - 1 - x)    :  gGR;
+        stride = 4;
+    } else {
+        i0 = (y - gGR < 0)        ? -y               : -gGR;
+        i1 = (y + gGR > gGRows-1) ? (gGRows - 1 - y) :  gGR;
+        stride = gGW * 4;
+    }
+
+    float a = 0.0f, r = 0.0f, g = 0.0f, b = 0.0f;
+    int p = QK_IDX(x, y, gGW) + i0 * stride;
+    for (int i = i0; i <= i1; ++i, p += stride) {
+        const float w = gGKern[i + gGR];
+        a += w * gGSrc[p + 0];
+        r += w * gGSrc[p + 1];
+        g += w * gGSrc[p + 2];
+        b += w * gGSrc[p + 3];
+    }
+    const int o = QK_IDX(x, y, gGW);
+    gGDst[o + 0] = a; gGDst[o + 1] = r; gGDst[o + 2] = g; gGDst[o + 3] = b;
+}
+
+KERNEL_ENTRY(qk_gauss_f1)
+{
+    QK_GUARD(gGW, gGRows)
+    const int x = GID_X, y = GID_Y;
+
+    int i0, i1, stride;
+    if (gGHoriz != 0) {
+        i0 = (x - gGR < 0)        ? -x               : -gGR;
+        i1 = (x + gGR > gGW - 1)  ? (gGW - 1 - x)    :  gGR;
+        stride = 1;
+    } else {
+        i0 = (y - gGR < 0)        ? -y               : -gGR;
+        i1 = (y + gGR > gGRows-1) ? (gGRows - 1 - y) :  gGR;
+        stride = gGW;
+    }
+
+    float s = 0.0f, ws = 0.0f;
+    int p = y * gGW + x + i0 * stride;
+    for (int i = i0; i <= i1; ++i, p += stride) {
+        const float w = gGKern[i + gGR];
+        s  += w * gGSrc[p];
+        ws += w;
+    }
+    gGDst[y * gGW + x] = (ws > 0.0f) ? s / ws : 0.0f;
+}

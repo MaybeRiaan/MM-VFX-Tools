@@ -1,0 +1,47 @@
+/*  qk_matte.kernel — raw qualifier matte + per-pixel cleanup for one tile.
+
+    PLATFORM-FREE (gpu-kernel-rules §0). Counterpart of smart_render.cpp's
+    QK_MatteRow, and not merely a counterpart: it calls the SAME functions
+    (QK_Straight / QK_RawMatte / QK_CleanClip from qk_core.h), so the math
+    cannot drift.
+
+    Buffer slots:
+      u0  gQual   qualification input tile (denoised when Denoise > 0),
+                  premultiplied ARGB
+      u1  gGIn    f1 garbage weights (1.0-filled when inactive)
+      u4  gMOut   f1 matte plane
+*/
+
+#include "../../qk_core.h"
+
+BUF_IN (gQual, 0);
+BUF_IN (gGIn,  1);
+BUF_OUT(gMOut, 0);
+
+PARAM_BLOCK_BEGIN
+    int   gW;
+    int   gRows;
+    QK_GATES_DECL          /* 20 floats — order contract w/ QK_PackGates */
+    float gCleanB;
+    float gCleanW;
+    float gClipB;
+    float gClipW;
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(qk_matte)
+{
+    QK_GUARD(gW, gRows)
+    const int i  = GID_Y * gW + GID_X;
+    const int i4 = i * 4;
+
+    float r, g, b;
+    QK_Straight(gQual[i4 + 0], gQual[i4 + 1], gQual[i4 + 2], gQual[i4 + 3],
+                r, g, b);
+
+    QK_Gates gp;
+    QK_GATES_LOAD(gp)
+
+    float m = QK_RawMatte(r, g, b, gp);
+    m *= gGIn[i];
+    gMOut[i] = QK_CleanClip(m, gCleanB, gCleanW, gClipB, gClipW);
+}
