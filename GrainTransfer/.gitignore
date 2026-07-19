@@ -1,0 +1,18 @@
+# Build outputs
+build/
+tests/build/
+tests/out/
+*.aex
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Never commit SDK files — the AE SDK is referenced by path from CMake
+sdk/
+
+# Editor / OS noise
+.vs/
+*.user
+Thumbs.db
