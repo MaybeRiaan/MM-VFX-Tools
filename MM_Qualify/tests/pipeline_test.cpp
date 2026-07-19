@@ -297,7 +297,7 @@ int main()
 	g.satEn = 1.f; g.satIn = 0.1f;  g.satOut = 1.5f; g.satOutSoft = 0.2f;
 	g.lumEn = 1.f; g.lumIn = 0.05f; g.lumOut = 4.f;  g.lumInSoft = 0.05f;
 	g.lumR = 0.2126f; g.lumG = 0.7152f; g.lumB = 0.0722f;
-	g.model = QK_MODEL_HSV; g.qin = QK_QIN_ACESCCT;
+	g.model = QK_MODEL_HSL; g.qin = QK_QIN_LINLOG;
 
 	auto baseScene = [&](Scene &sc) {
 		sc.srcW=W; sc.srcH=H; sc.outW=OW; sc.outH=OH; sc.srcOX=OX; sc.srcOY=OY;

@@ -1,30 +1,39 @@
-/*  sampling.cpp — eyedropper range picking (Resolve's picker / +picker /
-    -picker, plan §1).
+/*  sampling.cpp — eyedropper range picking (Resolve's pick / +pick / -pick,
+    plan §1).
 
-    Fires from PF_Cmd_USER_CHANGED_PARAM when the supervised "Sample" color
-    swatch changes (i.e. the user eyedropped a color; Ctrl-click gives AE's
-    native 5x5 average). The sample runs through the SAME qualification math
-    the render uses — QK_QualifyIn1 / QK_RGBToHS / luma weights via
-    QK_BuildGates — then updates the gate params according to the Picker
-    popup:
+    Three color swatches (QK_SAMPLE_COLOR / _ADD / _SUB), each with its own
+    eyedropper, mirror Resolve's three picker buttons. AE does not forward
+    Ctrl/Alt modifiers to an effect's color param, so the operation is chosen
+    by WHICH swatch fired rather than by a click modifier. Whichever the user
+    eyedrops runs `QK_ApplySample` from PF_Cmd_USER_CHANGED_PARAM:
 
-      Set Range      — center each gate on the sample (hue ±10°, sat/luma
-                       ±0.1), enable all three gates. Softness untouched.
-      Add To Range   — widen the nearest edge of each gate to include the
-                       sample (+ a small pad). Gates already containing the
-                       sample are untouched.
-      Subtract From  — pull the nearest edge past the sample to exclude it.
-                       A full-circle hue gate becomes "everything except
-                       the sample's neighborhood".
+      Set (QK_SAMPLE_COLOR) — center each gate on the sample (hue width 20°,
+                              sat/luma ±0.1), enable all three gates.
+      Add (QK_SAMPLE_ADD)   — widen the nearest edge of each gate to include
+                              the sample (+ a small pad).
+      Sub (QK_SAMPLE_SUB)   — pull the nearest edge past the sample to exclude
+                              it. A full-circle hue gate becomes "everything
+                              except the sample's neighborhood".
+
+    The sample runs through the SAME qualification math the render uses
+    (QK_QualifyIn1 / QK_RGBToHS / luma weights via QK_BuildGates), and Hue is
+    written back as Center/Width (the UI form; QK_BuildGates converts to the
+    gate's In/Out).
+
+    RESET GUARD (fixes reset->black): resetting the effect restores every
+    swatch to its default grey, which fires USER_CHANGED_PARAM on the
+    supervised swatches. If we re-keyed on that, reset would produce a tight
+    key on grey and black the frame. So a pick whose color EQUALS the swatch
+    default is treated as "no pick" and changes nothing. A genuine eyedrop of
+    a pixel that happens to be exactly the default grey is vanishingly rare
+    and recoverable with a nudge.
 
     Writes go through uu.change_flags = PF_ChangeFlag_CHANGED_VALUE — the
     standard supervised-param mechanism, so keyframing/undo behave normally.
 
-    Notes/limits (v1, standard params only — plan §3): the AE eyedropper
-    samples the rendered comp/layer at 8bpc in the working space. Sample with
-    Output = Original + Alpha (or from the Layer panel) so the pick reflects
-    the input, not the matte. Region mean±stddev drag-sampling belongs to the
-    custom-ECW polish phase.
+    Sample from Output = Original + Alpha (or the Layer panel) so the pick
+    reflects the input, not the matte. Region mean±stddev drag-sampling
+    belongs to the custom-ECW polish phase.
 */
 
 #define NOMINMAX
@@ -32,10 +41,14 @@
 
 namespace {
 
-const double kHueHalf   = 10.0;   // Set: hue half-width, degrees
+const double kHueHalf   = 10.0;   // Set: hue half-width, degrees (20° total)
 const double kHuePad    = 2.0;    // Add/Sub: hue pad, degrees
 const double kLinHalf   = 0.10;   // Set: sat/luma half-width
 const double kLinPad    = 0.025;  // Add/Sub: sat/luma pad
+
+// The swatch default (matches PF_ADD_COLOR in main.cpp). A pick equal to this
+// is a reset, not a user sample — see RESET GUARD above.
+const A_u_char kDefR = 128, kDefG = 128, kDefB = 128;
 
 inline double WrapDeg(double x) { return x - 360.0 * std::floor(x / 360.0); }
 
@@ -55,11 +68,6 @@ inline void WriteBool(PF_ParamDef *params[], A_long idx, bool v)
 {
 	params[idx]->u.bd.value = v ? 1 : 0;
 	params[idx]->uu.change_flags = PF_ChangeFlag_CHANGED_VALUE;
-}
-
-inline double ReadAngle(PF_ParamDef *params[], A_long idx)
-{
-	return (double)params[idx]->u.ad.value / 65536.0;
 }
 
 // Linear-gate edit shared by Sat and Luma. lo/hi are the CURRENT bounds.
@@ -90,25 +98,35 @@ void ApplyLinear(PF_ParamDef *params[], A_long inIdx, A_long outIdx,
 
 } // namespace
 
-PF_Err QK_ApplySample(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[])
+PF_Err QK_ApplySample(PF_InData *in_data, PF_OutData *out_data,
+                      PF_ParamDef *params[], A_long changedIndex)
 {
 	(void)in_data; (void)out_data;
 
-	// Snapshot the qualification settings straight off the live params —
-	// they are fully populated for USER_CHANGED_PARAM.
+	// Which swatch fired -> which operation, and where to read the color.
+	A_long mode;
+	if      (changedIndex == QK_SAMPLE_ADD) mode = QK_PICK_ADD;
+	else if (changedIndex == QK_SAMPLE_SUB) mode = QK_PICK_SUB;
+	else                                    mode = QK_PICK_SET;
+
+	const PF_Pixel &c = params[changedIndex]->u.cd.value;
+
+	// RESET GUARD: a swatch restored to its default is a reset, not a pick.
+	if (c.red == kDefR && c.green == kDefG && c.blue == kDefB)
+		return PF_Err_NONE;
+
+	// Snapshot the qualification settings straight off the live params.
 	QK_Params p;
 	p.qinL   = params[QK_QIN]->u.pd.value;
-	p.modelL = params[QK_MODEL]->u.pd.value;
 	p.lumaWL = params[QK_LUMA_WEIGHTS]->u.pd.value;
 	p.hueEnL = p.satEnL = p.lumEnL = 1;
-	p.hueInF = p.hueOutF = p.hueInSoftF = p.hueOutSoftF = 0.0;
+	p.hueCenterF = p.hueWidthF = p.hueInSoftF = p.hueOutSoftF = 0.0;
 	p.satInF = p.satOutF = p.satInSoftF = p.satOutSoftF = 0.0;
 	p.lumInF = p.lumOutF = p.lumInSoftF = p.lumOutSoftF = 0.0;
 	QK_Gates g;
 	QK_BuildGates(p, &g);
 
 	// The 8-bit sample, through the exact qualification path.
-	const PF_Pixel &c = params[QK_SAMPLE_COLOR]->u.cd.value;
 	const int qin = (int)g.qin;
 	const float tr = QK_QualifyIn1((float)c.red   / 255.f, qin);
 	const float tg = QK_QualifyIn1((float)c.green / 255.f, qin);
@@ -119,52 +137,43 @@ PF_Err QK_ApplySample(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *par
 	const double h = hF, s = sF;
 	const double y = g.lumR * tr + g.lumG * tg + g.lumB * tb;
 
-	const A_long mode = params[QK_PICKER_MODE]->u.pd.value;
-
-	// ---- hue (circular) --------------------------------------------------
-	const double hueIn  = ReadAngle(params, QK_HUE_IN);
-	const double hueOut = ReadAngle(params, QK_HUE_OUT);
-	const double w = WrapDeg(hueOut - hueIn);          // 0 == full circle
-	const double d = WrapDeg(h - WrapDeg(hueIn));      // sample vs In edge
+	// ---- hue (circular), stored as Center + Width -----------------------
+	const double center = (double)params[QK_HUE_CENTER]->u.ad.value / 65536.0;
+	const double width  = params[QK_HUE_WIDTH]->u.fs_d.value;
 
 	if (mode == QK_PICK_SET) {
-		WriteAngle(params, QK_HUE_IN,  WrapDeg(h - kHueHalf));
-		WriteAngle(params, QK_HUE_OUT, WrapDeg(h + kHueHalf));
+		WriteAngle(params, QK_HUE_CENTER, h);
+		WriteFloat(params, QK_HUE_WIDTH, 2.0 * kHueHalf);
 		WriteBool(params, QK_HUE_ENABLE, true);
 		WriteBool(params, QK_SAT_ENABLE, true);
 		WriteBool(params, QK_LUM_ENABLE, true);
-	} else if (mode == QK_PICK_ADD) {
-		// Extend the nearer edge to include the sample. Writes preserve the
-		// param's absolute (unbounded) value so keyframes stay continuous.
-		if (w > 0.0 && d > w) {
-			const double dOut = d - w;          // past Out, going forward
-			const double dIn  = 360.0 - d;      // before In, going back
-			if (dOut <= dIn) {
-				double grow = dOut + kHuePad;
-				if (w + grow >= 360.0) grow = 360.0 - w;   // full circle cap
-				WriteAngle(params, QK_HUE_OUT, hueOut + grow);
-			} else {
-				double grow = dIn + kHuePad;
-				if (w + grow >= 360.0) grow = 360.0 - w;
-				WriteAngle(params, QK_HUE_IN, hueIn - grow);
+	} else {
+		// Signed angular distance of the sample from the current center,
+		// wrapped to [-180, 180]. Inside the band => |d| <= width/2.
+		double d = WrapDeg(h - center);
+		if (d > 180.0) d -= 360.0;
+		const double half = width * 0.5;
+		if (mode == QK_PICK_ADD) {
+			if (width < 360.0 && std::fabs(d) > half) {
+				// Widen symmetrically so the sample lands just inside an edge;
+				// keep the center put (predictable), cap at the full circle.
+				double newHalf = std::fabs(d) + kHuePad;
+				double newWidth = 2.0 * newHalf;
+				if (newWidth > 360.0) newWidth = 360.0;
+				WriteFloat(params, QK_HUE_WIDTH, newWidth);
 			}
-		}
-	} else {   // subtract
-		if (w <= 0.0) {
-			// Full circle -> everything except the sample's neighborhood.
-			WriteAngle(params, QK_HUE_IN,  WrapDeg(h + kHuePad));
-			WriteAngle(params, QK_HUE_OUT, WrapDeg(h + 360.0 - kHuePad));
-		} else if (d <= w) {
-			// Inside: pull the nearer edge past the sample, never past the
-			// other edge (a subtract can shrink the arc to ~0 but not flip it).
-			if (d < w - d) {
-				double shrinkTo = w - d - kHuePad;
-				if (shrinkTo < 0.01) shrinkTo = 0.01;
-				WriteAngle(params, QK_HUE_IN, hueIn + (w - shrinkTo));
-			} else {
-				double shrinkTo = d - kHuePad;
-				if (shrinkTo < 0.01) shrinkTo = 0.01;
-				WriteAngle(params, QK_HUE_OUT, hueOut - (w - shrinkTo));
+		} else {   // subtract
+			if (width >= 360.0) {
+				// Full circle -> a band that excludes the sample's
+				// neighborhood: center opposite the sample, width just under
+				// full so a gap opens around it.
+				WriteAngle(params, QK_HUE_CENTER, WrapDeg(h + 180.0));
+				WriteFloat(params, QK_HUE_WIDTH, 360.0 - 2.0 * kHuePad);
+			} else if (std::fabs(d) <= half) {
+				// Narrow so the sample falls just outside the nearer edge.
+				double newHalf = std::fabs(d) - kHuePad;
+				if (newHalf < 0.5) newHalf = 0.5;
+				WriteFloat(params, QK_HUE_WIDTH, 2.0 * newHalf);
 			}
 		}
 	}

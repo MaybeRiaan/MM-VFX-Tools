@@ -125,11 +125,11 @@ static void test_rgb_to_hs()
 static void test_qualify_in()
 {
 	std::printf("qualify-in transforms\n");
-	// As-Is is identity.
-	check(near(QK_QualifyIn1(0.42f, QK_QIN_ASIS), 0.42f), "asis identity");
-	// All transforms monotonic increasing on a sweep, finite on HDR + negatives.
-	const int modes[4] = { QK_QIN_ASIS, QK_QIN_GAMMA24, QK_QIN_LOG, QK_QIN_ACESCCT };
-	for (int mi = 0; mi < 4; ++mi) {
+	// Display (As-Is) is identity.
+	check(near(QK_QualifyIn1(0.42f, QK_QIN_ASIS), 0.42f), "display identity");
+	// Both modes monotonic increasing on a sweep, finite on HDR + negatives.
+	const int modes[2] = { QK_QIN_ASIS, QK_QIN_LINLOG };
+	for (int mi = 0; mi < 2; ++mi) {
 		int mode = modes[mi];
 		float prev = QK_QualifyIn1(-0.5f, mode);
 		bool mono = std::isfinite(prev), fin = std::isfinite(prev);
@@ -143,8 +143,9 @@ static void test_qualify_in()
 		std::snprintf(nm, sizeof(nm), "mode %d monotonic", mode); check(mono, nm);
 		std::snprintf(nm, sizeof(nm), "mode %d finite", mode); check(fin, nm);
 	}
-	// ACEScct midpoint sanity: 0.18 linear -> ~0.41 (Resolve's log midtone).
-	check(near(QK_QualifyIn1(0.18f, QK_QIN_ACESCCT), 0.4135f, 2e-3f), "acescct 0.18");
+	// Linear->Log (ACEScct) midpoint sanity: 0.18 linear -> ~0.41 (Resolve's
+	// log midtone).
+	check(near(QK_QualifyIn1(0.18f, QK_QIN_LINLOG), 0.4135f, 2e-3f), "linlog 0.18");
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +253,41 @@ static void test_compose()
 }
 
 // ---------------------------------------------------------------------------
+// §2.0 regression: with all gates passing (matte == 1), the KEYED output must
+// equal the premultiplied source EXACTLY — including at antialiased edge
+// pixels (0 < a < 1) and fully transparent pixels (a == 0). If this holds,
+// the plugin cannot itself introduce an alpha fringe at default settings;
+// any edge artifact seen in AE is the footage's own matte or host compositing,
+// not the effect adding coverage.
+static void test_keyed_passthrough()
+{
+	std::printf("keyed passthrough (matte==1 -> exact premult source)\n");
+	QK_Gates g = gates_off();          // no gates enabled -> RawMatte == 1
+
+	// Sweep representative premultiplied pixels, incl. edge/superwhite/zero.
+	struct { float a, pr, pg, pb; } px[] = {
+		{1.00f, 0.80f, 0.20f, 0.20f},  // opaque
+		{0.50f, 0.40f, 0.10f, 0.10f},  // half-covered (premult = straight*a)
+		{0.01f, 0.008f,0.002f,0.002f}, // sliver edge — the fringe suspect
+		{0.00f, 0.00f, 0.00f, 0.00f},  // fully transparent
+		{0.75f, 2.10f, 0.30f, 0.00f},  // superwhite premult (HDR)
+	};
+	bool ok = true;
+	for (auto &p : px) {
+		float m = QK_RawMatte(p.pr / (p.a > 1e-8f ? p.a : 1.f),
+		                      p.pg / (p.a > 1e-8f ? p.a : 1.f),
+		                      p.pb / (p.a > 1e-8f ? p.a : 1.f), g);
+		m = QK_CleanClip(m, 0.f, 0.f, 0.f, 1.f);   // default finesse = identity
+		float oa, orr, og, ob;
+		QK_Compose(QK_OUT_KEYED, QK_InOutRatio(m, 0.f), 0.f,
+		           p.a, p.pr, p.pg, p.pb, oa, orr, og, ob);
+		if (!(near(oa,p.a) && near(orr,p.pr) && near(og,p.pg) && near(ob,p.pb)))
+			ok = false;
+	}
+	check(ok, "keyed default == premult source (all alphas)");
+}
+
+// ---------------------------------------------------------------------------
 int main()
 {
 	std::printf("=== MM Qualify core math tests ===\n");
@@ -265,6 +301,7 @@ int main()
 	test_ratio();
 	test_iir();
 	test_compose();
+	test_keyed_passthrough();
 
 	std::printf("--- %d/%d passed ---\n", g_total - g_fail, g_total);
 	if (g_fail) { std::printf("FAILED (%d)\n", g_fail); return 1; }

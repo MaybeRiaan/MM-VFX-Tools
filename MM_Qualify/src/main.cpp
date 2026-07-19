@@ -63,23 +63,29 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_TOPIC("Qualifier", QK_TOPIC_QUAL_DISK_ID);
 
-	// Qualification-path settings. Qualify In transforms the QUALIFICATION
-	// copy only — the image itself is never touched (plan §1).
+	// --- Sampling FIRST — the first thing the artist reaches for. Three
+	// eyedropper swatches mirror Resolve's pick / +pick / -pick buttons
+	// (AE does not forward Ctrl/Alt to a color param, so the operation is
+	// the swatch identity, not a modifier). All SUPERVISE so a pick fires
+	// PF_Cmd_USER_CHANGED_PARAM -> QK_ApplySample. A reset restoring the
+	// default grey is ignored there (reset->black guard). Ctrl-click any
+	// eyedropper for AE's native 5x5 average sample.
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_POPUP("Qualify In",
-		QK_QIN_NUM - 1, QK_QIN_DFLT, QK_QIN_ITEMS, QK_QIN_DISK_ID);
+	def.flags = PF_ParamFlag_SUPERVISE;
+	PF_ADD_COLOR("Sample", 128, 128, 128, QK_SAMPLE_COLOR_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_POPUP("Color Model",
-		QK_MODEL_NUM - 1, QK_MODEL_DFLT, QK_MODEL_ITEMS, QK_MODEL_DISK_ID);
+	def.flags = PF_ParamFlag_SUPERVISE;
+	PF_ADD_COLOR("Sample +", 128, 128, 128, QK_SAMPLE_ADD_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_POPUP("Luma Weights",
-		QK_LW_NUM - 1, QK_LW_DFLT, QK_LW_ITEMS, QK_LUMA_WEIGHTS_DISK_ID);
+	def.flags = PF_ParamFlag_SUPERVISE;
+	PF_ADD_COLOR("Sample -", 128, 128, 128, QK_SAMPLE_SUB_DISK_ID);
 
-	// --- Hue gate. Angle params: unbounded, so animating across the 0°
-	// seam (350 -> 370) works; all hue math wraps (qk_core.h QK_HueGate).
-	// Default In 0 / Out 360 == full circle (all hues pass).
+	// --- Hue gate. Center is an ANGLE (unbounded — animating across the 0°
+	// seam is smooth; all hue math wraps in qk_core.h). Width is the total
+	// arc kept; Soft In/Out feather each edge independently. Default Width
+	// 360 == full circle (all hues pass) -> passthrough at reset.
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_TOPIC("Hue", QK_TOPIC_HUE_DISK_ID);
 
@@ -87,18 +93,20 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	PF_ADD_CHECKBOXX("Hue Enable", TRUE, 0, QK_HUE_ENABLE_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_ANGLE("Hue In", QK_HUE_IN_DFLT, QK_HUE_IN_DISK_ID);
+	PF_ADD_ANGLE("Hue Center", QK_HUE_CENTER_DFLT, QK_HUE_CENTER_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_ANGLE("Hue Out", QK_HUE_OUT_DFLT, QK_HUE_OUT_DISK_ID);
+	PF_ADD_FLOAT_SLIDERX("Hue Width",
+		QK_HUE_WIDTH_MIN, QK_HUE_WIDTH_MAX, QK_HUE_WIDTH_MIN, QK_HUE_WIDTH_MAX,
+		QK_HUE_WIDTH_DFLT, PF_Precision_TENTHS, 0, 0, QK_HUE_WIDTH_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_FLOAT_SLIDERX("Hue In Soft",
+	PF_ADD_FLOAT_SLIDERX("Hue Soft In",
 		QK_HUE_SOFT_MIN, QK_HUE_SOFT_MAX, QK_HUE_SOFT_MIN, QK_HUE_SOFT_MAX,
 		QK_HUE_SOFT_DFLT, PF_Precision_TENTHS, 0, 0, QK_HUE_IN_SOFT_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_FLOAT_SLIDERX("Hue Out Soft",
+	PF_ADD_FLOAT_SLIDERX("Hue Soft Out",
 		QK_HUE_SOFT_MIN, QK_HUE_SOFT_MAX, QK_HUE_SOFT_MIN, QK_HUE_SOFT_MAX,
 		QK_HUE_SOFT_DFLT, PF_Precision_TENTHS, 0, 0, QK_HUE_OUT_SOFT_DISK_ID);
 
@@ -165,17 +173,6 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(QK_TOPIC_LUM_END_DISK_ID);
 
-	// --- Sampling. The Sample swatch's eyedropper drives Set/Add/Subtract
-	// range picking (sampling.cpp, PF_Cmd_USER_CHANGED_PARAM). Ctrl-click
-	// the eyedropper for AE's native 5x5 average sample.
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_POPUP("Picker",
-		QK_PICK_NUM - 1, QK_PICK_DFLT, QK_PICK_ITEMS, QK_PICKER_MODE_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
-	def.flags = PF_ParamFlag_SUPERVISE;
-	PF_ADD_COLOR("Sample", 128, 128, 128, QK_SAMPLE_COLOR_DISK_ID);
-
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(QK_TOPIC_QUAL_END_DISK_ID);
 
@@ -194,10 +191,12 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_TOPIC("Matte Finesse", QK_TOPIC_FINESSE_DISK_ID);
 
+	// Denoise: hundredths precision, 0..5 range — the useful sizzle-killing
+	// band is well under 3px, so fine control matters more than reach.
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Denoise",
 		QK_DENOISE_MIN, QK_DENOISE_MAX, QK_DENOISE_MIN, QK_DENOISE_MAX,
-		QK_DENOISE_DFLT, PF_Precision_TENTHS, 0, 0, QK_DENOISE_DISK_ID);
+		QK_DENOISE_DFLT, PF_Precision_HUNDREDTHS, 0, 0, QK_DENOISE_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Clean Black",
@@ -265,6 +264,26 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(QK_TOPIC_GARBAGE_END_DISK_ID);
+
+	// ======================= Advanced (Color Science) =====================
+	// Tucked at the bottom, collapsed by default (PF_ParamFlag_START_COLLAPSED
+	// on the group). Defaults (Display / Rec.709) are right for the vast
+	// majority of AE work; these only matter for scene-linear/wide-gamut
+	// pipelines. Both transform only the qualification path — never the image.
+	AEFX_CLR_STRUCT(def);
+	def.flags = PF_ParamFlag_START_COLLAPSED;
+	PF_ADD_TOPIC("Advanced (Color Science)", QK_TOPIC_ADV_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_POPUP("Color Space Override",
+		QK_QIN_NUM - 1, QK_QIN_DFLT, QK_QIN_ITEMS, QK_QIN_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_POPUP("Luma Weights",
+		QK_LW_NUM - 1, QK_LW_DFLT, QK_LW_ITEMS, QK_LUMA_WEIGHTS_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_END_TOPIC(QK_TOPIC_ADV_END_DISK_ID);
 
 	out_data->num_params = QK_NUM_PARAMS;
 	return err;
@@ -347,8 +366,10 @@ PF_Err EffectMain(PF_Cmd cmd, PF_InData *in_data, PF_OutData *out_data,
 			case PF_Cmd_USER_CHANGED_PARAM: {
 				const PF_UserChangedParamExtra *uc =
 					static_cast<const PF_UserChangedParamExtra*>(extra);
-				if (uc && uc->param_index == QK_SAMPLE_COLOR)
-					err = QK_ApplySample(in_data, out_data, params);
+				if (uc && (uc->param_index == QK_SAMPLE_COLOR ||
+				           uc->param_index == QK_SAMPLE_ADD ||
+				           uc->param_index == QK_SAMPLE_SUB))
+					err = QK_ApplySample(in_data, out_data, params, uc->param_index);
 				else if (uc && uc->param_index == QK_TEMPORAL)
 					err = QK_UpdateTemporalEnable(in_data, out_data, params);
 				break;

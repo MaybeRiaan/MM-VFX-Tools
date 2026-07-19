@@ -65,30 +65,27 @@ typedef short int			int16;
 // Popups (1-based) and ranges/defaults
 // ---------------------------------------------------------------------------
 
-// Qualify In — transforms the qualification path ONLY (image never touched).
-// As-Is respects the input (WYSIWYG); ACEScct gives linear-working-space
-// users literally Resolve's ACES-timeline qualification behavior.
+// Color Space Override (Advanced) — tells the qualifier how to read the
+// footage when building the matte. The image is NEVER touched, only the
+// matte-building copy. Plain-language, two choices:
+//   Display — footage is display / log encoded (sRGB, Rec.709, or any log).
+//             Key the pixels directly; they're already perceptually spread.
+//             The right default for the vast majority of AE work.
+//   Linear  — footage is scene-linear (ACEScg / linear). Internally lift to
+//             a log space before keying so darks aren't crushed together.
+//             This is how Resolve's ACES timeline qualifies linear footage.
 enum {
 	QK_QIN_ASIS_P = 1,
-	QK_QIN_GAMMA24_P,
-	QK_QIN_LOG_P,
-	QK_QIN_ACESCCT_P,
+	QK_QIN_LINLOG_P,
 	QK_QIN_NUM
 };
 #define QK_QIN_DFLT		QK_QIN_ASIS_P
-#define QK_QIN_ITEMS	"As-Is|Gamma 2.4|Log (Cineon)|ACEScct"
+#define QK_QIN_ITEMS	"Display|Linear"
 
-enum {
-	QK_MODEL_HSV_P = 1,
-	QK_MODEL_HSL_P,
-	QK_MODEL_NUM
-};
-#define QK_MODEL_DFLT	QK_MODEL_HSV_P
-#define QK_MODEL_ITEMS	"HSV|HSL"
-
-// Luma weights. The plan's "working primaries" option is not knowable from
-// inside an AE effect (the host does not expose working-space primaries), so
-// the practical set ships: 709 / 2020 / 601 / equal-weight average.
+// Luma weights (Advanced). Rec.709 is right for the overwhelming majority of
+// AE work; the alternates are there for correctness on wide-gamut / SD
+// pipelines. The plan's "working primaries" cannot be queried from inside an
+// AE effect (the host does not expose working-space primaries).
 enum {
 	QK_LW_709 = 1,
 	QK_LW_2020,
@@ -98,16 +95,6 @@ enum {
 };
 #define QK_LW_DFLT		QK_LW_709
 #define QK_LW_ITEMS		"Rec.709|Rec.2020|Rec.601|Average"
-
-// Picker behavior for the Sample eyedropper (Resolve's +/- pickers).
-enum {
-	QK_PICK_SET = 1,
-	QK_PICK_ADD,
-	QK_PICK_SUB,
-	QK_PICK_NUM
-};
-#define QK_PICK_DFLT	QK_PICK_SET
-#define QK_PICK_ITEMS	"Set Range|Add To Range|Subtract From Range"
 
 // Output popup — order matches qk_core.h QK_OUT_* (value - 1).
 enum {
@@ -132,11 +119,15 @@ enum {
 #define QK_GCHAN_DFLT	QK_GCHAN_ALPHA_P
 #define QK_GCHAN_ITEMS	"Alpha|Alpha Inverted|Luma|Luma Inverted"
 
-// Hue gate: angle params (unbounded, wrap in qk_core) — animating 350->370
-// crosses the seam naturally instead of swinging backward through 180.
-// Default In 0 / Out 360: width wraps to 0 == full circle (all hues pass).
-#define QK_HUE_IN_DFLT			0.0
-#define QK_HUE_OUT_DFLT			360.0
+// Hue gate: Center (angle, unbounded — animating across the 0 seam is smooth,
+// all hue math wraps) + Width (the total arc kept, degrees) + independent
+// Soft In / Soft Out. The host converts Center/Width -> the In/Out edges the
+// gate math uses (QK_BuildGates), so the seam-free kernel is unchanged.
+// Default Width 360 == full circle (all hues pass) -> passthrough at reset.
+#define QK_HUE_CENTER_DFLT		0.0
+#define QK_HUE_WIDTH_MIN		0.0
+#define QK_HUE_WIDTH_MAX		360.0
+#define QK_HUE_WIDTH_DFLT		360.0
 #define QK_HUE_SOFT_MIN			0.0
 #define QK_HUE_SOFT_MAX			180.0
 #define QK_HUE_SOFT_DFLT		5.0
@@ -162,8 +153,11 @@ enum {
 
 // Matte finesse. Denoise / Blur Radius ARE Gaussian sigmas in full-res layer
 // px (downsample-scaled in the render path — never use raw values there).
+// Denoise is deliberately fine: the useful range for killing key sizzle is
+// well under 3px, so the slider tops out at 5 with hundredths precision (the
+// old 0..10/tenths jumped too coarsely — user feedback).
 #define QK_DENOISE_MIN			0.0
-#define QK_DENOISE_MAX			10.0
+#define QK_DENOISE_MAX			5.0
 #define QK_DENOISE_DFLT			0.0
 
 #define QK_CLEAN_MIN			0.0
@@ -205,16 +199,22 @@ enum {
 // Param indices (0 = implicit input layer). On-screen order. Pre-release:
 // order and disk IDs may still change freely; lock both at first ship.
 // ---------------------------------------------------------------------------
+// Layout (top to bottom): three Sample eyedroppers FIRST (Set / Add /
+// Subtract — mirroring Resolve's pick/+pick/-pick buttons, each a plain
+// color swatch since AE does not forward Ctrl/Alt modifiers to an effect's
+// color param); then the three gates (Hue = Center/Width/softs); Output;
+// Matte Finesse; Garbage Matte; and an Advanced group holding the
+// color-science controls (Color Space Override, Luma Weights).
 enum {
 	QK_INPUT = 0,
 	QK_TOPIC_QUAL,			// 1  "Qualifier"
-	QK_QIN,					// 2
-	QK_MODEL,				// 3
-	QK_LUMA_WEIGHTS,		// 4
+	QK_SAMPLE_COLOR,		// 2  (supervised) eyedropper: SET the range
+	QK_SAMPLE_ADD,			// 3  (supervised) eyedropper: ADD to the range
+	QK_SAMPLE_SUB,			// 4  (supervised) eyedropper: SUBTRACT from range
 	QK_TOPIC_HUE,			// 5  "Hue"
 	QK_HUE_ENABLE,			// 6
-	QK_HUE_IN,				// 7  (angle)
-	QK_HUE_OUT,				// 8  (angle)
+	QK_HUE_CENTER,			// 7  (angle)
+	QK_HUE_WIDTH,			// 8
 	QK_HUE_IN_SOFT,			// 9
 	QK_HUE_OUT_SOFT,		// 10
 	QK_TOPIC_HUE_END,		// 11
@@ -232,39 +232,43 @@ enum {
 	QK_LUM_IN_SOFT,			// 23
 	QK_LUM_OUT_SOFT,		// 24
 	QK_TOPIC_LUM_END,		// 25
-	QK_PICKER_MODE,			// 26
-	QK_SAMPLE_COLOR,		// 27 (supervised — the eyedropper)
-	QK_TOPIC_QUAL_END,		// 28
-	QK_OUTPUT,				// 29
-	QK_TOPIC_FINESSE,		// 30 "Matte Finesse"
-	QK_DENOISE,				// 31
-	QK_CLEAN_BLACK,			// 32
-	QK_CLEAN_WHITE,			// 33
-	QK_BLACK_CLIP,			// 34
-	QK_WHITE_CLIP,			// 35
-	QK_BLUR,				// 36
-	QK_RATIO,				// 37
-	QK_TEMPORAL,			// 38 (supervised — greys Attack/Release)
-	QK_ATTACK,				// 39
-	QK_RELEASE,				// 40
-	QK_TOPIC_FINESSE_END,	// 41
-	QK_TOPIC_GARBAGE,		// 42 "Garbage Matte"
-	QK_GARBAGE_LAYER,		// 43
-	QK_GARBAGE_CHAN,		// 44
-	QK_TOPIC_GARBAGE_END,	// 45
+	QK_TOPIC_QUAL_END,		// 26
+	QK_OUTPUT,				// 27
+	QK_TOPIC_FINESSE,		// 28 "Matte Finesse"
+	QK_DENOISE,				// 29
+	QK_CLEAN_BLACK,			// 30
+	QK_CLEAN_WHITE,			// 31
+	QK_BLACK_CLIP,			// 32
+	QK_WHITE_CLIP,			// 33
+	QK_BLUR,				// 34
+	QK_RATIO,				// 35
+	QK_TEMPORAL,			// 36 (supervised — greys Attack/Release)
+	QK_ATTACK,				// 37
+	QK_RELEASE,				// 38
+	QK_TOPIC_FINESSE_END,	// 39
+	QK_TOPIC_GARBAGE,		// 40 "Garbage Matte"
+	QK_GARBAGE_LAYER,		// 41
+	QK_GARBAGE_CHAN,		// 42
+	QK_TOPIC_GARBAGE_END,	// 43
+	QK_TOPIC_ADV,			// 44 "Advanced (Color Science)"
+	QK_QIN,					// 45 Color Space Override
+	QK_LUMA_WEIGHTS,		// 46
+	QK_TOPIC_ADV_END,		// 47
 	QK_NUM_PARAMS
 };
 
-// Disk IDs, parallel to the indices for readability. Lock at first ship.
+// Disk IDs. Pre-release these can still change; keep parallel to indices.
+// NOTE: reused numbers from the previous layout freely — no shipped comps
+// exist yet, so old saved values are not a concern.
 enum {
 	QK_TOPIC_QUAL_DISK_ID = 101,
-	QK_QIN_DISK_ID,					// 102
-	QK_MODEL_DISK_ID,				// 103
-	QK_LUMA_WEIGHTS_DISK_ID,		// 104
+	QK_SAMPLE_COLOR_DISK_ID,		// 102
+	QK_SAMPLE_ADD_DISK_ID,			// 103
+	QK_SAMPLE_SUB_DISK_ID,			// 104
 	QK_TOPIC_HUE_DISK_ID,			// 105
 	QK_HUE_ENABLE_DISK_ID,			// 106
-	QK_HUE_IN_DISK_ID,				// 107
-	QK_HUE_OUT_DISK_ID,				// 108
+	QK_HUE_CENTER_DISK_ID,			// 107
+	QK_HUE_WIDTH_DISK_ID,			// 108
 	QK_HUE_IN_SOFT_DISK_ID,			// 109
 	QK_HUE_OUT_SOFT_DISK_ID,		// 110
 	QK_TOPIC_HUE_END_DISK_ID,		// 111
@@ -282,38 +286,41 @@ enum {
 	QK_LUM_IN_SOFT_DISK_ID,			// 123
 	QK_LUM_OUT_SOFT_DISK_ID,		// 124
 	QK_TOPIC_LUM_END_DISK_ID,		// 125
-	QK_PICKER_MODE_DISK_ID,			// 126
-	QK_SAMPLE_COLOR_DISK_ID,		// 127
-	QK_TOPIC_QUAL_END_DISK_ID,		// 128
-	QK_OUTPUT_DISK_ID,				// 129
-	QK_TOPIC_FINESSE_DISK_ID,		// 130
-	QK_DENOISE_DISK_ID,				// 131
-	QK_CLEAN_BLACK_DISK_ID,			// 132
-	QK_CLEAN_WHITE_DISK_ID,			// 133
-	QK_BLACK_CLIP_DISK_ID,			// 134
-	QK_WHITE_CLIP_DISK_ID,			// 135
-	QK_BLUR_DISK_ID,				// 136
-	QK_RATIO_DISK_ID,				// 137
-	QK_TEMPORAL_DISK_ID,			// 138
-	QK_ATTACK_DISK_ID,				// 139
-	QK_RELEASE_DISK_ID,				// 140
-	QK_TOPIC_FINESSE_END_DISK_ID,	// 141
-	QK_TOPIC_GARBAGE_DISK_ID,		// 142
-	QK_GARBAGE_LAYER_DISK_ID,		// 143
-	QK_GARBAGE_CHAN_DISK_ID,		// 144
-	QK_TOPIC_GARBAGE_END_DISK_ID	// 145
+	QK_TOPIC_QUAL_END_DISK_ID,		// 126
+	QK_OUTPUT_DISK_ID,				// 127
+	QK_TOPIC_FINESSE_DISK_ID,		// 128
+	QK_DENOISE_DISK_ID,				// 129
+	QK_CLEAN_BLACK_DISK_ID,			// 130
+	QK_CLEAN_WHITE_DISK_ID,			// 131
+	QK_BLACK_CLIP_DISK_ID,			// 132
+	QK_WHITE_CLIP_DISK_ID,			// 133
+	QK_BLUR_DISK_ID,				// 134
+	QK_RATIO_DISK_ID,				// 135
+	QK_TEMPORAL_DISK_ID,			// 136
+	QK_ATTACK_DISK_ID,				// 137
+	QK_RELEASE_DISK_ID,				// 138
+	QK_TOPIC_FINESSE_END_DISK_ID,	// 139
+	QK_TOPIC_GARBAGE_DISK_ID,		// 140
+	QK_GARBAGE_LAYER_DISK_ID,		// 141
+	QK_GARBAGE_CHAN_DISK_ID,		// 142
+	QK_TOPIC_GARBAGE_END_DISK_ID,	// 143
+	QK_TOPIC_ADV_DISK_ID,			// 144
+	QK_QIN_DISK_ID,					// 145
+	QK_LUMA_WEIGHTS_DISK_ID,		// 146
+	QK_TOPIC_ADV_END_DISK_ID		// 147
 };
 
 // Snapshot of the checked-out param values for one render. Built fresh per
-// PreRender/SmartRender call — never stored globally (MFR).
+// PreRender/SmartRender call — never stored globally (MFR). Hue is stored as
+// Center/Width on the UI; QK_BuildGates converts to the In/Out the gate math
+// uses, so the seam-free kernel never sees Center/Width.
 typedef struct QK_Params {
-	// gates (hue in degrees; enables as 0/1)
+	// gates
 	A_long		hueEnL, satEnL, lumEnL;
-	PF_FpLong	hueInF, hueOutF, hueInSoftF, hueOutSoftF;
+	PF_FpLong	hueCenterF, hueWidthF, hueInSoftF, hueOutSoftF;
 	PF_FpLong	satInF, satOutF, satInSoftF, satOutSoftF;
 	PF_FpLong	lumInF, lumOutF, lumInSoftF, lumOutSoftF;
 	A_long		qinL;			// QK_QIN_*_P (1-based)
-	A_long		modelL;			// QK_MODEL_*_P
 	A_long		lumaWL;			// QK_LW_*
 	// output
 	A_long		outputL;		// QK_OUTPUT_* (1-based)
@@ -331,11 +338,14 @@ typedef struct QK_Params {
 
 // Host-side popup resolution -> kernel-space QK_Gates. The ONE place popup
 // values become numbers; CPU render, GPU job assembly and the eyedropper all
-// go through this so they cannot disagree.
+// go through this so they cannot disagree. Hue Center/Width -> In/Out here.
 inline void QK_BuildGates(const QK_Params &p, QK_Gates *g)
 {
 	g->hueEn = p.hueEnL ? 1.f : 0.f;
-	g->hueIn = (float)p.hueInF;         g->hueOut = (float)p.hueOutF;
+	// Center C, total Width W -> forward arc [C - W/2, C + W/2]. W == 360
+	// makes In/Out 360 apart, which the gate reads as the full circle.
+	g->hueIn  = (float)(p.hueCenterF - p.hueWidthF * 0.5);
+	g->hueOut = (float)(p.hueCenterF + p.hueWidthF * 0.5);
 	g->hueInSoft = (float)p.hueInSoftF; g->hueOutSoft = (float)p.hueOutSoftF;
 	g->satEn = p.satEnL ? 1.f : 0.f;
 	g->satIn = (float)p.satInF;         g->satOut = (float)p.satOutF;
@@ -351,8 +361,8 @@ inline void QK_BuildGates(const QK_Params &p, QK_Gates *g)
 		case QK_LW_709:
 		default:         g->lumR = 0.2126f;      g->lumG = 0.7152f;      g->lumB = 0.0722f;      break;
 	}
-	g->model = (float)(p.modelL - 1);   // 1-based popup -> QK_MODEL_*
-	g->qin   = (float)(p.qinL   - 1);   // 1-based popup -> QK_QIN_*
+	g->model = (float)QK_MODEL_HSL;     // HSL always (no HSV toggle — matches Resolve)
+	g->qin   = (float)(p.qinL - 1);     // 1-based popup -> QK_QIN_*
 }
 
 extern "C" {
@@ -376,7 +386,14 @@ PF_Err QK_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRende
 PF_Err QK_GPUDeviceSetup(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetupExtra *extra);
 PF_Err QK_GPUDeviceSetdown(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetdownExtra *extra);
 
-// sampling.cpp — eyedropper Set/Add/Subtract (PF_Cmd_USER_CHANGED_PARAM).
-PF_Err QK_ApplySample(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[]);
+// sampling.cpp — eyedropper picking. changedIndex is the swatch that fired
+// (QK_SAMPLE_COLOR / QK_SAMPLE_ADD / QK_SAMPLE_SUB); the picked color is read
+// from that swatch and the op (set/add/subtract) is chosen from which one it
+// was. Returns without changing gates when the color equals the swatch
+// default (a reset restoring the default must NOT re-key — the reset->black
+// bug). PF_Cmd_USER_CHANGED_PARAM.
+enum { QK_PICK_SET = 0, QK_PICK_ADD, QK_PICK_SUB };
+PF_Err QK_ApplySample(PF_InData *in_data, PF_OutData *out_data,
+                      PF_ParamDef *params[], A_long changedIndex);
 
 #endif // MM_QUALIFY_PARAMS_H

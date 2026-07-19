@@ -34,11 +34,19 @@
 /* ---- popup value spaces (0-based, kernel space; params.h popups are
         1-based and the host subtracts 1) ---------------------------------- */
 
+/* Working Space (kernel-space, 0-based). Plain-language: "what is my footage,
+   for the purpose of building the matte?" — the image is NEVER touched, only
+   the qualification COPY. As-Is keys the pixels directly (correct for sRGB /
+   Rec.709 / display AND any already-log-encoded footage — all perceptually
+   spread already). Linear->Log lifts scene-linear (ACEScg / linear) into a
+   log space first, so darks aren't crushed together and the gates behave the
+   way they do in Resolve's ACES timeline. */
 #define QK_QIN_ASIS     0
-#define QK_QIN_GAMMA24  1
-#define QK_QIN_LOG      2
-#define QK_QIN_ACESCCT  3
+#define QK_QIN_LINLOG   1
 
+/* Saturation model. The UI ships HSL only (matches Resolve's qualifier — no
+   HSV toggle); QK_RGBToHS still implements both, and QK_MODEL_HSV stays
+   defined for tests and any future use. */
 #define QK_MODEL_HSV    0
 #define QK_MODEL_HSL    1
 
@@ -86,20 +94,13 @@ QK_FUNC void QK_Straight(float a, float pr, float pg, float pb,
 
 QK_FUNC float QK_QualifyIn1(float x, int mode)
 {
-    if (mode == QK_QIN_GAMMA24) {
-        /* linear -> gamma 2.4 display encoding */
-        return QK_POW(QK_MAX(x, 0.0f), 0.41666667f);
-    }
-    if (mode == QK_QIN_LOG) {
-        /* Cineon-style log: black pedestal 0.0108, 300/1023 per decade.
-           Monotonic, defined for all float inputs via the toe clamp. */
-        float t = x * 0.9892f + 0.0108f;
-        if (t < 1e-6f) t = 1e-6f;
-        return (685.0f + 300.0f * QK_LOG10(t)) * (1.0f / 1023.0f);
-    }
-    if (mode == QK_QIN_ACESCCT) {
-        /* linear (ACEScg) -> ACEScct. Constants = GT_Colour.h. The linear
-           toe segment extends below 0 gracefully (no NaN on negatives). */
+    if (mode == QK_QIN_LINLOG) {
+        /* scene-linear (ACEScg / linear) -> ACEScct log encoding. Constants
+           match GrainMatch GT_Colour.h. The linear toe segment extends below
+           0 gracefully (no NaN on negatives). This is the exact curve
+           Resolve's ACES timeline qualifies in, which is why it "just works"
+           for ACEScg footage: log-spread luma, sane saturation distribution,
+           uniform gate softness. */
         return (x <= 0.0078125f)
             ? (10.5402377416545f * x + 0.0729055341958355f)
             : ((QK_LOG2(x) + 9.72f) / 17.52f);
@@ -249,18 +250,38 @@ QK_FUNC float QK_RawMatte(float r, float g, float b, QK_Gates gp)
    near-black noise to 0 / near-white core to 1; identity at 0) followed by
    Black Clip / White Clip (hard linear levels endpoints). All inputs 0..1
    (percent / 100). Identity at cleanB=cleanW=clipB=0, clipW=1. */
+/* Clean Black / Clean White + Black/White Clip. All args 0..1 (percent/100).
+   Identity at cleanB=cleanW=clipB=0, clipW=1.
+
+   Clean Black raises the matte's black point: everything below the cleanB
+   fraction of the range is forced solid black and the remainder is stretched
+   back to full range with a smooth knee — so mid-grey haze in the "off"
+   region snaps to 0. Clean White is the mirror (lowers the white point).
+   These are applied as gain+lift (Resolve-style), so they bite visibly even
+   on a soft matte, not just a smoothstep near the endpoints.
+
+   Black/White Clip then hard-remap [clipB, clipW] -> [0, 1] with the
+   endpoints clamped (a levels move on the finished matte). */
 QK_FUNC float QK_CleanClip(float m, float cleanB, float cleanW,
                            float clipB, float clipW)
 {
+    /* Clean Black: pull the low end down. cleanB up to ~0.9 of the range;
+       a soft knee (smoothstep) over the pulled region keeps edges from
+       hardening into a staircase. */
     if (cleanB > 0.0f) {
-        float t = m / cleanB;
-        if (t < 1.0f) { t = QK_MAX(t, 0.0f); m = m * (t * t * (3.0f - 2.0f * t)); }
+        float lo = cleanB * 0.98f;                 /* black point, < 1 */
+        float t = (m - lo) / (1.0f - lo);          /* renormalize above lo */
+        t = QK_SAT(t);
+        m = t * t * (3.0f - 2.0f * t);             /* smooth knee */
     }
+    /* Clean White: push the high end up (mirror of Clean Black). */
     if (cleanW > 0.0f) {
-        float im = 1.0f - m;
-        float t = im / cleanW;
-        if (t < 1.0f) { t = QK_MAX(t, 0.0f); m = 1.0f - im * (t * t * (3.0f - 2.0f * t)); }
+        float hi = 1.0f - cleanW * 0.98f;          /* white point, > 0 */
+        float t = m / (hi > 1e-6f ? hi : 1e-6f);
+        t = QK_SAT(t);
+        m = t * t * (3.0f - 2.0f * t);
     }
+    /* Black/White Clip: hard levels on the result. */
     if (clipW - clipB > 1e-6f) m = (m - clipB) / (clipW - clipB);
     else                       m = (m <= clipB) ? 0.0f : 1.0f;
     return QK_SAT(m);
