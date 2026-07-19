@@ -246,61 +246,68 @@ QK_FUNC float QK_RawMatte(float r, float g, float b, QK_Gates gp)
 
 /* ---- matte finesse: per-pixel stages ------------------------------------ */
 
-/* Clean Black / Clean White (soft thresholds — smoothstep-weighted push of
-   near-black noise to 0 / near-white core to 1; identity at 0) followed by
-   Black Clip / White Clip (hard linear levels endpoints). All inputs 0..1
-   (percent / 100). Identity at cleanB=cleanW=clipB=0, clipW=1. */
 /* Clean Black / Clean White + Black/White Clip. All args 0..1 (percent/100).
    Identity at cleanB=cleanW=clipB=0, clipW=1.
 
-   Clean Black raises the matte's black point: everything below the cleanB
-   fraction of the range is forced solid black and the remainder is stretched
-   back to full range with a smooth knee — so mid-grey haze in the "off"
-   region snaps to 0. Clean White is the mirror (lowers the white point).
-   These are applied as gain+lift (Resolve-style), so they bite visibly even
-   on a soft matte, not just a smoothstep near the endpoints.
+   These reshape the matte's soft ramp (so they act on a FEATHERED key, not a
+   binary one). Deliberately STRONG — a little slider goes a long way, like
+   Resolve's equivalents:
 
-   Black/White Clip then hard-remap [clipB, clipW] -> [0, 1] with the
-   endpoints clamped (a levels move on the finished matte). */
+   Clean Black raises the black point AND applies an expanding gamma, so haze
+   in the "off" region collapses to solid black fast. At full it drives the
+   lower ~85% of the range to 0. Clean White is the mirror on the high end.
+
+   Black/White Clip are a hard levels remap of [clipB, clipW] -> [0,1] with a
+   generous gain: even a small clip visibly crushes the toe / shoulder. */
 QK_FUNC float QK_CleanClip(float m, float cleanB, float cleanW,
                            float clipB, float clipW)
 {
-    /* Clean Black: pull the low end down. cleanB up to ~0.9 of the range;
-       a soft knee (smoothstep) over the pulled region keeps edges from
-       hardening into a staircase. */
+    /* Clean Black: lift the black point to up to 0.85 of the range, then an
+       expanding power curve (gamma up to 4) crushes what remains below it.
+       Front-loaded: 25% already noticeably eats haze. */
     if (cleanB > 0.0f) {
-        float lo = cleanB * 0.98f;                 /* black point, < 1 */
-        float t = (m - lo) / (1.0f - lo);          /* renormalize above lo */
+        float lo = cleanB * 0.85f;
+        float t = (m - lo) / (1.0f - lo);
         t = QK_SAT(t);
-        m = t * t * (3.0f - 2.0f * t);             /* smooth knee */
+        float gamma = 1.0f + 3.0f * cleanB;        /* 1 -> 4 */
+        m = QK_POW(t, gamma);
     }
-    /* Clean White: push the high end up (mirror of Clean Black). */
+    /* Clean White: mirror — drop the white point and expand the top up to 1. */
     if (cleanW > 0.0f) {
-        float hi = 1.0f - cleanW * 0.98f;          /* white point, > 0 */
+        float hi = 1.0f - cleanW * 0.85f;
         float t = m / (hi > 1e-6f ? hi : 1e-6f);
         t = QK_SAT(t);
-        m = t * t * (3.0f - 2.0f * t);
+        float gamma = 1.0f + 3.0f * cleanW;
+        m = 1.0f - QK_POW(1.0f - t, gamma);
     }
-    /* Black/White Clip: hard levels on the result. */
+    /* Black/White Clip: hard levels remap [clipB, clipW] -> [0,1]. clipB is
+       the black cut point (default 0), clipW the white cut point (default 1).
+       As they close in, the ramp between them steepens toward a threshold. */
     if (clipW - clipB > 1e-6f) m = (m - clipB) / (clipW - clipB);
     else                       m = (m <= clipB) ? 0.0f : 1.0f;
     return QK_SAT(m);
 }
 
-/* In/Out Ratio: bias the blurred matte edge inward (shrink, ratio < 0) or
-   outward (grow, ratio > 0). Classic blur-then-remap: piecewise-linear gain
-   that pins 0 and 1 and moves the ramp. ratio in [-1, 1]; identity at 0. */
+/* In/Out Ratio: bias the (blurred) matte edge outward (grow, ratio > 0) or
+   inward (shrink, ratio < 0) by remapping the soft ramp — this only moves an
+   edge that HAS a ramp, so pair it with Blur Radius. ratio in [-1, 1],
+   identity at 0. Deliberately strong: the remap threshold sweeps almost the
+   whole [0,1] range across the slider, so a modest value visibly chokes or
+   spreads the edge.
+
+   Grow: pull the 50% crossing DOWN toward 0 (more pixels reach full), up to
+   near 0 at ratio 1. Shrink: push it UP toward 1. Implemented as a threshold
+   + steep gain around it. */
 QK_FUNC float QK_InOutRatio(float m, float ratio)
 {
-    if (ratio > 0.0f) {
-        float d = 1.0f - ratio;
-        m = (d > 1e-6f) ? (m / d) : ((m > 0.0f) ? 1.0f : 0.0f);
-    } else if (ratio < 0.0f) {
-        float s = -ratio;
-        float d = 1.0f - s;
-        m = (d > 1e-6f) ? ((m - s) / d) : ((m >= 1.0f) ? 1.0f : 0.0f);
-    }
-    return QK_SAT(m);
+    if (ratio > -1e-6f && ratio < 1e-6f) return QK_SAT(m);
+
+    /* Threshold the ramp should re-center on. Grow (ratio>0) moves it toward
+       0.05; shrink (ratio<0) toward 0.95. Gain steepens with |ratio|. */
+    float thresh = 0.5f - 0.45f * ratio;       /* 0.95 .. 0.05 */
+    float gain   = 1.0f + 8.0f * QK_ABS(ratio); /* 1 .. 9 */
+    float m2 = (m - thresh) * gain + 0.5f;
+    return QK_SAT(m2);
 }
 
 /* ---- temporal stabilize (MM IIR module, shared design w/ BlemishRepair) - */
