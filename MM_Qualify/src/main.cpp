@@ -35,14 +35,17 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 {
 	out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION,
 									  STAGE_VERSION, BUILD_VERSION);
-	// Must match resources/MM_QualifyPiPL.r literals exactly (0x06000442 /
+	// Must match resources/MM_QualifyPiPL.r literals exactly (0x06008442 /
 	// 0x2A001400) or AE rejects the plugin with an outflags mismatch.
 	// WIDE_TIME_INPUT: temporal stabilize checks out source frames at t-1..
 	// t-QK_TEMPORAL_WINDOW in PreRender.
+	// CUSTOM_UI: the viewer eyedropper (picker.cpp) takes comp/layer-window
+	// events so a click lands on the IMAGE and can be mapped to a layer pixel.
 	out_data->out_flags  = PF_OutFlag_DEEP_COLOR_AWARE     |
 						   PF_OutFlag_PIX_INDEPENDENT      |
 						   PF_OutFlag_USE_OUTPUT_EXTENT    |
 						   PF_OutFlag_SEND_UPDATE_PARAMS_UI |   // grey Attack/Release
+						   PF_OutFlag_CUSTOM_UI             |   // viewer eyedropper
 						   PF_OutFlag_WIDE_TIME_INPUT;
 	out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE         |
 						   PF_OutFlag2_SUPPORTS_SMART_RENDER     |
@@ -63,24 +66,19 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_TOPIC("Qualifier", QK_TOPIC_QUAL_DISK_ID);
 
-	// --- Sampling FIRST — the first thing the artist reaches for. Three
-	// eyedropper swatches mirror Resolve's pick / +pick / -pick buttons
-	// (AE does not forward Ctrl/Alt to a color param, so the operation is
-	// the swatch identity, not a modifier). All SUPERVISE so a pick fires
-	// PF_Cmd_USER_CHANGED_PARAM -> QK_ApplySample. A reset restoring the
-	// default grey is ignored there (reset->black guard). Ctrl-click any
-	// eyedropper for AE's native 5x5 average sample.
+	// --- Sampling FIRST — the first thing the artist reaches for. ONE button
+	// arms the viewer eyedropper (picker.cpp); the next click/drag in the comp
+	// or layer viewer builds the key from the PRE-EFFECT pixel, so the current
+	// Output view (Selection Overlay et al) cannot contaminate a sample.
+	// Because a comp/layer custom UI DOES receive modifiers — unlike a colour
+	// param — the operation is the modifier, not three separate swatches:
+	//     click = Set   ·   Ctrl-click = Add   ·   Alt-click = Subtract
+	// Dragging GROWS the selection across everything swept (Resolve's feel).
+	// SUPERVISE so the press fires PF_Cmd_USER_CHANGED_PARAM -> QK_ArmPicker.
 	AEFX_CLR_STRUCT(def);
 	def.flags = PF_ParamFlag_SUPERVISE;
-	PF_ADD_COLOR("Sample", 128, 128, 128, QK_SAMPLE_COLOR_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
-	def.flags = PF_ParamFlag_SUPERVISE;
-	PF_ADD_COLOR("Sample +", 128, 128, 128, QK_SAMPLE_ADD_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
-	def.flags = PF_ParamFlag_SUPERVISE;
-	PF_ADD_COLOR("Sample -", 128, 128, 128, QK_SAMPLE_SUB_DISK_ID);
+	PF_ADD_BUTTON("Sample", "Click / drag in viewer",
+		PF_ParamFlag_SUPERVISE, PF_PUI_NONE, QK_SAMPLE_BUTTON_DISK_ID);
 
 	// --- Hue gate. Center is an ANGLE (unbounded — animating across the 0°
 	// seam is smooth; all hue math wraps in qk_core.h). Width is the total
@@ -355,16 +353,28 @@ PF_Err EffectMain(PF_Cmd cmd, PF_InData *in_data, PF_OutData *out_data,
 			case PF_Cmd_GPU_DEVICE_SETDOWN: err = QK_GPUDeviceSetdown(in_data, out_data, (PF_GPUDeviceSetdownExtra*)extra); break;
 			case PF_Cmd_SMART_RENDER_GPU:   err = QK_SmartRenderGPU(in_data, out_data, (PF_SmartRenderExtra*)extra);        break;
 
-			// Eyedropper (Sample changed) + Attack/Release grey-out. The UI
-			// pass also fires on load/undo/preset so the disabled state is
+			// Sequence data — transient picker state only (picker.cpp).
+			// RESETUP arrives after a load/duplicate; the flattened copy holds
+			// no live state, so both paths just allocate a zeroed block.
+			case PF_Cmd_SEQUENCE_SETUP:    err = QK_SeqSetup(in_data, out_data);     break;
+			case PF_Cmd_SEQUENCE_RESETUP:  err = QK_SeqUnflatten(in_data, out_data); break;
+			case PF_Cmd_SEQUENCE_SETDOWN:  err = QK_SeqSetdown(in_data, out_data);   break;
+			case PF_Cmd_SEQUENCE_FLATTEN:  err = QK_SeqFlatten(in_data, out_data);   break;
+
+			// Viewer eyedropper: clicks/drags in the comp or layer window.
+			case PF_Cmd_EVENT:
+				err = QK_HandleEvent(in_data, out_data, params,
+				                     static_cast<PF_EventExtra*>(extra));
+				break;
+
+			// Sample button (arms the picker) + Attack/Release grey-out. The
+			// UI pass also fires on load/undo/preset so the disabled state is
 			// correct without a user edit.
 			case PF_Cmd_USER_CHANGED_PARAM: {
 				const PF_UserChangedParamExtra *uc =
 					static_cast<const PF_UserChangedParamExtra*>(extra);
-				if (uc && (uc->param_index == QK_SAMPLE_COLOR ||
-				           uc->param_index == QK_SAMPLE_ADD ||
-				           uc->param_index == QK_SAMPLE_SUB))
-					err = QK_ApplySample(in_data, out_data, params, uc->param_index);
+				if (uc && uc->param_index == QK_SAMPLE_BUTTON)
+					err = QK_ArmPicker(in_data, out_data);
 				else if (uc && uc->param_index == QK_TEMPORAL)
 					err = QK_UpdateTemporalEnable(in_data, out_data, params);
 				break;

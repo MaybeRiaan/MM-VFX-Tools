@@ -37,6 +37,7 @@ set(QK_SOURCES
     ${SRC_DIR}/main.cpp
     ${SRC_DIR}/smart_render.cpp
     ${SRC_DIR}/sampling.cpp
+    ${SRC_DIR}/picker.cpp
     ${SRC_DIR}/blur.cpp
     ${SRC_DIR}/garbage.cpp
     ${SRC_DIR}/common/MM_Common.cpp

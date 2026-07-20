@@ -62,10 +62,12 @@ resource 'PiPL' (16000) {
 		// MUST match what GlobalSetup() sets at runtime, or AE rejects with
 		// "global outflags mismatch". See src/main.cpp GlobalSetup.
 		// out_flags  = WIDE_TIME_INPUT | USE_OUTPUT_EXTENT | PIX_INDEPENDENT
-		//              | DEEP_COLOR_AWARE | SEND_UPDATE_PARAMS_UI
-		//            = 0x2 | 0x40 | 0x400 | 0x02000000 | 0x04000000 = 0x06000442
+		//              | CUSTOM_UI | DEEP_COLOR_AWARE | SEND_UPDATE_PARAMS_UI
+		//            = 0x2 | 0x40 | 0x400 | 0x8000 | 0x02000000 | 0x04000000
+		//            = 0x06008442
+		// CUSTOM_UI is for the viewer eyedropper (src/picker.cpp).
 		AE_Effect_Global_OutFlags {
-		0x06000442
+		0x06008442
 		},
 		// out_flags2 = SUPPORTS_SMART_RENDER | FLOAT_COLOR_AWARE
 		//              | SUPPORTS_GPU_RENDER_F32 | SUPPORTS_THREADED_RENDERING

@@ -218,59 +218,58 @@ enum {
 // Param indices (0 = implicit input layer). On-screen order. Pre-release:
 // order and disk IDs may still change freely; lock both at first ship.
 // ---------------------------------------------------------------------------
-// Layout (top to bottom): three Sample eyedroppers FIRST (Set / Add /
-// Subtract — mirroring Resolve's pick/+pick/-pick buttons, each a plain
-// color swatch since AE does not forward Ctrl/Alt modifiers to an effect's
-// color param); then the three gates (Hue = Center/Width/softs); Output;
-// Matte Finesse; Garbage Matte; and an Advanced group holding the
-// color-science controls (Color Space Override, Luma Weights).
+// Layout (top to bottom): the Sample button FIRST (arms the viewer eyedropper
+// — see picker.cpp; one button replaces the old Set/Add/Subtract swatch trio
+// because a comp/layer-window custom UI DOES receive Ctrl/Alt modifiers, so
+// the operation is a modifier rather than a separate control); then the three
+// gates (Hue = Center/Width/softs); Output; Matte Finesse; Garbage Matte; and
+// an Advanced group holding the color-science controls (Color Space Override,
+// Luma Weights).
 enum {
 	QK_INPUT = 0,
 	QK_TOPIC_QUAL,			// 1  "Qualifier"
-	QK_SAMPLE_COLOR,		// 2  (supervised) eyedropper: SET the range
-	QK_SAMPLE_ADD,			// 3  (supervised) eyedropper: ADD to the range
-	QK_SAMPLE_SUB,			// 4  (supervised) eyedropper: SUBTRACT from range
-	QK_TOPIC_HUE,			// 5  "Hue"
-	QK_HUE_ENABLE,			// 6
-	QK_HUE_CENTER,			// 7  (angle)
-	QK_HUE_WIDTH,			// 8
-	QK_HUE_IN_SOFT,			// 9
-	QK_HUE_OUT_SOFT,		// 10
-	QK_TOPIC_HUE_END,		// 11
-	QK_TOPIC_SAT,			// 12 "Saturation"
-	QK_SAT_ENABLE,			// 13
-	QK_SAT_IN,				// 14
-	QK_SAT_OUT,				// 15
-	QK_SAT_IN_SOFT,			// 16
-	QK_SAT_OUT_SOFT,		// 17
-	QK_TOPIC_SAT_END,		// 18
-	QK_TOPIC_LUM,			// 19 "Luma"
-	QK_LUM_ENABLE,			// 20
-	QK_LUM_IN,				// 21
-	QK_LUM_OUT,				// 22
-	QK_LUM_IN_SOFT,			// 23
-	QK_LUM_OUT_SOFT,		// 24
-	QK_TOPIC_LUM_END,		// 25
-	QK_TOPIC_QUAL_END,		// 26
-	QK_OUTPUT,				// 27
-	QK_TOPIC_FINESSE,		// 28 "Matte Finesse"
-	QK_DENOISE,				// 29
-	QK_BLUR,				// 30
-	QK_RATIO,				// 31
-	QK_BLACK_CLIP,			// 32
-	QK_WHITE_CLIP,			// 33
-	QK_TEMPORAL,			// 34 (supervised — greys Attack/Release)
-	QK_ATTACK,				// 35
-	QK_RELEASE,				// 36
-	QK_TOPIC_FINESSE_END,	// 37
-	QK_TOPIC_GARBAGE,		// 38 "Garbage Matte"
-	QK_GARBAGE_LAYER,		// 39
-	QK_GARBAGE_CHAN,		// 40
-	QK_TOPIC_GARBAGE_END,	// 41
-	QK_TOPIC_ADV,			// 42 "Advanced (Color Science)"
-	QK_QIN,					// 43 Color Space Override
-	QK_LUMA_WEIGHTS,		// 44
-	QK_TOPIC_ADV_END,		// 45
+	QK_SAMPLE_BUTTON,		// 2  arms the viewer eyedropper (picker.cpp)
+	QK_TOPIC_HUE,			// 3  "Hue"
+	QK_HUE_ENABLE,			// 4
+	QK_HUE_CENTER,			// 5  (angle)
+	QK_HUE_WIDTH,			// 6
+	QK_HUE_IN_SOFT,			// 7
+	QK_HUE_OUT_SOFT,		// 8
+	QK_TOPIC_HUE_END,		// 9
+	QK_TOPIC_SAT,			// 10 "Saturation"
+	QK_SAT_ENABLE,			// 11
+	QK_SAT_IN,				// 12
+	QK_SAT_OUT,				// 13
+	QK_SAT_IN_SOFT,			// 14
+	QK_SAT_OUT_SOFT,		// 15
+	QK_TOPIC_SAT_END,		// 16
+	QK_TOPIC_LUM,			// 17 "Luma"
+	QK_LUM_ENABLE,			// 18
+	QK_LUM_IN,				// 19
+	QK_LUM_OUT,				// 20
+	QK_LUM_IN_SOFT,			// 21
+	QK_LUM_OUT_SOFT,		// 22
+	QK_TOPIC_LUM_END,		// 23
+	QK_TOPIC_QUAL_END,		// 24
+	QK_OUTPUT,				// 25
+	QK_TOPIC_FINESSE,		// 26 "Matte Finesse"
+	QK_DENOISE,				// 27
+	QK_BLUR,				// 28
+	QK_RATIO,				// 29
+	QK_BLACK_CLIP,			// 30
+	QK_WHITE_CLIP,			// 31
+	QK_TEMPORAL,			// 32 (supervised — greys Attack/Release)
+	QK_ATTACK,				// 33
+	QK_RELEASE,				// 34
+	QK_TOPIC_FINESSE_END,	// 35
+	QK_TOPIC_GARBAGE,		// 36 "Garbage Matte"
+	QK_GARBAGE_LAYER,		// 37
+	QK_GARBAGE_CHAN,		// 38
+	QK_TOPIC_GARBAGE_END,	// 39
+	QK_TOPIC_ADV,			// 40 "Advanced (Color Science)"
+	QK_QIN,					// 41 Color Space Override
+	QK_LUMA_WEIGHTS,		// 42
+	QK_TOPIC_ADV_END,		// 43
 	QK_NUM_PARAMS
 };
 
@@ -279,50 +278,48 @@ enum {
 // exist yet, so old saved values are not a concern.
 enum {
 	QK_TOPIC_QUAL_DISK_ID = 101,
-	QK_SAMPLE_COLOR_DISK_ID,		// 102
-	QK_SAMPLE_ADD_DISK_ID,			// 103
-	QK_SAMPLE_SUB_DISK_ID,			// 104
-	QK_TOPIC_HUE_DISK_ID,			// 105
-	QK_HUE_ENABLE_DISK_ID,			// 106
-	QK_HUE_CENTER_DISK_ID,			// 107
-	QK_HUE_WIDTH_DISK_ID,			// 108
-	QK_HUE_IN_SOFT_DISK_ID,			// 109
-	QK_HUE_OUT_SOFT_DISK_ID,		// 110
-	QK_TOPIC_HUE_END_DISK_ID,		// 111
-	QK_TOPIC_SAT_DISK_ID,			// 112
-	QK_SAT_ENABLE_DISK_ID,			// 113
-	QK_SAT_IN_DISK_ID,				// 114
-	QK_SAT_OUT_DISK_ID,				// 115
-	QK_SAT_IN_SOFT_DISK_ID,			// 116
-	QK_SAT_OUT_SOFT_DISK_ID,		// 117
-	QK_TOPIC_SAT_END_DISK_ID,		// 118
-	QK_TOPIC_LUM_DISK_ID,			// 119
-	QK_LUM_ENABLE_DISK_ID,			// 120
-	QK_LUM_IN_DISK_ID,				// 121
-	QK_LUM_OUT_DISK_ID,				// 122
-	QK_LUM_IN_SOFT_DISK_ID,			// 123
-	QK_LUM_OUT_SOFT_DISK_ID,		// 124
-	QK_TOPIC_LUM_END_DISK_ID,		// 125
-	QK_TOPIC_QUAL_END_DISK_ID,		// 126
-	QK_OUTPUT_DISK_ID,				// 127
-	QK_TOPIC_FINESSE_DISK_ID,		// 128
-	QK_DENOISE_DISK_ID,				// 129
-	QK_BLUR_DISK_ID,				// 130
-	QK_RATIO_DISK_ID,				// 131
-	QK_BLACK_CLIP_DISK_ID,			// 132
-	QK_WHITE_CLIP_DISK_ID,			// 133
-	QK_TEMPORAL_DISK_ID,			// 134
-	QK_ATTACK_DISK_ID,				// 135
-	QK_RELEASE_DISK_ID,				// 136
-	QK_TOPIC_FINESSE_END_DISK_ID,	// 139
-	QK_TOPIC_GARBAGE_DISK_ID,		// 140
-	QK_GARBAGE_LAYER_DISK_ID,		// 141
-	QK_GARBAGE_CHAN_DISK_ID,		// 142
-	QK_TOPIC_GARBAGE_END_DISK_ID,	// 143
-	QK_TOPIC_ADV_DISK_ID,			// 144
-	QK_QIN_DISK_ID,					// 145
-	QK_LUMA_WEIGHTS_DISK_ID,		// 146
-	QK_TOPIC_ADV_END_DISK_ID		// 147
+	QK_SAMPLE_BUTTON_DISK_ID,		// 102 (was the Set/Add/Sub swatch trio)
+	QK_TOPIC_HUE_DISK_ID,			// 103
+	QK_HUE_ENABLE_DISK_ID,			// 104
+	QK_HUE_CENTER_DISK_ID,			// 105
+	QK_HUE_WIDTH_DISK_ID,			// 106
+	QK_HUE_IN_SOFT_DISK_ID,			// 107
+	QK_HUE_OUT_SOFT_DISK_ID,		// 108
+	QK_TOPIC_HUE_END_DISK_ID,		// 109
+	QK_TOPIC_SAT_DISK_ID,			// 110
+	QK_SAT_ENABLE_DISK_ID,			// 111
+	QK_SAT_IN_DISK_ID,				// 112
+	QK_SAT_OUT_DISK_ID,				// 113
+	QK_SAT_IN_SOFT_DISK_ID,			// 114
+	QK_SAT_OUT_SOFT_DISK_ID,		// 115
+	QK_TOPIC_SAT_END_DISK_ID,		// 116
+	QK_TOPIC_LUM_DISK_ID,			// 117
+	QK_LUM_ENABLE_DISK_ID,			// 118
+	QK_LUM_IN_DISK_ID,				// 119
+	QK_LUM_OUT_DISK_ID,				// 120
+	QK_LUM_IN_SOFT_DISK_ID,			// 121
+	QK_LUM_OUT_SOFT_DISK_ID,		// 122
+	QK_TOPIC_LUM_END_DISK_ID,		// 123
+	QK_TOPIC_QUAL_END_DISK_ID,		// 124
+	QK_OUTPUT_DISK_ID,				// 125
+	QK_TOPIC_FINESSE_DISK_ID,		// 126
+	QK_DENOISE_DISK_ID,				// 127
+	QK_BLUR_DISK_ID,				// 128
+	QK_RATIO_DISK_ID,				// 129
+	QK_BLACK_CLIP_DISK_ID,			// 130
+	QK_WHITE_CLIP_DISK_ID,			// 131
+	QK_TEMPORAL_DISK_ID,			// 132
+	QK_ATTACK_DISK_ID,				// 133
+	QK_RELEASE_DISK_ID,				// 134
+	QK_TOPIC_FINESSE_END_DISK_ID,	// 135
+	QK_TOPIC_GARBAGE_DISK_ID,		// 136
+	QK_GARBAGE_LAYER_DISK_ID,		// 137
+	QK_GARBAGE_CHAN_DISK_ID,		// 138
+	QK_TOPIC_GARBAGE_END_DISK_ID,	// 139
+	QK_TOPIC_ADV_DISK_ID,			// 140
+	QK_QIN_DISK_ID,					// 141
+	QK_LUMA_WEIGHTS_DISK_ID,		// 142
+	QK_TOPIC_ADV_END_DISK_ID		// 143
 };
 
 // Snapshot of the checked-out param values for one render. Built fresh per
@@ -407,14 +404,64 @@ PF_Err QK_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRende
 PF_Err QK_GPUDeviceSetup(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetupExtra *extra);
 PF_Err QK_GPUDeviceSetdown(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetdownExtra *extra);
 
-// sampling.cpp — eyedropper picking. changedIndex is the swatch that fired
-// (QK_SAMPLE_COLOR / QK_SAMPLE_ADD / QK_SAMPLE_SUB); the picked color is read
-// from that swatch and the op (set/add/subtract) is chosen from which one it
-// was. Returns without changing gates when the color equals the swatch
-// default (a reset restoring the default must NOT re-key — the reset->black
-// bug). PF_Cmd_USER_CHANGED_PARAM.
+// ---------------------------------------------------------------------------
+// Eyedropper picking (sampling.cpp + picker.cpp)
+// ---------------------------------------------------------------------------
+
+// The three ops, chosen by the click modifier in the viewer (picker.cpp):
+// plain = SET, Ctrl/Cmd = ADD, Alt/Opt = SUB.
 enum { QK_PICK_SET = 0, QK_PICK_ADD, QK_PICK_SUB };
-PF_Err QK_ApplySample(PF_InData *in_data, PF_OutData *out_data,
-                      PF_ParamDef *params[], A_long changedIndex);
+
+// Running envelope of everything swept during ONE gesture (press..release).
+// A drag GROWS the selection (Resolve behaviour): the first sample seeds the
+// envelope, every later sample unions into it, and the gates are rewritten
+// from the envelope each time. Accumulating an envelope rather than applying
+// repeated pairwise edits keeps growth monotonic and makes the result
+// independent of drag direction/speed.
+//
+// Hue is circular, so it cannot be a plain min/max: we keep the first sample
+// as an anchor and track the signed angular extent either side of it
+// (hueNegF <= 0 <= huePosF, degrees). Center/Width fall out as
+// anchor + (pos+neg)/2 and (pos-neg).
+typedef struct QK_PickEnvelope {
+	A_long		validB;			// 0 until the first sample lands
+	PF_FpLong	hueAnchorF;		// degrees, first sample's hue
+	PF_FpLong	hueNegF, huePosF;	// signed extent around the anchor
+	PF_FpLong	satMinF, satMaxF;
+	PF_FpLong	lumMinF, lumMaxF;
+} QK_PickEnvelope;
+
+// Per-instance picker state. Lives in sequence data (NEVER a global/static —
+// the MFR rule). Gesture state is transient: it is zeroed on unflatten, so a
+// project saved mid-gesture reopens disarmed.
+typedef struct QK_SeqData {
+	A_long			armedB;			// Sample button pressed, waiting for a click
+	A_long			gestureB;		// inside press..release
+	A_long			modeL;			// QK_PICK_* latched at press
+	QK_PickEnvelope	env;
+} QK_SeqData;
+
+// sampling.cpp — apply a sampled colour to the gates. The colour arrives as
+// LINEAR-ish float RGB straight from the upstream (pre-effect) frame, already
+// promoted from whatever bit depth the world was. `mode` is the latched
+// QK_PICK_*; `env` accumulates across a drag and is rewritten in place.
+// Called from picker.cpp during PF_Cmd_EVENT.
+PF_Err QK_ApplySampleRGB(PF_InData *in_data, PF_OutData *out_data,
+                         PF_ParamDef *params[], A_long mode,
+                         PF_FpLong r, PF_FpLong g, PF_FpLong b,
+                         QK_PickEnvelope *env);
+
+// picker.cpp — the viewer eyedropper. QK_HandleEvent runs the comp/layer
+// window custom UI: DO_CLICK latches the modifier and checks out ONE upstream
+// (pre-effect) frame for the whole gesture, DRAG samples from that held frame,
+// and the final drag (last_time) checks it in. QK_ArmPicker is the Sample
+// button handler.
+PF_Err QK_HandleEvent(PF_InData *in_data, PF_OutData *out_data,
+                      PF_ParamDef *params[], PF_EventExtra *extra);
+PF_Err QK_ArmPicker(PF_InData *in_data, PF_OutData *out_data);
+PF_Err QK_SeqSetup(PF_InData *in_data, PF_OutData *out_data);
+PF_Err QK_SeqSetdown(PF_InData *in_data, PF_OutData *out_data);
+PF_Err QK_SeqFlatten(PF_InData *in_data, PF_OutData *out_data);
+PF_Err QK_SeqUnflatten(PF_InData *in_data, PF_OutData *out_data);
 
 #endif // MM_QUALIFY_PARAMS_H
