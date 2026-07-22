@@ -23,6 +23,8 @@
 
 #pragma once
 
+#include "MM_Parallel.h"
+
 #include <vector>
 #include <cmath>
 #include <cstdint>
@@ -95,28 +97,48 @@ inline void DT_1D(double *f, int n, int *v, double *z)
 template <typename SeedT>
 inline void EuclideanDistanceTransform(const SeedT *seed, float *out, int W, int H)
 {
-    std::vector<double> f((size_t)W * H);
+    // Squared-distance working buffer. thread_local + grow-only so repeated
+    // frames on the same worker thread never reallocate (Stage 5 "kill per-
+    // frame allocation"), while staying per-thread (MFR-safe) and headlessly
+    // testable. Fully overwritten below, so stale contents are irrelevant.
+    static thread_local std::vector<double> fbuf;
+    const size_t NN = (size_t)W * H;
+    if (fbuf.size() < NN) fbuf.resize(NN);
+    double *f = fbuf.data();
 
     // Seed → initial squared distance: 0 at seeds, +INF elsewhere.
     for (size_t i = 0, n = (size_t)W * H; i < n; ++i)
         f[i] = seed[i] ? 0.0 : DT_INF();
 
-    const int maxdim = W > H ? W : H;
-    std::vector<int>    v(maxdim);
-    std::vector<double> z(maxdim + 1);
-    std::vector<double> col(H);
+    // Both passes fan out per line via mm::ParallelFor (serial in the headless
+    // tests, iterate_generic inside AE). Each line's DT_1D touches only its own
+    // column/row of f, so the work items are disjoint and the result is byte-
+    // identical to the serial code regardless of thread count. Scratch (v/z and
+    // a per-thread column buffer) is thread_local — one allocation per worker
+    // thread, reused across every line, pass, and frame (no per-frame churn).
 
-    // Pass 1 — columns (vertical).
-    for (int x = 0; x < W; ++x) {
-        for (int y = 0; y < H; ++y) col[y] = f[(size_t)y * W + x];
+    // Pass 1 — columns (vertical). Body owns column x.
+    double *fp = f;
+    ParallelFor(W, [=](int /*threadIndex*/, int x) {
+        thread_local std::vector<int>    v;
+        thread_local std::vector<double> z;
+        thread_local std::vector<double> col;
+        if ((int)v.size()   < H)     v.resize(H);
+        if ((int)z.size()   < H + 1) z.resize(H + 1);
+        if ((int)col.size() < H)     col.resize(H);
+        for (int y = 0; y < H; ++y) col[y] = fp[(size_t)y * W + x];
         DT_1D(col.data(), H, v.data(), z.data());
-        for (int y = 0; y < H; ++y) f[(size_t)y * W + x] = col[y];
-    }
+        for (int y = 0; y < H; ++y) fp[(size_t)y * W + x] = col[y];
+    });
 
-    // Pass 2 — rows (horizontal), in place on each row.
-    for (int y = 0; y < H; ++y) {
-        DT_1D(f.data() + (size_t)y * W, W, v.data(), z.data());
-    }
+    // Pass 2 — rows (horizontal), in place on each row. Body owns row y.
+    ParallelFor(H, [=](int /*threadIndex*/, int y) {
+        thread_local std::vector<int>    v;
+        thread_local std::vector<double> z;
+        if ((int)v.size() < W)     v.resize(W);
+        if ((int)z.size() < W + 1) z.resize(W + 1);
+        DT_1D(fp + (size_t)y * W, W, v.data(), z.data());
+    });
 
     for (size_t i = 0, n = (size_t)W * H; i < n; ++i)
         out[i] = (float)std::sqrt(f[i]);

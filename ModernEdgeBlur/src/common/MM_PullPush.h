@@ -43,6 +43,8 @@
 
 #pragma once
 
+#include "MM_Parallel.h"
+
 #include <vector>
 #include <cstdint>
 #include <utility>
@@ -111,11 +113,20 @@ inline bool PullPushFill(const float *argb, const uint8_t *valid,
     if (W <= 0 || H <= 0) return false;
     const size_t N = (size_t)W * H;
 
-    std::vector<detail_pp::PPLevel> chain;
-    chain.emplace_back();
+    // The mip chain is thread_local and reused across frames: its level count
+    // and per-level sizes are a deterministic function of W×H, so after the
+    // first frame at a given resolution NO level reallocates (grow-only .px),
+    // killing the Stage 5 per-frame allocation churn. Per-thread → MFR-safe.
+    // We size level 0 here, build coarser levels in the pull loop, and track a
+    // live level count (the persistent vector may hold larger leftovers from a
+    // previous, bigger frame — we ignore anything past `nLevels`).
+    static thread_local std::vector<detail_pp::PPLevel> chain;
+    if (chain.empty()) chain.emplace_back();
+    int nLevels = 1;
     chain[0].W = W;
     chain[0].H = H;
-    chain[0].px.assign(N * 4, 0.f);
+    if (chain[0].px.size() < N * 4) chain[0].px.resize(N * 4);
+    std::fill_n(chain[0].px.begin(), N * 4, 0.f);   // invalid pixels must be 0
 
     // Level 0: trusted pixels contribute (straight RGB * alpha, alpha) —
     // the internal premultiply that makes every later average and bilinear
@@ -134,57 +145,81 @@ inline bool PullPushFill(const float *argb, const uint8_t *valid,
     }
     if (!any) return false;
 
-    // PULL — average up-to-4 children per coarse texel down to 1x1.
-    while (chain.back().W > 1 || chain.back().H > 1) {
-        const detail_pp::PPLevel &f = chain.back();
-        detail_pp::PPLevel c;
-        c.W = (f.W + 1) / 2;
-        c.H = (f.H + 1) / 2;
-        c.px.assign((size_t)c.W * c.H * 4, 0.f);
+    // PULL — average up-to-4 children per coarse texel down to 1x1. Coarse
+    // levels are fully overwritten by the reduction below (every texel gets
+    // acc/n), so their reused buffers need no pre-clear — just grow-to-size.
+    while (chain[nLevels - 1].W > 1 || chain[nLevels - 1].H > 1) {
+        const int fW = chain[nLevels - 1].W;
+        const int fH = chain[nLevels - 1].H;
+        const int cW = (fW + 1) / 2;
+        const int cH = (fH + 1) / 2;
+        // Grow the chain FIRST (may reallocate the vector), then take pointers
+        // into the now-stable storage — never hold a reference across the
+        // emplace_back that could invalidate it.
+        if ((int)chain.size() <= nLevels) chain.emplace_back();
+        chain[nLevels].W = cW;
+        chain[nLevels].H = cH;
+        if (chain[nLevels].px.size() < (size_t)cW * cH * 4)
+            chain[nLevels].px.resize((size_t)cW * cH * 4);
 
-        for (int y = 0; y < c.H; ++y) {
-            for (int x = 0; x < c.W; ++x) {
-                float acc[4] = { 0.f, 0.f, 0.f, 0.f };
-                int   n = 0;
-                for (int dy = 0; dy < 2; ++dy) {
-                    const int fy = y * 2 + dy;
-                    if (fy >= f.H) continue;
-                    for (int dx = 0; dx < 2; ++dx) {
-                        const int fx = x * 2 + dx;
-                        if (fx >= f.W) continue;
-                        const float *s = &f.px[((size_t)fy * f.W + fx) * 4];
-                        acc[0] += s[0]; acc[1] += s[1];
-                        acc[2] += s[2]; acc[3] += s[3];
-                        ++n;
+        // Coarse texels are independent — parallelize over rows of c. Each
+        // reads a disjoint 2x2 block of the finer level and writes its own
+        // coarse texel; byte-identical to the serial reduction.
+        {
+            const float *fpx = chain[nLevels - 1].px.data();
+            float       *cpx = chain[nLevels].px.data();
+            ParallelFor(cH, [=](int /*threadIndex*/, int y) {
+                for (int x = 0; x < cW; ++x) {
+                    float acc[4] = { 0.f, 0.f, 0.f, 0.f };
+                    int   n = 0;
+                    for (int dy = 0; dy < 2; ++dy) {
+                        const int fy = y * 2 + dy;
+                        if (fy >= fH) continue;
+                        for (int dx = 0; dx < 2; ++dx) {
+                            const int fx = x * 2 + dx;
+                            if (fx >= fW) continue;
+                            const float *s = &fpx[((size_t)fy * fW + fx) * 4];
+                            acc[0] += s[0]; acc[1] += s[1];
+                            acc[2] += s[2]; acc[3] += s[3];
+                            ++n;
+                        }
                     }
+                    const float inv = 1.f / (float)n;
+                    float *t = &cpx[((size_t)y * cW + x) * 4];
+                    t[0] = acc[0] * inv; t[1] = acc[1] * inv;
+                    t[2] = acc[2] * inv; t[3] = acc[3] * inv;
                 }
-                const float inv = 1.f / (float)n;
-                float *t = &c.px[((size_t)y * c.W + x) * 4];
-                t[0] = acc[0] * inv; t[1] = acc[1] * inv;
-                t[2] = acc[2] * inv; t[3] = acc[3] * inv;
-            }
+            });
         }
-        chain.push_back(std::move(c));
+        ++nLevels;
     }
 
     // PUSH — coarsest-1 down to level 0: fill only coverage-0 texels from the
     // (already fully covered) coarser level. Texel-center mapping via the
     // dimension ratio handles odd sizes from the ceil-halving pull.
-    for (int k = (int)chain.size() - 2; k >= 0; --k) {
+    for (int k = nLevels - 2; k >= 0; --k) {
         detail_pp::PPLevel       &f = chain[k];
         const detail_pp::PPLevel &c = chain[k + 1];
         const double su = (double)c.W / (double)f.W;
         const double sv = (double)c.H / (double)f.H;
 
-        for (int y = 0; y < f.H; ++y) {
-            const double v = ((double)y + 0.5) * sv - 0.5;
-            for (int x = 0; x < f.W; ++x) {
-                float *t = &f.px[((size_t)y * f.W + x) * 4];
-                if (t[3] > 0.f) continue;   // has trusted data — untouched
-                float s[4];
-                detail_pp::Bilinear4(c, ((double)x + 0.5) * su - 0.5, v, s);
-                t[0] = s[0]; t[1] = s[1]; t[2] = s[2]; t[3] = s[3];
-            }
+        // Fine texels are independent — each writes only its own texel and
+        // reads only the coarser level c (read-only here). Parallelize over
+        // rows of f.
+        {
+            detail_pp::PPLevel       *fp = &f;
+            const detail_pp::PPLevel *cp = &c;
+            const int fW = f.W;
+            ParallelFor(f.H, [=](int /*threadIndex*/, int y) {
+                const double v = ((double)y + 0.5) * sv - 0.5;
+                for (int x = 0; x < fW; ++x) {
+                    float *t = &fp->px[((size_t)y * fW + x) * 4];
+                    if (t[3] > 0.f) continue;   // has trusted data — untouched
+                    float s[4];
+                    detail_pp::Bilinear4(*cp, ((double)x + 0.5) * su - 0.5, v, s);
+                    t[0] = s[0]; t[1] = s[1]; t[2] = s[2]; t[3] = s[3];
+                }
+            });
         }
     }
 

@@ -60,9 +60,52 @@
 #include <cmath>
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
 #include <algorithm>
 #include <vector>
 #include <new>
+
+// ---------------------------------------------------------------------------
+// Stage 5 perf instrumentation. Set ER_PERF_LOG to 1 to append one line per
+// Result-mode frame to %TEMP%\EdgeRepair_perf.log with wall-clock timings for
+// each hot pass and the whole SmartRender. OFF for shipping builds (zero cost
+// — the timer helpers compile to nothing). This is how we pull real AE timing
+// numbers at the Stage 5 gate: build with it on, RAM-preview a 4K comp, read
+// the log. Logging itself is off the hot path (once per frame, after render).
+// ---------------------------------------------------------------------------
+#define ER_PERF_LOG 0
+
+#if ER_PERF_LOG
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdarg>
+namespace {
+using ER_Clock = std::chrono::high_resolution_clock;
+inline double ER_ms(ER_Clock::time_point a, ER_Clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+}
+// Append a line to the perf log. Serialized across threads by the CRT's file
+// locking; called once per frame so contention is irrelevant.
+inline void ER_PerfLog(const char *fmt, ...) {
+    char path[1024];
+    const char *tmp = getenv("TEMP");
+    if (!tmp) tmp = ".";
+    snprintf(path, sizeof(path), "%s\\EdgeRepair_perf.log", tmp);
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+    va_list ap; va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fclose(f);
+}
+} // namespace
+#define ER_PERF_T(var)   ER_Clock::time_point var = ER_Clock::now()
+#define ER_PERF_DT(a,b)  ER_ms(a,b)
+#else
+#define ER_PERF_T(var)   ((void)0)
+#define ER_PERF_DT(a,b)  (0.0)
+#endif
 
 // Fixed texture-frequency-split blur radius (px). The Detail high-pass
 // subtracts a Gaussian of this radius from the plate; it contributes to the
@@ -86,6 +129,49 @@ static const float ER_TEXTURE_BLUR_RADIUS = 4.0f;
 // Inflation was signed off at the Stage 1 gate, so this is OFF now; flip to 1
 // only to re-run the seam test.
 #define ER_TILING_DEBUG 0
+
+// ---------------------------------------------------------------------------
+// Per-render scratch buffers, reused ACROSS frames without any mutable global
+// or static state (Stage 5: "kill per-frame allocation" while staying MFR-
+// reentrant). Held in a thread_local: AE's render worker threads persist, so
+// each thread's buffers survive frame to frame and grow-only .resize() stops
+// reallocating after the first frame at a given size — yet every SmartRender
+// invocation on a given thread has its OWN buffers, so concurrent renders on
+// different threads (MFR) never share state. This is the same discipline the
+// row callbacks already use with their thread_local `rowv`, generalized to the
+// whole pipeline's working set.
+//
+// resize() on an already-large-enough vector is a no-op (no allocation) but
+// leaves stale contents; buffers whose correctness depends on zero-init
+// (`ext`, `chokeField`) are cleared explicitly at their use site — see the
+// EnsureZeroed helper. Buffers fully overwritten before read (srcBuf,
+// alphaPlane, core, dist, low, plane, tmp, seeds) need no clear.
+struct ER_Scratch {
+    std::vector<float>   srcBuf;      // srcW*srcH*4 ARGB
+    std::vector<float>   alphaPlane;  // srcN
+    std::vector<uint8_t> core;        // srcN
+    std::vector<float>   dist;        // srcN
+    std::vector<float>   ext;         // srcN*3  (zero-init semantics)
+    std::vector<float>   low;         // srcN*3
+    std::vector<float>   gplane;      // srcN     Gaussian working plane
+    std::vector<float>   gtmp;        // srcN     Gaussian H→V temp
+    std::vector<float>   chokeField;  // srcN     (zero-init semantics)
+    std::vector<uint8_t> seeds;       // srcN
+};
+
+// One scratch set per render worker thread. Never shared across threads, so no
+// synchronization and no MFR hazard; freed when the thread exits.
+static thread_local ER_Scratch g_erScratch;
+
+// Grow `v` to at least n and zero the first n elements (for buffers whose
+// algorithm relies on a black/zero starting state). Reuses capacity; only the
+// grow beyond capacity allocates.
+template <typename T>
+static void EnsureZeroed(std::vector<T> &v, size_t n)
+{
+    if (v.size() < n) v.resize(n);
+    std::fill_n(v.begin(), n, T{});
+}
 
 // ---------------------------------------------------------------------------
 // Inflation radius from the current params. Only OUTWARD reach matters for
@@ -659,6 +745,7 @@ static PF_Err
 SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra)
 {
     PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
+    ER_PERF_T(tRender0);
 
     PF_WorldSuite2 *wsP = nullptr;
     ERR(AEFX_AcquireSuite(in_data, out_data, kPFWorldSuite, kPFWorldSuiteVersion2,
@@ -680,6 +767,15 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         ER_Params p; AEFX_CLR_STRUCT(p);
         ERR(ReadParams(in_data, &p));
         if (err) goto cleanup;
+
+        // Install AE's iterate_generic as the parallel backend for every
+        // mm::ParallelFor inside the algorithm cores (EDT, Gaussian, pull–push)
+        // for the duration of this render. Serial in the headless tests where
+        // no backend is set; AE's own scheduler owns the threads here (MFR-safe
+        // — no std::thread oversubscription against AE's per-frame concurrency).
+        // Cleared automatically when this scope exits.
+        mm::ScopedParallelBackend parallelGuard(
+            mm::MakeIterateGenericBackend(in_data));
 
         const ER_PreRenderData *prd =
             static_cast<const ER_PreRenderData*>(extra->input->pre_render_data);
@@ -707,10 +803,13 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         if (srcOX < 0) srcOX = 0;
         if (srcOY < 0) srcOY = 0;
 
-        // Unpack the whole inflated source into one ARGB float buffer.
-        std::vector<float> srcBuf;
+        // Unpack the whole inflated source into one ARGB float buffer. Scratch
+        // is reused across frames (see ER_Scratch) — fully overwritten by the
+        // unpack below, so no clear needed.
+        std::vector<float> &srcBuf = g_erScratch.srcBuf;
         try {
-            srcBuf.resize((size_t)srcW * srcH * 4);
+            if (srcBuf.size() < (size_t)srcW * srcH * 4)
+                srcBuf.resize((size_t)srcW * srcH * 4);
         } catch (const std::bad_alloc &) {
             err = PF_Err_OUT_OF_MEMORY;
             goto cleanup;
@@ -758,15 +857,16 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         }
 
         // Extract the alpha plane from the inflated source (straight-alpha
-        // worlds — the alpha channel is the coverage, used directly).
-        std::vector<float>   alphaPlane;
-        std::vector<uint8_t> core;
-        std::vector<float>   dist;
+        // worlds — the alpha channel is the coverage, used directly). Scratch
+        // reused across frames; all three are fully overwritten before read.
+        std::vector<float>   &alphaPlane = g_erScratch.alphaPlane;
+        std::vector<uint8_t> &core       = g_erScratch.core;
+        std::vector<float>   &dist       = g_erScratch.dist;
         bool haveField = false;
         try {
-            alphaPlane.resize(srcN);
-            core.resize(srcN);
-            dist.resize(srcN);
+            if (alphaPlane.size() < srcN) alphaPlane.resize(srcN);
+            if (core.size()       < srcN) core.resize(srcN);
+            if (dist.size()       < srcN) dist.resize(srcN);
         } catch (const std::bad_alloc &) {
             err = PF_Err_OUT_OF_MEMORY;
             goto cleanup;
@@ -774,9 +874,15 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         for (size_t i = 0; i < srcN; ++i) alphaPlane[i] = srcBuf[i * 4 + 0];
 
         // Core matte: threshold at 0.5, signed Erode. Then the driving field.
+        ER_PERF_T(tcf0);
         mm::BuildCoreMatte(alphaPlane.data(), core.data(), (int)srcW, (int)srcH,
                            0.5f, (float)p.erodeF);
         haveField = mm::CoreDistanceField(core.data(), dist.data(), (int)srcW, (int)srcH);
+        ER_PERF_T(tcf1);
+#if ER_PERF_LOG
+        ER_PerfLog("[EdgeRepair] %ldx%ld view=%ld  core+field %.1f ms\n",
+                   (long)srcW, (long)srcH, (long)p.viewL, ER_PERF_DT(tcf0, tcf1));
+#endif
 
         switch (p.viewL) {
             case ER_VIEW_CORE_MATTE: {
@@ -811,15 +917,15 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 // the view callback. srcBuf is AE-native premultiplied, which
                 // is exactly what PullPushFill wants; the fill unpremultiplies
                 // internally, so `ext` is straight RGB.
-                std::vector<float> ext;
+                std::vector<float> &ext = g_erScratch.ext;
                 try {
-                    ext.resize(srcN * 3);   // value-init → black
+                    EnsureZeroed(ext, srcN * 3);   // black where fill leaves gaps
                 } catch (const std::bad_alloc &) {
                     err = PF_Err_OUT_OF_MEMORY;
                     goto cleanup;
                 }
                 // Empty core → no trusted colour exists anywhere; leave the
-                // zero-init black rather than showing garbage (same guard
+                // zeroed black rather than showing garbage (same guard
                 // philosophy as the Distance Field view).
                 mm::PullPushFill(srcBuf.data(), core.data(), ext.data(),
                                  (int)srcW, (int)srcH);
@@ -841,21 +947,29 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 // ---------------------------------------------------------
                 bool doBand = haveField && p.extendF > 0.0;
 
-                // Pull–push extension + alpha-weighted low-pass — the two
-                // colour sources of the band composite.
-                std::vector<float> ext, low;
+                // Pull–push extension + low-pass — the two colour sources of
+                // the band composite. Both fully overwritten before read
+                // (PullPushFill writes every pixel; the Gaussian loop writes
+                // every channel), so reused scratch needs no clear.
+                std::vector<float> &ext = g_erScratch.ext;
+                std::vector<float> &low = g_erScratch.low;
                 if (doBand) {
                     try {
-                        ext.resize(srcN * 3);
-                        low.resize(srcN * 3);
+                        if (ext.size() < srcN * 3) ext.resize(srcN * 3);
+                        if (low.size() < srcN * 3) low.resize(srcN * 3);
                     } catch (const std::bad_alloc &) {
                         err = PF_Err_OUT_OF_MEMORY;
                         goto cleanup;
                     }
+                    ER_PERF_T(tpp0);
                     if (!mm::PullPushFill(srcBuf.data(), core.data(),
                                           ext.data(), (int)srcW, (int)srcH)) {
                         doBand = false;   // no trusted colour anywhere
                     }
+                    ER_PERF_T(tpp1);
+#if ER_PERF_LOG
+                    ER_PerfLog("  pull-push %.1f ms\n", ER_PERF_DT(tpp0, tpp1));
+#endif
                 }
                 if (doBand) {
                     // low = gaussianBlur(straight RGB), PLAIN and unweighted
@@ -869,18 +983,102 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                     // texture, and Detail=100 — the default — re-added the
                     // very fringe being repaired as a light rim.)
                     try {
-                        std::vector<float> plane(srcN), tmp(srcN);
+                        std::vector<float> &plane = g_erScratch.gplane;
+                        std::vector<float> &tmp   = g_erScratch.gtmp;
+                        if (plane.size() < srcN) plane.resize(srcN);
+                        if (tmp.size()   < srcN) tmp.resize(srcN);
                         const std::vector<float> kern =
                             mm::BuildGaussianKernel(ER_TEXTURE_BLUR_RADIUS);
+                        const int half = (int)kern.size() / 2;
 
-                        for (int ch = 0; ch < 3; ++ch) {
-                            for (size_t i = 0; i < srcN; ++i)
-                                plane[i] = srcBuf[i * 4 + 1 + ch];
-                            mm::GaussianBlurH(plane.data(), tmp.data(), (int)srcW, (int)srcH, kern);
-                            mm::GaussianBlurV(tmp.data(), plane.data(), (int)srcW, (int)srcH, kern);
-                            for (size_t i = 0; i < srcN; ++i)
-                                low[i * 3 + ch] = plane[i];
+                        // --- Band bounding box ---------------------------------
+                        // The composite reads `low` ONLY where the blend weight
+                        // w>0, i.e. d <= Extend (BlendWeight is 0 beyond). So we
+                        // need `low` exact only inside the bounding box of
+                        // {0 < d <= Extend}; blurring the rest of a 4K frame is
+                        // wasted (the Stage 5 ring-limit win — see the model in
+                        // the Stage 5 notes: ~34% of frame for a big subject,
+                        // ~3% for a small one, vs 100% before). Everything below
+                        // is BYTE-IDENTICAL to the full-frame blur for every
+                        // pixel in the box, because source reads still clamp
+                        // against the full image (the _Rect passes' contract).
+                        int bx0 = (int)srcW, by0 = (int)srcH, bx1 = -1, by1 = -1;
+                        {
+                            const float ext = (float)p.extendF;
+                            const float *dp = dist.data();
+                            for (int y = 0; y < (int)srcH; ++y) {
+                                const float *drow = dp + (size_t)y * srcW;
+                                int rowMinX = (int)srcW, rowMaxX = -1;
+                                for (int x = 0; x < (int)srcW; ++x) {
+                                    const float d = drow[x];
+                                    if (d > 0.f && d <= ext) {
+                                        if (x < rowMinX) rowMinX = x;
+                                        rowMaxX = x;
+                                    }
+                                }
+                                if (rowMaxX >= 0) {
+                                    if (rowMinX < bx0) bx0 = rowMinX;
+                                    if (rowMaxX > bx1) bx1 = rowMaxX;
+                                    if (y < by0) by0 = y;
+                                    if (y > by1) by1 = y;
+                                }
+                            }
                         }
+
+                        ER_PERF_T(tg0);
+                        if (bx1 < bx0 || by1 < by0) {
+                            // No band pixels at all (e.g. core fills the frame
+                            // out to Extend) — nothing to blur; `low` is unread
+                            // where w<=0, so leave it. doBand stays true but the
+                            // composite will simply passthrough everywhere.
+                        } else {
+                            // Output box (inclusive → half-open) and the padded
+                            // regions each separable pass must produce (see the
+                            // MM_Gaussian _Rect contract): V writes the box; it
+                            // reads H-rows [by0-half, by1+half]; H writes those
+                            // rows over the box's x-range and reads source cols
+                            // [bx0-half, bx1+half] (clamped to image).
+                            const int box_x0 = bx0, box_x1 = bx1 + 1;
+                            const int box_y0 = by0, box_y1 = by1 + 1;
+                            const int h_y0 = box_y0 - half, h_y1 = box_y1 + half;
+                            // Source fill region for `plane` so H's clamped reads
+                            // always land on real source: x expanded by half too.
+                            int fx0 = box_x0 - half, fx1 = box_x1 + half;
+                            int fy0 = h_y0,          fy1 = h_y1;
+                            if (fx0 < 0) fx0 = 0; if (fy0 < 0) fy0 = 0;
+                            if (fx1 > (int)srcW) fx1 = (int)srcW;
+                            if (fy1 > (int)srcH) fy1 = (int)srcH;
+
+                            for (int ch = 0; ch < 3; ++ch) {
+                                // Fill only the padded source region into plane.
+                                for (int y = fy0; y < fy1; ++y) {
+                                    const float *s = srcBuf.data() + ((size_t)y * srcW + fx0) * 4 + 1 + ch;
+                                    float *d = plane.data() + (size_t)y * srcW + fx0;
+                                    for (int x = fx0; x < fx1; ++x, s += 4, ++d) *d = *s;
+                                }
+                                // H over the box's x-range, padded rows.
+                                mm::GaussianBlurH_Rect(plane.data(), tmp.data(),
+                                    (int)srcW, (int)srcH, kern,
+                                    box_x0, box_x1, h_y0, h_y1);
+                                // V over the box only.
+                                mm::GaussianBlurV_Rect(tmp.data(), plane.data(),
+                                    (int)srcW, (int)srcH, kern,
+                                    box_x0, box_x1, box_y0, box_y1);
+                                // Scatter the box into `low`.
+                                for (int y = box_y0; y < box_y1; ++y) {
+                                    const float *s = plane.data() + (size_t)y * srcW + box_x0;
+                                    float *d = low.data() + ((size_t)y * srcW + box_x0) * 3 + ch;
+                                    for (int x = box_x0; x < box_x1; ++x, ++s, d += 3) *d = *s;
+                                }
+                            }
+                        }
+                        ER_PERF_T(tg1);
+#if ER_PERF_LOG
+                        ER_PerfLog("  gauss3    %.1f ms  (band box %dx%d)\n",
+                                   ER_PERF_DT(tg0, tg1),
+                                   (bx1 >= bx0) ? bx1 - bx0 + 1 : 0,
+                                   (by1 >= by0) ? by1 - by0 + 1 : 0);
+#endif
                     } catch (const std::bad_alloc &) {
                         err = PF_Err_OUT_OF_MEMORY;
                         goto cleanup;
@@ -893,12 +1091,13 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 // (a > 0.5) pixel. Only computed when the knob is touched —
                 // choke == 0 never reaches this path, which is what makes
                 // the bit-identical-alpha gate hold.
-                std::vector<float> chokeField;
+                std::vector<float> &chokeField = g_erScratch.chokeField;
                 bool haveChoke = false;
                 if (chokeActive) {
                     try {
-                        std::vector<uint8_t> seeds(srcN);
-                        chokeField.resize(srcN);
+                        std::vector<uint8_t> &seeds = g_erScratch.seeds;
+                        if (seeds.size()      < srcN) seeds.resize(srcN);
+                        if (chokeField.size() < srcN) chokeField.resize(srcN);
                         const bool in = p.chokeF > 0.0;
                         bool any = false;
                         for (size_t i = 0; i < srcN; ++i) {
@@ -933,7 +1132,12 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 rc.chokeF     = haveChoke ? (float)p.chokeF : 0.f;
                 rc.srcW = srcW; rc.srcOX = srcOX; rc.srcOY = srcOY;
                 rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
+                ER_PERF_T(tcomp0);
                 mm::ForEachRow(in_data, outH, &rc, ER_ResultRow);
+                ER_PERF_T(tcomp1);
+#if ER_PERF_LOG
+                ER_PerfLog("  composite %.1f ms\n", ER_PERF_DT(tcomp0, tcomp1));
+#endif
                 break;
             }
         }
@@ -942,6 +1146,12 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
 
 cleanup:
     if (wsP) ERR2(AEFX_ReleaseSuite(in_data, out_data, kPFWorldSuite, kPFWorldSuiteVersion2, ""));
+#if ER_PERF_LOG
+    {
+        ER_PERF_T(tRender1);
+        ER_PerfLog("  TOTAL SmartRender %.1f ms\n\n", ER_PERF_DT(tRender0, tRender1));
+    }
+#endif
     return err;
 }
 

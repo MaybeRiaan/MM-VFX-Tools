@@ -40,7 +40,11 @@ inline void BuildCoreMatte(const float *alpha, uint8_t *core, int W, int H,
                            float thresh, float erode)
 {
     const size_t N = (size_t)W * H;
-    std::vector<uint8_t> interior(N);
+    // thread_local grow-only scratch — reused across frames on the render
+    // worker thread with no reallocation (Stage 5), per-thread so MFR-safe.
+    // All fully written before read below.
+    static thread_local std::vector<uint8_t> interior;
+    if (interior.size() < N) interior.resize(N);
     for (size_t i = 0; i < N; ++i) interior[i] = alpha[i] > thresh ? 1 : 0;
 
     // No erode → the thresholded interior is the core.
@@ -49,12 +53,14 @@ inline void BuildCoreMatte(const float *alpha, uint8_t *core, int W, int H,
         return;
     }
 
-    std::vector<float> dist(N);
+    static thread_local std::vector<float> dist;
+    if (dist.size() < N) dist.resize(N);
 
     if (erode > 0.f) {
         // Shrink: seeds are NON-interior pixels; keep only interior pixels
         // deeper than `erode` from the nearest edge.
-        std::vector<uint8_t> nonint(N);
+        static thread_local std::vector<uint8_t> nonint;
+        if (nonint.size() < N) nonint.resize(N);
         for (size_t i = 0; i < N; ++i) nonint[i] = interior[i] ? 0 : 1;
 
         // Degenerate: no non-interior pixel anywhere (fully opaque frame) —

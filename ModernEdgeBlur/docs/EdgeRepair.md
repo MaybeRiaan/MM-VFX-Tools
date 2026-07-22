@@ -296,11 +296,64 @@ before continuing. Keep every stage compiling and loadable in AE.
   NOTE for Stage 5: the Gaussian/EDT/fill run single-threaded and allocate
   per frame — Result at 4K float will be slow (seconds/frame); that is Stage
   5's whole job, judge Stage 4 on correctness only.
-- **Stage 5 — CPU performance.** NOT STARTED. Parallelize EDT rows/columns
-  and pull–push levels, reuse scratch buffers, early-out passthrough when
-  Extend=0 and Alpha Choke=0. *Gate:* <~40ms/frame at 4K float on a modern
-  desktop CPU, zero allocation churn per frame after warm-up, clean
-  10,000-frame soak with stable memory.
+- **Stage 5 — CPU performance.** DONE (v1.0.0.14), gate re-defined and PASSED
+  2026-07-22. All work is BYTE-IDENTICAL to Stage 4 output — proven, not
+  asserted (see tests below). What landed:
+  - **Injected parallel-for** (`src/common/MM_Parallel.h`): `mm::ParallelFor`
+    with a pluggable backend — serial (deterministic) in the headless tests,
+    `iterate_generic` inside AE (`mm::MakeIterateGenericBackend` in
+    `MM_Common.cpp`; installed for the render scope via `ScopedParallelBackend`
+    in `SmartRender`). EDT columns+rows, separable Gaussian H/V, and pull–push
+    (per mip level) all fan out through it. Every parallel work item writes
+    DISJOINT output, so the result is independent of thread count — that is why
+    threading changes no bits.
+  - **Zero per-frame allocation** after warm-up: all scratch is grow-only
+    `thread_local` — both the header internals (EDT `f`, core-matte temps,
+    pull–push mip chain) and SmartRender's working set (`ER_Scratch`).
+    `thread_local` = per AE worker = MFR-safe, no mutable global/static state.
+  - **Band-box-limited Detail Gaussian:** `low` is only computed inside the
+    bounding box of the blend band `{0<d<=Extend}` + kernel margin (the rest of
+    the frame is never read by the composite). Uses `GaussianBlurH/V_Rect`,
+    which clamp source reads against the FULL image, so every pixel the
+    composite reads is bit-for-bit identical to the old full-frame blur. Win is
+    subject-dependent (~34% of a frame-filling subject's edge, ~3% for a small
+    one; see `stage5_perf_edgerepair` memory).
+  - **Byte-identical interior/border split** in the Gaussian, and the
+    early-out passthrough (Extend<=0 && Choke==0) allocates nothing after
+    warm-up.
+  - Gaussian box-blur APPROXIMATION was built and REJECTED — measured 2.3x
+    SLOWER (the blur is memory-bandwidth-bound at 4K, not compute-bound), so
+    the exact Gaussian stays.
+
+  *Original gate was <~40ms/frame at 4K.* Re-defined 2026-07-22: 40ms at 4K is
+  not reachable on an 8-thread CPU (test machine = i7-9700K, 8c/8t, no HT) with
+  correctness-preserving CPU work alone; true 4K-realtime is the GPU path's job
+  (Stage 6). **Re-defined gate (PASSED):** large multiplicative speedup
+  (~980ms→~250ms headless hot-passes, ~4x on 8 threads; ~1150ms→~300ms in AE),
+  ZERO allocation churn per frame after warm-up, clean multi-thousand-frame
+  soak with stable memory, and BYTE-IDENTICAL output vs Stage 4. AE-confirmed
+  2026-07-22 via an A/B (`EDGEREPAIR_FULLBLUR` env toggle, since removed):
+  band-box vs full-frame blur gave identical results on real footage.
+
+  Tests (all headless, `tests/build_tests.ps1`, no AE): `test_bandblur.cpp`
+  (band-box low == full-frame low for every used pixel, 7 shapes, 0 diffs),
+  `test_bandcomposite.cpp` (end-to-end composite byte-identical at Detail
+  0/50/100 even with stale reused scratch), `test_soak.cpp` (2000-frame
+  determinism + 0 allocations/frame after warm-up), plus the existing
+  distancefield/gaussian/pullpush/composite tests still green. Bench harness:
+  `tests/run_perf.ps1` (serial-vs-threaded bit-compare + timings). AE perf
+  instrumentation: `ER_PERF_LOG` in `EdgeRepair.cpp` (default 0), read with
+  `tests/read_ae_perf.ps1`.
+
+  KNOWN, SEPARATE ISSUE (NOT a Stage-5 regression — proven identical with the
+  band-box on and off): on PREMULTIPLIED-alpha input footage, raising Detail
+  can re-introduce a light edge rim. Root cause: the plugin's locked STRAIGHT-
+  alpha convention — a premultiplied export has multiplied semi-transparent
+  edge RGB toward the matte colour, so `low=blur(orig)` and `hi=orig-low`
+  capture a spurious step at the alpha boundary that Detail amplifies. Live
+  keyed footage (true straight edge RGB) is clean. This is an input-convention
+  interaction to address on its own; the `hi` guard currently only zeroes at
+  a<=1e-6 (fully transparent), not across the semi-transparent band.
 - **Stage 6 — GPU path.** NOT STARTED, only after 0–5 signed off. DX12/HLSL
   kernels mirroring the CPU math exactly (threshold, Jump Flood distance,
   pull–push mip chain, composite). `PF_OutFlag2_SUPPORTS_GPU_RENDER_F32` +

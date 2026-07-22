@@ -26,6 +26,8 @@
 #include "AE_EffectCB.h"
 #include "AE_EffectPixelFormat.h"   // PF_PixelFormat_* for the 8/16/32bpc dispatch
 
+#include "MM_Parallel.h"            // ParallelBackend — glued to iterate_generic here
+
 namespace mm {
 
 inline A_long ClampL(A_long v, A_long lo, A_long hi)
@@ -59,5 +61,15 @@ void PackRow(const float *src, void *dstRow, A_long W, PF_PixelFormat fmt);
 //   PF_Err cb(void *refcon, A_long thread_index, A_long i, A_long total)
 void ForEachRow(PF_InData *in_data, A_long rows, void *refcon,
                 PF_Err (*cb)(void *, A_long, A_long, A_long));
+
+// Build a ParallelBackend (see MM_Parallel.h) that fans mm::ParallelFor's
+// range out across AE's workers via in_data->utils->iterate_generic, so the
+// pure algorithm headers (EDT, Gaussian, pull–push) parallelize inside AE
+// while staying serial (and deterministic) in the headless tests. Falls back
+// to a serial loop when iterate_generic is unavailable. The returned backend
+// captures in_data by value-of-pointer; it must not outlive the render call
+// (SmartRender installs it via mm::ScopedParallelBackend for the render scope
+// only).
+ParallelBackend MakeIterateGenericBackend(PF_InData *in_data);
 
 } // namespace mm

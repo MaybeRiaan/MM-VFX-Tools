@@ -91,4 +91,34 @@ void ForEachRow(PF_InData *in_data, A_long rows, void *refcon,
     for (A_long y = 0; y < rows; ++y) cb(refcon, 0, y, rows);
 }
 
+// --- iterate_generic → ParallelBackend bridge -----------------------------
+// iterate_generic wants a plain C callback + void* refcon; ParallelFor hands
+// us a std::function body. We stash the body in a refcon and relay each
+// (thread_index, i) through a static trampoline. thread_index comes straight
+// from AE (stable, in [0, #workers)) so per-thread scratch keyed on it is safe.
+namespace {
+struct IterGenRefcon {
+    const std::function<void(int, int)> *body;
+};
+PF_Err IterGenTrampoline(void *refconPV, A_long thread_indexL, A_long i, A_long /*total*/)
+{
+    const IterGenRefcon *rc = static_cast<const IterGenRefcon *>(refconPV);
+    (*rc->body)((int)thread_indexL, (int)i);
+    return PF_Err_NONE;
+}
+} // namespace
+
+ParallelBackend MakeIterateGenericBackend(PF_InData *in_data)
+{
+    return [in_data](int n, const std::function<void(int, int)> &body) {
+        if (in_data && in_data->utils && in_data->utils->iterate_generic) {
+            IterGenRefcon rc{ &body };
+            if ((*in_data->utils->iterate_generic)((A_long)n, &rc, IterGenTrampoline)
+                == PF_Err_NONE)
+                return;
+        }
+        for (int i = 0; i < n; ++i) body(0, i);   // serial fallback
+    };
+}
+
 } // namespace mm
