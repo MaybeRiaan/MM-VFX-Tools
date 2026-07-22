@@ -1,19 +1,30 @@
 # Handoff prompt — View-mode deliverables pass
 
-**Run this in a FRESH session, and ONLY AFTER Stage 5 (CPU performance) is
-merged to `origin/main`.** It edits `src/EdgeRepair.h` / `src/EdgeRepair.cpp`
-— the same files Stage 5 refactors — so running it concurrently would
-conflict across the two PCs this project is built on.
+**Run this in a FRESH session.** It edits `src/EdgeRepair.h` /
+`src/EdgeRepair.cpp` — files that also carry the recently-merged Stage 5 (CPU
+performance) and Detail-grain work — so across the two PCs this project is
+built on, **`git fetch origin` and reconcile BEFORE touching anything** to
+avoid conflicting with in-flight edits on the other machine.
 
 ---
 
 Continuing the Edge Repair plugin (After Effects "MM" suite) in this repo.
 **Do not modify Modern Edge Blur's plugin code** (reference only). This work
-spans two PCs — **`git fetch origin` and reconcile BEFORE touching
-anything.** Then confirm Stage 5 is already merged to `origin/main`
-(`git log --oneline -15`, look for the Stage 5 / CPU-performance commits). If
-Stage 5 is NOT in yet, STOP and tell me — this task must sit on top of it,
-not race it.
+spans two PCs — **`git fetch origin` and reconcile BEFORE touching anything.**
+Then `git log --oneline -15` to confirm you're on top of the latest: as of
+this file's last update, `origin/main` @ `e1d4987` (EdgeRepair v1.0.0.17)
+already includes Stage 5 AND the Detail = synthetic-grain + inner-band-softness
+change. If those are NOT in your history yet, STOP and reconcile — this task
+sits on top of them.
+
+**Heads-up on what changed since this file was first written:** Detail is no
+longer frequency separation — it is synthetic grain (`src/common/MM_Grain.h`;
+`out = lerp(orig,ext,w) + w*detail*grain`, `BlendWeight` now has a 3-arg
+inner-ease form). None of that changes THIS task (view labels + Extended
+Colour / Distance Field quality), but don't be surprised by it when you read
+`ER_ResultRow` / `MM_Composite.h`. The **Composited** (formerly Result) output
+must still be byte-identical to whatever `origin/main` currently produces —
+label-only, as below.
 
 **Read `docs/EdgeRepair.md` first** (locked spec + staged plan). The
 parameter set is LOCKED at five; disk IDs 101-105 are permanent. **This task
@@ -36,8 +47,9 @@ Colour"`; order and disk IDs LOCKED). Per-view render code is the
    ID stay identical so existing `.aep` projects still resolve to the same
    view. Grep for other user-facing "Result" strings and update for
    consistency; leave code identifiers alone. **The Composited render output
-   itself must NOT change** — same math, same alpha (original layer alpha,
-   passthrough except Alpha Choke). Label-only.
+   itself must NOT change** — byte-identical to what `origin/main` currently
+   renders (whatever the Detail method is; it's synthetic grain now), same
+   alpha (original layer alpha, passthrough except Alpha Choke). Label-only.
 
 2. **Extended Colour — first-class clean-plate deliverable. Fully opaque
    (alpha = 1) by design** — edge-extend has no transparency; it is the
