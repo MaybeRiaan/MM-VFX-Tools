@@ -13,7 +13,20 @@ This doc is the durable source of truth for Edge Repair's spec and staged
 plan — everything here originates from the build brief the user supplied,
 plus one amendment (both dated 2026-07-06). Keep this file up to date as
 stages land; it is what lets a fresh session resume without re-deriving the
-spec from conversation history.
+spec from conversation history. (There is no separate handoff doc — this file
+IS the handoff; it absorbed `docs/HANDOFF_VIEWMODES.md` on 2026-07-22.)
+
+## Current status & resuming (2026-07-22)
+
+- **Tip:** `origin/main` @ `c85d268`, **EdgeRepair v1.0.0.23**. Stages 0–5 are
+  DONE + AE-gated; the view modes are now real deliverables (see that section).
+  **Next real stage is Stage 6 — GPU (NOT STARTED)** — only after the user
+  signs off that 0–5 + the view-mode pass are final.
+- **This project is built on TWO PCs.** ALWAYS `git fetch origin` and reconcile
+  BEFORE touching anything, and `git log --oneline -6` to confirm you're on top
+  of the tip above. If you're behind, STOP and reconcile — in-flight edits on
+  the other machine touch the same `src/EdgeRepair.*` files.
+- **Do not modify ModernEdgeBlur's plugin code** (reference only).
 
 ## Product philosophy
 
@@ -130,7 +143,7 @@ If a seventh parameter or any of the above ever seems needed: stop and ask,
 don't add it unilaterally. (The current count is six as of 2026-07-22 —
 Softness, disk ID 106, added on explicit sign-off.)
 
-## View modes — deliverable semantics (2026-07-22, v1.0.0.18)
+## View modes — deliverable semantics (2026-07-22, current as of v1.0.0.23)
 
 The View Mode popup order and disk IDs are LOCKED (see the param table). This
 pass promoted the diagnostic entries into real, deliverable-quality outputs and
