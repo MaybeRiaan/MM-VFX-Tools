@@ -1,106 +1,89 @@
-# Handoff prompt — View-mode deliverables pass
+# Handoff — after the view-mode deliverables + Softness + Erode pass
 
-**Run this in a FRESH session.** It edits `src/EdgeRepair.h` /
-`src/EdgeRepair.cpp` — files that also carry the recently-merged Stage 5 (CPU
-performance) and Detail-grain work — so across the two PCs this project is
-built on, **`git fetch origin` and reconcile BEFORE touching anything** to
-avoid conflicting with in-flight edits on the other machine.
+**Run in a FRESH session.** This work spans two PCs — **`git fetch origin` and
+reconcile BEFORE touching anything.** Then `git log --oneline -6` to confirm
+you're on top of `bfa496d` (EdgeRepair v1.0.0.23). If it's not in your history,
+STOP and reconcile.
+
+Continuing the **Edge Repair** plugin (After Effects "MM" suite) in this repo.
+**Do not modify Modern Edge Blur's plugin code** (reference only).
+**Read `docs/EdgeRepair.md` first** — it is the durable spec + staged plan and
+is fully up to date as of this handoff.
 
 ---
 
-Continuing the Edge Repair plugin (After Effects "MM" suite) in this repo.
-**Do not modify Modern Edge Blur's plugin code** (reference only). This work
-spans two PCs — **`git fetch origin` and reconcile BEFORE touching anything.**
-Then `git log --oneline -15` to confirm you're on top of the latest: as of
-this file's last update, `origin/main` @ `e1d4987` (EdgeRepair v1.0.0.17)
-already includes Stage 5 AND the Detail = synthetic-grain + inner-band-softness
-change. If those are NOT in your history yet, STOP and reconcile — this task
-sits on top of them.
+## What just shipped (commit `bfa496d`, v1.0.0.23)
 
-**Heads-up on what changed since this file was first written:** Detail is no
-longer frequency separation — it is synthetic grain (`src/common/MM_Grain.h`;
-`out = lerp(orig,ext,w) + w*detail*grain`, `BlendWeight` now has a 3-arg
-inner-ease form). None of that changes THIS task (view labels + Extended
-Colour / Distance Field quality), but don't be surprised by it when you read
-`ER_ResultRow` / `MM_Composite.h`. The **Composited** (formerly Result) output
-must still be byte-identical to whatever `origin/main` currently produces —
-label-only, as below.
+The View Mode entries are now real, deliverable-quality outputs, plus a new
+Softness control and an Erode range change. All AE-gated by the user this
+session. Headless tests green.
 
-**Read `docs/EdgeRepair.md` first** (locked spec + staged plan). The
-parameter set is LOCKED at five; disk IDs 101-105 are permanent. **This task
-adds no parameters, no new popup items, and does not reorder or renumber
-anything** — it changes view-mode *labels* and *render semantics/quality*
-only.
+- **"Result" → "Composited"** — label only. `ER_VIEW_RESULT` (=1) and disk ID
+  105 unchanged; render output byte-identical.
+- **Extended Colour** — first-class opaque clean-plate deliverable (straight-RGB
+  pull–push fill; empty-core = black). Verified, no plumbing change.
+- **Distance Field** — now an **INWARD light-wrap luma matte of the erode gap**:
+  WHITE at the original alpha edge → BLACK toward the eroded core over an
+  `Erode`-wide band; opaque, black in exterior + core interior; Erode 0 → all
+  black. Code: `ER_DistViewRefcon` / `ER_DistViewRow` + the
+  `ER_VIEW_DISTANCE_FIELD` branch in `EdgeRepair.cpp`.
+- **Core Matte** — untouched (diagnostic).
+- **Softness (param #6, disk ID 106)** — fixed-**px** slider, 0–250, default 5.
+  One knob drives both the Composited inner ease (`= Softness px` → BlendWeight)
+  and the Distance Field inward ramp (`= Softness px`, clamped to the gap).
+  Replaced the old fixed `ER_INNER_SOFT_FRAC` 15%-of-Extend constant.
+- **Erode → 0–50** (was −50…50). Negative Erode (dilate) removed — no legitimate
+  use for decontamination (verified from the fill code). The engine's
+  `BuildCoreMatte` grow branch stays (still unit-tested) but is UI-unreachable.
+  **Alpha Choke keeps its signed −50…50** (grow is meaningful there).
 
-## What the user wants
+### Locked / invariant (do not change without a new ask)
+- Param **disk IDs 101–106 are forever.** View Mode order is locked.
+- Composited render must stay byte-identical (label-only for that view).
+- Softness default 5px is *not* byte-identical to the old 15% look (~4.8px) —
+  that was an accepted, visually-indistinguishable shift, not a regression.
 
-Promote the diagnostic View Mode entries into real, deliverable-quality
-outputs, and rename the default for clarity. Popup string is `ER_VIEW_ITEMS`
-in `src/EdgeRepair.h` (currently `"Result|Core Matte|Distance Field|Extended
-Colour"`; order and disk IDs LOCKED). Per-view render code is the
-`ER_*ViewRow` / `ER_ResultRow` functions in `src/EdgeRepair.cpp`.
+---
 
-### Per view
+## State of the staged plan (see `docs/EdgeRepair.md` for detail)
 
-1. **Rename "Result" → "Composited".** Change ONLY the label text in
-   `ER_VIEW_ITEMS`. The enum `ER_VIEW_RESULT`, its value (=1), and its disk
-   ID stay identical so existing `.aep` projects still resolve to the same
-   view. Grep for other user-facing "Result" strings and update for
-   consistency; leave code identifiers alone. **The Composited render output
-   itself must NOT change** — byte-identical to what `origin/main` currently
-   renders (whatever the Detail method is; it's synthetic grain now), same
-   alpha (original layer alpha, passthrough except Alpha Choke). Label-only.
+- Stages 0–4: DONE + AE-gated. Stage 5 (CPU perf): DONE. This pass sits on top.
+- **Stage 6 — GPU path: NOT STARTED.** That's the next real stage: DX12/HLSL
+  kernels mirroring the CPU math (threshold, distance, pull–push, composite),
+  `PF_OutFlag2_SUPPORTS_GPU_RENDER_F32` + GPU device suites. Gate = CPU/GPU
+  parity within tolerance + soak on the GPU path. **Only start after the user
+  signs off that 0–5 + this pass are final.**
 
-2. **Extended Colour — first-class clean-plate deliverable. Fully opaque
-   (alpha = 1) by design** — edge-extend has no transparency; it is the
-   filled colour source an artist mattes themselves downstream. It already
-   renders opaque filled RGB (`ER_ExtViewRow` sets `dst[0]=1.f`), so the work
-   is QUALITY, not plumbing: verify it is the clean unpremultiplied
-   straight-RGB pull–push fill, colour-correct at 8/16/32bpc, no
-   blockiness/bleed, genuinely usable as a render output. Decide + document
-   the empty-core fallback (currently black).
+If the user wants to keep polishing the deliverable views instead of starting
+Stage 6, the likely candidate is subjective Distance Field / Softness tuning on
+more live plates (no new params without sign-off). Nothing else is outstanding
+from this pass.
 
-3. **Distance Field — first-class MATTE deliverable. Fully opaque (alpha = 1)
-   across the whole frame**, the normalized distance encoded as luminance so
-   the view can be used directly as a **luma/track matte for downstream edge
-   work (light wraps, etc.).** The softness of the matte IS the distance
-   falloff — no separate blur needed. Currently: 0 at the core edge → black,
-   brightening outward, white at `Extend` px (`invMaxDisplay = 1/Extend`,
-   fallback 64px when Extend≈0). Two things to settle at the gate, do not
-   guess:
-   - **Polarity.** For a light-wrap matte the artist usually wants WHITE at
-     the alpha/core edge fading OUT to black over the band — i.e. possibly
-     the inverse of the current 0-at-core mapping. Ask the user which
-     polarity they want (or expose both only if they explicitly ask — that
-     would be a param and needs sign-off).
-   - **White-point mapping.** Confirm "white at `Extend` px" is the right,
-     predictable reach (it ties the matte width to the Extend slider, which
-     is probably desirable), and document it. Make the normalization stable
-     and identical across 8/16/32bpc.
+---
 
-4. **Core Matte — leave AS-IS, diagnostic only.** The user treats the layer's
-   own alpha as the real matte. Do NOT delete it (disk IDs are permanent);
-   just don't invest in it.
+## Build / test mechanics (critical — get these right)
 
-## Constraints
-
-- **No new parameters.** If anything seems to need one (e.g. Distance Field
-  polarity as a toggle), STOP and ask — it is a brief amendment, not a
-  unilateral add.
-- Keep the headless `tests/` green.
-- The **Composited** output must be byte-identical to before (label only).
-- Build with `build_edgerepair.ps1` (NEVER `build.ps1`). It bumps
-  `BUILD_VERSION` in BOTH `src/EdgeRepair.h` AND `resources/EdgeRepairPiPL.r`
-  together — drift makes AE cry "version mismatch."
+- Build with **`build_edgerepair.ps1`**, NEVER `build.ps1` (that bumps Modern
+  Edge Blur's version). It bumps `BUILD_VERSION` in BOTH `src/EdgeRepair.h` AND
+  `resources/EdgeRepairPiPL.r` together — drift → AE "version mismatch."
 - **Close After Effects before building**, or the deploy-copy to the plugins
-  folder fails (the `.aex` is file-locked; compile/link still succeed and
-  `dist/` still updates, but the AE folder won't refresh).
-- After building, copy `build/EdgeRepair.aex` → `dist/EdgeRepair.aex` and
-  commit it (`.gitignore` has `!dist/*.aex`).
-- Update `docs/EdgeRepair.md`: the spec table's View Mode row (new label
-  "Composited") and a short "View modes" section recording that **Extended
-  Colour** (opaque clean plate) and **Distance Field** (opaque luma matte)
-  are now supported real-world deliverables, with the Distance Field polarity
-  + white-point decision documented.
-- **Stop at a visual gate** and let the user confirm each view in AE before
-  committing as final. Do not proceed to any further scope without asking.
+  folder fails (the `.aex` is file-locked; compile/link still succeed and the
+  build/ output updates, but the AE folder won't refresh). The build script
+  handles the AE-folder copy on success.
+- After building, **copy `build/EdgeRepair.aex` → `dist/EdgeRepair.aex`** and
+  commit it (`.gitignore` has `!dist/*.aex`). Verify with
+  `cmp build/EdgeRepair.aex dist/EdgeRepair.aex`.
+- Headless algorithm tests: `tests/build_tests.ps1` (plain cl.exe, no AE SDK) —
+  keep green. AE-side view/render code is not headless-tested (same as the other
+  view rows); the pure algorithm headers are.
+- **Stop at a visual gate** and let the user confirm in AE before committing as
+  final. This session's whole workflow was gate-driven.
+
+---
+
+## Housekeeping for whoever picks this up
+
+- There is a stray **`image.png`** in the repo root (a screenshot from this
+  session) and an untracked **`.claude/`** dir — both intentionally NOT
+  committed. `image.png` can be deleted; `.claude/` is local session state.
+- No SDK to GitHub ever (see memory / `.gitignore`).
