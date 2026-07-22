@@ -25,9 +25,9 @@ user's business, not this plugin's.
 Keyed/rotoscoped footage has contaminated semi-transparent edge pixels
 (motion blur rims, halos from bright backgrounds). Edge Repair:
 
-1. Builds a **core matte**: threshold the layer's alpha, then erode/dilate by
-   a signed `Erode` so only trusted interior colour remains (or, if negative,
-   grows the trusted region).
+1. Builds a **core matte**: threshold the layer's alpha, then erode inward by
+   `Erode` (px) so only trusted interior colour remains. (The engine's grow /
+   dilate branch still exists but Erode is clamped >= 0 — see the param note.)
 2. Computes a **Euclidean distance field** `d(x,y)` = distance from each pixel
    to the nearest core pixel. Exactly one distance computation per frame
    drives erosion, extension falloff, blend weight, and alpha choke — the
@@ -57,30 +57,61 @@ Keyed/rotoscoped footage has contaminated semi-transparent edge pixels
    Euclidean falloff; negative grows it. No morphological min/max filters —
    reuse the distance field.
 
-## Parameters — LOCKED, exactly five (amended 2026-07-06)
+## Parameters — six (originally five, amended 2026-07-06; Softness appended 2026-07-22)
 
-An earlier version of this brief specified seven params including Softness
-and a Premultiplied checkbox. **That version is superseded.** The
-authoritative list:
+An earlier version of this brief specified seven params including a Softness
+and a Premultiplied checkbox. **That version is superseded** — but note the
+Softness added 2026-07-22 (row 6) is NOT that old edge-blur softness (which
+ModernEdgeBlur owns and stays removed); it is a BAND inner-ease control (see
+its row + the View modes section). The authoritative list:
 
 | # | Param | Type | Range | Default | Disk ID |
 |---|-------|------|-------|---------|---------|
-| 1 | Erode | float slider (px), **signed** | −50 to +50 | 2.0 | 101 |
+| 1 | Erode | float slider (px) | 0 to 50 | 2.0 | 101 |
 | 2 | Extend | float slider (px) | 0–500 | 32.0 | 102 |
 | 3 | Detail | float slider (%) | 0–100 | 50 | 103 |
 | 4 | Alpha Choke | float slider (px) | −50 to +50 | 0 | 104 |
-| 5 | View Mode | popup: Result / Core Matte / Distance Field / Extended Colour | — | Result | 105 |
+| 5 | View Mode | popup: Composited / Core Matte / Distance Field / Extended Colour | — | Composited | 105 |
+| 6 | Softness | float slider (px) | 0–250 | 5 | 106 |
 
 Disk IDs are forever — never reorder, never reuse. Future additions append
-with new disk IDs only.
+with new disk IDs only. (Softness, disk ID 106, is the first append past the
+original five — added on explicit user sign-off 2026-07-22.)
 
-**Erode is a single signed control**: positive erodes the core inward,
-negative dilates it outward (not one-directional).
+**Softness** is a fixed-**PIXEL** softness/ease width — one unified slider
+shaping two things (see the View modes section for each mechanism):
+- In the **Composited** repair: the inner-ease width = **Softness px**, fed
+  straight to `BlendWeight`. Over the first Softness px out from the core the
+  blend weight `w` ramps 0→1 instead of snapping to full replacement — easing
+  the recomposited band back into the real core colour (kills the hard
+  band/core line on wide light wraps).
+- In the **Distance Field** matte: the ramp width = **Softness px** (clamped to
+  the band) — how much of the band is solid white vs. a white→black gradient.
+
+Range **0–250 px**, default **5 px** (≈ the old 15%-of-Extend-32 inner ease,
+~4.8px, so the Composited look barely shifts — no longer byte-identical, but
+visually indistinguishable). **0** = hard (Composited: snaps at core; Distance
+Field: solid band with a hard cut). Switched from a % to fixed px on user
+request 2026-07-22 — px is predictable, it doesn't rescale when Extend/Erode
+change. This is NOT edge-blur/feather softness (that is ModernEdgeBlur's job
+and remains a removed concept, below) — it reshapes distance-band WEIGHTS only;
+sample points and the distance field are unchanged.
+
+**Erode shrinks the trusted core inward** by that many px (0–50). It was a
+signed −50..50 control through v1.0.0.22; **negative (dilate) was removed
+2026-07-22** — it has no legitimate use for the decontamination job (growing
+into the transparent exterior adds no colour; growing into the semi-transparent
+rim re-trusts the contamination Erode exists to exclude). The engine's grow
+branch (`BuildCoreMatte`, erode<0) remains for the headless tests and possible
+future use, but is unreachable from the UI. Alpha Choke keeps its own signed
+−50..50 (grow is meaningful there — matte dilation).
 
 **Removed — must NOT appear anywhere (code, PiPL, or UI), and must not be
 reintroduced without an explicit new ask:**
-- **Softness / falloff / edge-blur** — a separate suite plugin
-  (ModernEdgeBlur) owns edge shaping. Not this tool's job.
+- **Edge-blur / feather / falloff softness** — a separate suite plugin
+  (ModernEdgeBlur) owns edge shaping. Not this tool's job. (NOT to be confused
+  with the Softness param added 2026-07-22, which is the distance-BAND inner
+  ease — a weight-reshape, not an edge blur. See the param table.)
 - **Premultiplied as a user parameter** — internal only. No knob, no
   override of AE's footage interpretation. **[CORRECTED 2026-07-09 — the
   original brief text here claimed "AE hands the effect premultiplied
@@ -95,8 +126,92 @@ reintroduced without an explicit new ask:**
   selectors, invert toggles, grain/noise synthesis (Detail supersedes it), GPU
   code before Stage 6.
 
-If an eighth parameter or any of the above ever seems needed: stop and ask,
-don't add it unilaterally.
+If a seventh parameter or any of the above ever seems needed: stop and ask,
+don't add it unilaterally. (The current count is six as of 2026-07-22 —
+Softness, disk ID 106, added on explicit sign-off.)
+
+## View modes — deliverable semantics (2026-07-22, v1.0.0.18)
+
+The View Mode popup order and disk IDs are LOCKED (see the param table). This
+pass promoted the diagnostic entries into real, deliverable-quality outputs and
+renamed the default for clarity. **Label + render-quality only — no new params,
+no reorder/renumber.** Per-view render code is the `ER_*ViewRow` / `ER_ResultRow`
+functions in `EdgeRepair.cpp`.
+
+- **Composited** (was "Result"; `ER_VIEW_RESULT` = 1, disk ID 105 — code
+  identifier/value/ID all unchanged so saved `.aep`s still resolve here). The
+  full repair composite (extend + Detail grain + Alpha Choke). Label-only
+  change — the render output is **byte-identical** to what it produced before
+  the rename; alpha is the original layer alpha (passthrough except Alpha
+  Choke). This is the actual RGBA deliverable.
+
+- **Extended Colour** — first-class **clean-plate** deliverable. Fully **opaque
+  (α = 1) by design**: edge-extend has no transparency; it is the filled colour
+  source an artist mattes themselves downstream. Renders the clean
+  unpremultiplied straight-RGB pull–push fill (`ER_ExtViewRow`, `dst[0]=1.f`);
+  `PullPushFill` premultiplies internally by coverage and divides it back out,
+  so `ext` is straight RGB, colour-correct at 8/16/32bpc (all bit depths flow
+  through the same float pack/unpack). Deliberately UNLIMITED (ignores the
+  Extend clamp) so raw fill quality is inspectable everywhere. **Empty-core
+  fallback = black** (opaque): no trusted pixels ⇒ no colour to pull ⇒ whole
+  frame renders black (user-confirmed 2026-07-22; matches the Distance Field
+  empty-core guard).
+
+- **Distance Field** — first-class **luma MATTE** deliverable, fully **opaque
+  (α = 1) across the whole frame**, usable directly as a luma/track matte for
+  downstream edge work (light wraps, etc.). It is an **INWARD light-wrap matte
+  of the erode gap**, WHITE-anchored at the ORIGINAL ALPHA EDGE, fading to BLACK
+  toward the eroded core over an `Erode`-wide band. **Geometry settled
+  2026-07-22:** the first cut rendered the composite band `w` (measured OUTWARD
+  from the eroded core) — wrong side of the edge, radiating into the transparent
+  exterior (caught at the gate from AE screenshots). Round 2 flipped it to the
+  inward erode-gap band below. (A negative-Erode outward variant was briefly
+  added and then removed with negative Erode itself — see the Erode note.)
+  Render code: `ER_DistViewRow` / the `ER_VIEW_DISTANCE_FIELD` branch in
+  `EdgeRepair.cpp`.
+  - **Region:** pixels inside the alpha (`alpha > 0.5`, the pre-Erode
+    silhouette) AND within the erode gap (`edgeDist <= Erode`, where `edgeDist`
+    = Euclidean distance INWARD from the alpha edge). Black in the transparent
+    exterior; black in the trusted core interior. `Erode == 0` → no gap → all
+    black.
+  - **Polarity:** **WHITE (1.0) at the original alpha edge**, gradienting
+    INWARD to **BLACK (0.0)** at the eroded core boundary — the light-wrap
+    convention (wrap strongest at the very edge, falling off into the subject).
+    Measured inward from the alpha edge, NOT outward-from-core like the repair
+    band.
+  - **Reach = `Erode` px.** The band width tracks the Erode slider; Erode-DRIVEN
+    and anchored at the alpha edge.
+  - **Softness (fixed px)** shapes the ramp: `plateau = gap − Softness px`
+    stays solid white, then smoothstep white→black over the remaining `Softness`
+    px to the core (clamped to the gap). At Softness 0 the whole gap is solid
+    white with a hard cut at the core; higher Softness lengthens the inward
+    fade. Exact Euclidean distance, identical across 8/16/32bpc.
+  - **NOTE — decoupled from the repair band.** Because it measures inward from
+    the alpha edge (Erode-driven) rather than outward from the core, this matte
+    is a STANDALONE light-wrap tool, NOT a bit-for-bit preview of the
+    Composited repair band. (The round-1 design tried to make it a literal
+    preview; the user's screenshots showed that's the wrong tool — they want a
+    usable inward edge matte.)
+
+- **Core Matte** — left AS-IS, diagnostic only (the layer's own alpha is the
+  real matte). Not deleted (disk IDs are permanent); not invested in.
+
+**Softness slider — ADDED 2026-07-22 (param #6, disk ID 106), on the user's
+explicit sign-off during this pass.** They decided the Distance Field is "much
+more useful" with a real softness control. It's one unified fixed-**px** slider
+shaping softness in BOTH places (different mechanisms — the Distance Field is an
+Erode-driven edge matte, not the repair band):
+- **Composited band:** `inner = Softness px` feeds `BlendWeight`'s inner ease
+  directly. **0 px** = hard inner (snaps at the core).
+- **Distance Field matte:** `Softness px` shapes the white→black ramp across the
+  `|Erode|`-wide band. 0 px = solid band with a hard cut; higher = longer fade.
+Range **0–250 px**, default **5 px**. It was first shipped as a 0–50 % slider
+(v1.0.0.19–.21) then switched to fixed px on user request — px is predictable
+(doesn't rescale with Extend/Erode). Default 5px ≈ the old 15%-of-Extend-32
+(~4.8px), so the Composited look barely shifts (no longer byte-identical, but
+visually indistinguishable). See the Softness param row above and `ER_SOFT*` in
+`EdgeRepair.h`. This replaces the fixed `ER_INNER_SOFT_FRAC` constant that
+shaped the composite band through v1.0.0.18.
 
 ## Critical AE SDK requirements
 

@@ -41,16 +41,24 @@ typedef short int			int16;
 #define MINOR_VERSION	0
 #define BUG_VERSION		0
 #define STAGE_VERSION	PF_Stage_DEVELOP
-#define BUILD_VERSION	17
+#define BUILD_VERSION	23
 
 // ---------------------------------------------------------------------------
-// Parameter ranges and defaults. The locked FIVE — Premult is internal-only
-// (no knob); no Softness param (a separate suite plugin owns edge shaping).
+// Parameter ranges and defaults. Originally five; Softness (disk ID 106) was
+// appended 2026-07-22 on user sign-off — six now. Premult stays internal-only
+// (no knob); EDGE-BLUR softness stays owned by a separate suite plugin — the
+// Softness param below is the distance-BAND inner ease, a different thing.
 // ---------------------------------------------------------------------------
 
-// Erode: single SIGNED control — positive erodes the core inward, negative
-// dilates it. px.
-#define ER_ERODE_MIN		-50.0
+// Erode: how far (px) to shrink the trusted core inward from the alpha edge to
+// find clean, uncontaminated interior colour. Clamped to 0..50 (2026-07-22):
+// negative Erode (dilate) was removed because it has no legitimate use for the
+// decontamination job — growing the core into the transparent exterior adds no
+// colour (those pixels have alpha<=0, skipped by the fill), and growing it into
+// the semi-transparent rim RE-TRUSTS the very contamination Erode exists to
+// exclude. The core-matte grow branch (BuildCoreMatte, erode<0) is now
+// unreachable from the UI but kept for the headless tests / possible future use.
+#define ER_ERODE_MIN		  0.0
 #define ER_ERODE_MAX		 50.0
 #define ER_ERODE_DFLT		  2.0
 
@@ -77,18 +85,41 @@ typedef short int			int16;
 #define ER_CHOKE_MAX		 50.0
 #define ER_CHOKE_DFLT		  0.0
 
-// View Mode popup (1-based in AE). Result is the composited output; the rest
-// are diagnostics wired up across Stages 2-3.
+// Softness: a fixed-PIXEL softness/ease width (2026-07-22, param #6). One
+// unified slider shaping softness in two places (see EdgeRepair.cpp):
+//   • Composited band: inner-ease width = Softness px, fed straight to
+//     BlendWeight's inner arg — w eases 0->1 over the first Softness px out
+//     from the core instead of snapping to full replacement.
+//   • Distance Field matte: inward ramp width = Softness px (clamped to the
+//     erode gap) — how much of the gap is solid white vs. a white->black
+//     gradient toward the core.
+// History: a fixed 15%-of-Extend fraction through v1.0.0.18; a 0..50 % slider
+// v1.0.0.19-.21; switched to fixed PIXELS on user sign-off (px is predictable —
+// it doesn't rescale when Extend/Erode change). Default 5 px ≈ the old 15% of
+// the default Extend 32 (~4.8px), so the Composited look barely shifts (NOT
+// byte-identical anymore — 5 vs 4.8px). 0 = hard (Composited: snaps at core;
+// Distance Field: solid-white gap, hard cut); max 250 px. Disk ID 106.
+#define ER_SOFT_MIN			  0.0
+#define ER_SOFT_MAX			250.0
+#define ER_SOFT_DFLT		  5.0
+
+// View Mode popup (1-based in AE). ER_VIEW_RESULT is the composited output
+// (label "Composited"); the code identifier / enum value (=1) / disk ID are
+// LOCKED so existing .aep projects still resolve to this view. Extended Colour
+// (opaque clean plate) and Distance Field (opaque luma matte) are now
+// first-class deliverables; Core Matte stays diagnostic.
 enum {
-	ER_VIEW_RESULT = 1,
+	ER_VIEW_RESULT = 1,		// label "Composited" (was "Result")
 	ER_VIEW_CORE_MATTE,
 	ER_VIEW_DISTANCE_FIELD,
 	ER_VIEW_EXTENDED_COLOUR,
 	ER_VIEW_NUM
 };
 #define ER_VIEW_DFLT		ER_VIEW_RESULT
-// Popup item string — order must match the enum above.
-#define ER_VIEW_ITEMS		"Result|Core Matte|Distance Field|Extended Colour"
+// Popup item string — order must match the enum above. Label only: "Result"
+// was renamed to "Composited" (2026-07-22); the enum value + disk ID are
+// unchanged so saved projects keep resolving to the same view.
+#define ER_VIEW_ITEMS		"Composited|Core Matte|Distance Field|Extended Colour"
 
 // ---------------------------------------------------------------------------
 // Parameter indices (0 = implicit input layer). Order here is the on-screen
@@ -101,25 +132,29 @@ enum {
 	ER_DETAIL,
 	ER_CHOKE,
 	ER_VIEW,
+	ER_SOFT,			// appended 2026-07-22 (last index — no prior shift)
 	ER_NUM_PARAMS
 };
 
 // Disk IDs — forever. Never reorder, never reuse. New params append with new
-// IDs only. (Values 101-105 per the locked brief.)
+// IDs only. (Values 101-105 per the locked brief; 106 = Softness, added
+// 2026-07-22 on user sign-off — the first append past the original five.)
 enum {
 	ER_ERODE_DISK_ID  = 101,
 	ER_EXTEND_DISK_ID = 102,
 	ER_DETAIL_DISK_ID = 103,
 	ER_CHOKE_DISK_ID  = 104,
-	ER_VIEW_DISK_ID   = 105
+	ER_VIEW_DISK_ID   = 105,
+	ER_SOFT_DISK_ID   = 106
 };
 
 typedef struct ER_Params {
-	PF_FpLong	erodeF;    // signed px
+	PF_FpLong	erodeF;    // px inward, 0..50 (dilate removed 2026-07-22)
 	PF_FpLong	extendF;   // px
 	PF_FpLong	detailF;   // %
 	PF_FpLong	chokeF;    // signed px
 	A_long		viewL;     // ER_VIEW_* (1-based)
+	PF_FpLong	softF;     // softness ease width in px (0..250)
 } ER_Params;
 
 extern "C" {

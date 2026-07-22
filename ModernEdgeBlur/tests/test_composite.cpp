@@ -130,6 +130,14 @@ int main()
         ok &= mm::BlendWeight(inner * 0.5f, ext) > mm::BlendWeight(inner * 0.5f, ext, inner);
         // inner<=0 recovers the hard curve.
         ok &= mm::BlendWeight(5.f, ext, 0.f) == mm::BlendWeight(5.f, ext);
+        // Softness param contract (2026-07-22, disk ID 106): the Composited
+        // band feeds `inner = Softness px` (a FIXED PIXEL width) straight to
+        // BlendWeight. Softness 0 == hard inner; a px width behaves as the
+        // inner arg; a width >= Extend is still well-defined (very soft, w>0
+        // stays small but positive across the band, no divide issue).
+        ok &= mm::BlendWeight(3.f, ext, 0.f) == mm::BlendWeight(3.f, ext);    // 0 px = hard
+        ok &= mm::BlendWeight(3.f, ext, 5.f) < mm::BlendWeight(3.f, ext);     // 5 px eases the inner
+        ok &= mm::BlendWeight(ext*0.5f, ext, 250.f) > 0.f;                    // width > extend: still valid
         Check(ok, "blendweight-inner", "eases 0 at core, peaks in band");
     }
 

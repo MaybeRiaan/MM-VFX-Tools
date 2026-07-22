@@ -125,15 +125,16 @@ inline void ER_PerfLog(const char *fmt, ...) {
 // cannot separate wrap rims from same-scale motion-blur micro-detail).
 static const float ER_TEXTURE_BLUR_RADIUS = 4.0f;
 
-// Inner-band ease width as a FRACTION of Extend (2026-07-22). Over the
-// innermost `ER_INNER_SOFT_FRAC * Extend` px out from the core, the blend
-// weight ramps 0 -> 1 instead of snapping to full replacement at the core
-// boundary — so the recomposited band eases back into the REAL core colour
-// rather than leaving a hard line where band meets core (visible on wide light
-// wraps). Resolution-relative by construction (scales with Extend). Reshapes
-// the weight only; sample points are unchanged. ~15% is subtle: enough to kill
-// the line without visibly eating into the repair. Exposed nowhere (no param).
-static const float ER_INNER_SOFT_FRAC = 0.15f;
+// Inner-band ease width as a FRACTION of Extend. Over the innermost
+// `softFrac * Extend` px out from the core, the blend weight ramps 0 -> 1
+// instead of snapping to full replacement at the core boundary — so the
+// recomposited band eases back into the REAL core colour rather than leaving a
+// hard line where band meets core (visible on wide light wraps). Resolution-
+// relative by construction (scales with Extend). Reshapes the weight only;
+// sample points are unchanged. This fraction was a fixed 0.15 constant through
+// v1.0.0.18; it is now the SOFTNESS PARAM (ER_SOFT, disk ID 106, % / 100),
+// default 15% == the old constant. Drives both the Composited band and the
+// Distance Field matte view. See ER_SOFT_DFLT in EdgeRepair.h.
 
 // Tiling debug visualization. 1 = every View Mode renders the Stage 1 seam-
 // test pattern (see ER_TileDebugRow); 0 = the real pipeline/view modes run.
@@ -168,6 +169,7 @@ struct ER_Scratch {
     std::vector<float>   gtmp;        // srcN     Gaussian H→V temp
     std::vector<float>   chokeField;  // srcN     (zero-init semantics)
     std::vector<uint8_t> seeds;       // srcN
+    std::vector<uint8_t> interior;    // srcN     alpha>thresh (Distance Field view)
 };
 
 // One scratch set per render worker thread. Never shared across threads, so no
@@ -245,6 +247,7 @@ ReadParams(PF_InData *in_data, ER_Params *p)
     ER_GET_FLOAT(ER_EXTEND, extendF)
     ER_GET_FLOAT(ER_DETAIL, detailF)
     ER_GET_FLOAT(ER_CHOKE,  chokeF)
+    ER_GET_FLOAT(ER_SOFT,   softF)
     #undef ER_GET_FLOAT
 
     AEFX_CLR_STRUCT(def);
@@ -409,13 +412,30 @@ struct ER_CoreViewRefcon {
     A_long          outW;
 };
 
-// Distance Field: normalized d/maxDisplay → greyscale (0 at core, brightening
-// outward, clamped to white past maxDisplay). Opaque.
+// Distance Field: a first-class opaque LUMA MATTE (α = 1 across the frame) —
+// an INWARD light-wrap matte of the ERODE GAP (the untrusted rim Erode carves
+// off the subject). Geometry decided with the user 2026-07-22 (round 2 fixed
+// the side after AE screenshots showed the earlier band radiating out the wrong
+// side of the edge):
+//   • WHITE (1.0) at the ORIGINAL ALPHA EDGE, gradienting INWARD (into the
+//     subject, over the untrusted erode gap) to BLACK (0.0) toward the eroded
+//     core. BLACK in the transparent exterior and the trusted core interior.
+//   • Reach = Erode px (the gap width IS how far Erode moved the boundary in);
+//     Softness (px) shapes the ramp toward the black end. Erode == 0 → no gap
+//     → all black. (Erode is clamped >= 0 — no dilate; see ER_ERODE_MIN.)
+// A STANDALONE light-wrap matte, deliberately NOT a bit-for-bit preview of the
+// repair band (which measures outward from the core).
+//
+// `edgeDist` = Euclidean distance to the nearest NON-interior pixel, i.e. how
+// deep INSIDE the alpha edge the pixel is (~0 at the edge, growing inward). The
+// band is 0 < edgeDist <= gapWidth, gated to the interior side.
 struct ER_DistViewRefcon {
-    const float    *dist;       // srcW*srcH
+    const float    *edgeDist;   // srcW*srcH inward distance from the alpha edge
+    const uint8_t  *interior;   // srcW*srcH 1 = inside alpha (alpha>thresh)
     A_long          srcW;
     A_long          srcOX, srcOY;
-    float           invMaxDisplay;   // 1 / normalization distance
+    float           gapWidth;   // erode gap width (px) = white→black reach
+    float           innerSoft;  // softness ease width (px) for the ramp
     PF_EffectWorld *out_world;
     PF_PixelFormat  fmt;
     A_long          outW;
@@ -462,13 +482,41 @@ ER_DistViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*ite
 {
     const ER_DistViewRefcon *rc = static_cast<const ER_DistViewRefcon*>(refconPV);
     const A_long W = rc->outW;
-    const float *srow = rc->dist + (size_t)(oy + rc->srcOY) * rc->srcW + rc->srcOX;
+    const size_t base = (size_t)(oy + rc->srcOY) * rc->srcW + rc->srcOX;
+    const float *edgeRow   = rc->edgeDist + base;
+    const uint8_t *intRow  = rc->interior + base;
+    const float gap = rc->gapWidth;
 
     thread_local std::vector<float> rowv;
     if ((A_long)rowv.size() < W * 4) rowv.resize((size_t)W * 4);
     float *dst = rowv.data();
     for (A_long ox = 0; ox < W; ++ox, dst += 4) {
-        const float v = mm::ClampF(srow[ox] * rc->invMaxDisplay, 0.f, 1.f);
+        // Inward light-wrap matte over the erode gap. WHITE at the alpha edge
+        // (edgeDist -> 0), gradienting to BLACK toward the eroded core
+        // (edgeDist -> gap). Gated to inside the alpha; the transparent exterior
+        // and the trusted core interior are both black.
+        //
+        // Softness controls how much of the gap is a solid-white plateau vs. a
+        // smooth ramp toward the black core end:
+        //   plateau = gap - Softness px (clamped >= 0): stays white
+        //   then smoothstep white -> black over the remaining `ramp` px.
+        // At Softness 0 the whole gap is solid white with a hard cut at the
+        // core; higher Softness lengthens the inward fade.
+        float v = 0.f;
+        if (gap > 0.f && intRow[ox]) {
+            const float e = edgeRow[ox];
+            if (e < gap) {
+                const float ramp = rc->innerSoft < gap ? rc->innerSoft : gap;
+                const float plateau = gap - ramp;   // white up to here
+                if (e <= plateau || ramp <= 0.f) {
+                    v = 1.f;
+                } else {
+                    // Position within the ramp: 0 at plateau end, 1 at core.
+                    const float t = (e - plateau) / ramp;
+                    v = 1.f - mm::ER_Smooth01(t);
+                }
+            }
+        }
         dst[0] = 1.f; dst[1] = v; dst[2] = v; dst[3] = v;
     }
 
@@ -677,6 +725,11 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
         ER_VIEW_DFLT,           // default (1-based)
         ER_VIEW_ITEMS,
         ER_VIEW_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX("Softness",
+        ER_SOFT_MIN, ER_SOFT_MAX, ER_SOFT_MIN, ER_SOFT_MAX,
+        ER_SOFT_DFLT, PF_Precision_HUNDREDTHS, 0, 0, ER_SOFT_DISK_ID);
 
     out_data->num_params = ER_NUM_PARAMS;
     return err;
@@ -911,19 +964,50 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 break;
             }
             case ER_VIEW_DISTANCE_FIELD: {
-                if (!haveField) {
-                    // Empty core → field is "infinitely far" everywhere;
-                    // show black rather than garbage.
-                    for (size_t i = 0; i < srcN; ++i) dist[i] = 1e20f;
+                // INWARD light-wrap matte of the erode gap (see ER_DistViewRow +
+                // ER_DistViewRefcon). White at the ORIGINAL ALPHA EDGE → black
+                // toward the eroded core, over an Erode-wide inward band. Erode
+                // is clamped >= 0 (no dilate), so Erode == 0 → no gap → black.
+                const float gap = (float)p.erodeF > 0.f ? (float)p.erodeF : 0.f;
+
+                std::vector<uint8_t> &interior = g_erScratch.interior;
+                std::vector<uint8_t> &seeds    = g_erScratch.seeds;
+                std::vector<float>   &edgeDist  = dist;   // reuse: core field unused here
+                try {
+                    if (interior.size() < srcN) interior.resize(srcN);
+                    if (seeds.size()    < srcN) seeds.resize(srcN);
+                } catch (const std::bad_alloc &) {
+                    err = PF_Err_OUT_OF_MEMORY;
+                    goto cleanup;
                 }
-                // Normalize so the visualization spans 0..Extend (the band the
-                // pipeline actually uses); fall back to a sane constant if
-                // Extend is ~0 so the view isn't all-white.
-                const float norm = (float)p.extendF >= 1.f ? (float)p.extendF : 64.f;
+                // interior = alpha>0.5 (original silhouette, pre-Erode); seeds =
+                // the NON-interior (exterior) pixels the EDT measures from, so
+                // edgeDist = depth INSIDE the alpha edge (0 at edge, grows in).
+                bool anyIn = false, anyOut = false;
+                for (size_t i = 0; i < srcN; ++i) {
+                    const bool in = alphaPlane[i] > 0.5f;
+                    interior[i] = in ? 1 : 0;
+                    seeds[i]    = in ? 0 : 1;
+                    if (in) anyIn = true; else anyOut = true;
+                }
+                // Needs both an inside and an outside to have an edge to measure
+                // from; a degenerate frame (all-opaque / all-transparent) has no
+                // edge → 0 everywhere → the matte is black (no band, or nothing
+                // in it).
+                if (anyIn && anyOut && gap > 0.f) {
+                    mm::EuclideanDistanceTransform(seeds.data(), edgeDist.data(),
+                                                   (int)srcW, (int)srcH);
+                } else {
+                    for (size_t i = 0; i < srcN; ++i) edgeDist[i] = 0.f;
+                }
                 ER_DistViewRefcon rc;
-                rc.dist = dist.data(); rc.srcW = srcW;
-                rc.srcOX = srcOX; rc.srcOY = srcOY;
-                rc.invMaxDisplay = 1.f / norm;
+                rc.edgeDist = edgeDist.data(); rc.interior = interior.data();
+                rc.srcW = srcW; rc.srcOX = srcOX; rc.srcOY = srcOY;
+                rc.gapWidth  = gap;
+                // Softness is a fixed PIXEL ramp width from the white edge
+                // plateau toward the black core end; clamped to the gap by the
+                // row callback.
+                rc.innerSoft = (float)p.softF;
                 rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
                 mm::ForEachRow(in_data, outH, &rc, ER_DistViewRow);
                 break;
@@ -1077,7 +1161,10 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 rc.ext        = doBand ? ext.data()  : nullptr;
                 rc.chokeField = haveChoke ? chokeField.data() : nullptr;
                 rc.extendF    = (float)p.extendF;
-                rc.innerSoft  = (float)(p.extendF * ER_INNER_SOFT_FRAC);
+                // Softness slider is a fixed PIXEL inner-ease width, fed
+                // straight to BlendWeight (clamped to the band by BlendWeight
+                // itself when innerSoft >= Extend).
+                rc.innerSoft  = (float)p.softF;
                 rc.detail01   = (float)(p.detailF / 100.0);
                 rc.grainAmp   = doBand ? grainAmp : 0.f;
                 rc.chokeF     = haveChoke ? (float)p.chokeF : 0.f;
