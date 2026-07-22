@@ -55,6 +55,7 @@
 #include "common/MM_CoreMatte.h"
 #include "common/MM_PullPush.h"
 #include "common/MM_Gaussian.h"
+#include "common/MM_Grain.h"
 #include "common/MM_Composite.h"
 
 #include <cmath>
@@ -123,6 +124,16 @@ inline void ER_PerfLog(const char *fmt, ...) {
 // Detail 100, going below 4 needs a spec conversation (frequency alone
 // cannot separate wrap rims from same-scale motion-blur micro-detail).
 static const float ER_TEXTURE_BLUR_RADIUS = 4.0f;
+
+// Inner-band ease width as a FRACTION of Extend (2026-07-22). Over the
+// innermost `ER_INNER_SOFT_FRAC * Extend` px out from the core, the blend
+// weight ramps 0 -> 1 instead of snapping to full replacement at the core
+// boundary — so the recomposited band eases back into the REAL core colour
+// rather than leaving a hard line where band meets core (visible on wide light
+// wraps). Resolution-relative by construction (scales with Extend). Reshapes
+// the weight only; sample points are unchanged. ~15% is subtle: enough to kill
+// the line without visibly eating into the repair. Exposed nowhere (no param).
+static const float ER_INNER_SOFT_FRAC = 0.15f;
 
 // Tiling debug visualization. 1 = every View Mode renders the Stage 1 seam-
 // test pattern (see ER_TileDebugRow); 0 = the real pipeline/view modes run.
@@ -503,10 +514,11 @@ struct ER_ResultRefcon {
     const float    *src;        // inflated STRAIGHT-alpha ARGB
     const float    *dist;       // core distance field (null = band off)
     const float    *ext;        // straight extended colour (null = band off)
-    const float    *low;        // straight low-pass, ext fallback baked in (null = band off)
     const float    *chokeField; // alpha-edge EDT (null = choke off)
     float           extendF;
+    float           innerSoft;  // inner-ease width (px) for BlendWeight
     float           detail01;   // Detail param / 100
+    float           grainAmp;   // synthetic-grain amplitude (from core estimate)
     float           chokeF;     // signed px; nonzero only when chokeField set
     A_long          srcW;
     A_long          srcOX, srcOY;
@@ -546,7 +558,7 @@ ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*itera
         float w = 0.f;
         if (rc->dist) {
             const float d = rc->dist[i];
-            if (d > 0.f) w = mm::BlendWeight(d, rc->extendF);
+            if (d > 0.f) w = mm::BlendWeight(d, rc->extendF, rc->innerSoft);
         }
 
         // STRAIGHT alpha throughout (AE's effect-world convention — see the
@@ -572,18 +584,23 @@ ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*itera
                 }
             }
         } else {
-            // In-band composite (MM_Composite.h contract), straight space.
+            // In-band composite (MM_Composite.h contract), straight space:
+            // base = lerp(orig, ext, w); + w*detail*grain. Grain is a zero-mean
+            // luma sample keyed to the inflated-source pixel coord (sx,sy) so it
+            // is deterministic and stable across frames for a stationary render.
+            // At a~0 the plate RGB is garbage, so use ext as `orig` there.
             const float *E = rc->ext + i * 3;
-            const float *L = rc->low + i * 3;
-            float hi[3];
+            float orig[3];
             if (a > 1e-6f) {
-                for (int c = 0; c < 3; ++c)
-                    hi[c] = px[1 + c] - L[c];
+                orig[0] = px[1]; orig[1] = px[2]; orig[2] = px[3];
             } else {
-                hi[0] = hi[1] = hi[2] = 0.f;   // no plate detail at a = 0
+                orig[0] = E[0]; orig[1] = E[1]; orig[2] = E[2];
             }
+            const int sx = (int)(ox + rc->srcOX);
+            const int sy = (int)(oy + rc->srcOY);
+            const float grain = mm::GrainAt(sx, sy) * rc->grainAmp;
             float outS[3];
-            mm::ComposeBandRGB(L, E, hi, w, rc->detail01, outS);
+            mm::ComposeBandRGB(orig, E, grain, w, rc->detail01, outS);
             dst[0] = newA;
             dst[1] = outS[0];
             dst[2] = outS[1];
@@ -952,11 +969,9 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 // (PullPushFill writes every pixel; the Gaussian loop writes
                 // every channel), so reused scratch needs no clear.
                 std::vector<float> &ext = g_erScratch.ext;
-                std::vector<float> &low = g_erScratch.low;
                 if (doBand) {
                     try {
                         if (ext.size() < srcN * 3) ext.resize(srcN * 3);
-                        if (low.size() < srcN * 3) low.resize(srcN * 3);
                     } catch (const std::bad_alloc &) {
                         err = PF_Err_OUT_OF_MEMORY;
                         goto cleanup;
@@ -971,118 +986,53 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                     ER_PerfLog("  pull-push %.1f ms\n", ER_PERF_DT(tpp0, tpp1));
 #endif
                 }
+                // Synthetic-grain amplitude, estimated from the TRUSTED CORE
+                // (2026-07-22 — replaces the old frequency-separation low-pass;
+                // see MM_Composite.h / MM_Grain.h for why). We want the plate's
+                // local high-frequency luma energy where it is CLEAN — inside
+                // the core, away from the contaminated edge, so no edge step
+                // pollutes the estimate. Cheap, blur-free proxy: mean absolute
+                // horizontal+vertical luma neighbour difference over core
+                // pixels, converted to a grain amplitude. This is what lets the
+                // added grain sit in the plate instead of reading as pasted-on.
+                float grainAmp = 0.f;
                 if (doBand) {
-                    // low = gaussianBlur(straight RGB), PLAIN and unweighted
-                    // — exactly what the brief specifies. In a straight-alpha
-                    // world the plate's RGB is defined everywhere, so this is
-                    // well-posed, and it is the ONLY split for which
-                    // hi = orig - low is genuinely zero-mean local texture.
-                    // (Stage 4 gate round 2 finding: an alpha-WEIGHTED blur
-                    // here skews `low` toward the opaque side at edges, so hi
-                    // captured the contamination difference instead of
-                    // texture, and Detail=100 — the default — re-added the
-                    // very fringe being repaired as a light rim.)
-                    try {
-                        std::vector<float> &plane = g_erScratch.gplane;
-                        std::vector<float> &tmp   = g_erScratch.gtmp;
-                        if (plane.size() < srcN) plane.resize(srcN);
-                        if (tmp.size()   < srcN) tmp.resize(srcN);
-                        const std::vector<float> kern =
-                            mm::BuildGaussianKernel(ER_TEXTURE_BLUR_RADIUS);
-                        const int half = (int)kern.size() / 2;
-
-                        // --- Band bounding box ---------------------------------
-                        // The composite reads `low` ONLY where the blend weight
-                        // w>0, i.e. d <= Extend (BlendWeight is 0 beyond). So we
-                        // need `low` exact only inside the bounding box of
-                        // {0 < d <= Extend}; blurring the rest of a 4K frame is
-                        // wasted (the Stage 5 ring-limit win — see the model in
-                        // the Stage 5 notes: ~34% of frame for a big subject,
-                        // ~3% for a small one, vs 100% before). Everything below
-                        // is BYTE-IDENTICAL to the full-frame blur for every
-                        // pixel in the box, because source reads still clamp
-                        // against the full image (the _Rect passes' contract).
-                        int bx0 = (int)srcW, by0 = (int)srcH, bx1 = -1, by1 = -1;
-                        {
-                            const float ext = (float)p.extendF;
-                            const float *dp = dist.data();
-                            for (int y = 0; y < (int)srcH; ++y) {
-                                const float *drow = dp + (size_t)y * srcW;
-                                int rowMinX = (int)srcW, rowMaxX = -1;
-                                for (int x = 0; x < (int)srcW; ++x) {
-                                    const float d = drow[x];
-                                    if (d > 0.f && d <= ext) {
-                                        if (x < rowMinX) rowMinX = x;
-                                        rowMaxX = x;
-                                    }
-                                }
-                                if (rowMaxX >= 0) {
-                                    if (rowMinX < bx0) bx0 = rowMinX;
-                                    if (rowMaxX > bx1) bx1 = rowMaxX;
-                                    if (y < by0) by0 = y;
-                                    if (y > by1) by1 = y;
-                                }
-                            }
+                    ER_PERF_T(tg0);
+                    double acc = 0.0; size_t cnt = 0;
+                    const int Wi = (int)srcW, Hi = (int)srcH;
+                    // Luma of a straight-RGB pixel at flat index j.
+                    auto lumAt = [&](size_t j) -> double {
+                        const float *q = srcBuf.data() + j * 4;
+                        return 0.299 * q[1] + 0.587 * q[2] + 0.114 * q[3];
+                    };
+                    for (int y = 0; y < Hi; ++y) {
+                        for (int x = 0; x < Wi - 1; ++x) {
+                            const size_t j = (size_t)y * Wi + x;
+                            if (!core[j] || !core[j + 1]) continue;   // both in core
+                            acc += std::fabs(lumAt(j) - lumAt(j + 1));
+                            ++cnt;
                         }
-
-                        ER_PERF_T(tg0);
-                        if (bx1 < bx0 || by1 < by0) {
-                            // No band pixels at all (e.g. core fills the frame
-                            // out to Extend) — nothing to blur; `low` is unread
-                            // where w<=0, so leave it. doBand stays true but the
-                            // composite will simply passthrough everywhere.
-                        } else {
-                            // Output box (inclusive → half-open) and the padded
-                            // regions each separable pass must produce (see the
-                            // MM_Gaussian _Rect contract): V writes the box; it
-                            // reads H-rows [by0-half, by1+half]; H writes those
-                            // rows over the box's x-range and reads source cols
-                            // [bx0-half, bx1+half] (clamped to image).
-                            const int box_x0 = bx0, box_x1 = bx1 + 1;
-                            const int box_y0 = by0, box_y1 = by1 + 1;
-                            const int h_y0 = box_y0 - half, h_y1 = box_y1 + half;
-                            // Source fill region for `plane` so H's clamped reads
-                            // always land on real source: x expanded by half too.
-                            int fx0 = box_x0 - half, fx1 = box_x1 + half;
-                            int fy0 = h_y0,          fy1 = h_y1;
-                            if (fx0 < 0) fx0 = 0; if (fy0 < 0) fy0 = 0;
-                            if (fx1 > (int)srcW) fx1 = (int)srcW;
-                            if (fy1 > (int)srcH) fy1 = (int)srcH;
-
-                            for (int ch = 0; ch < 3; ++ch) {
-                                // Fill only the padded source region into plane.
-                                for (int y = fy0; y < fy1; ++y) {
-                                    const float *s = srcBuf.data() + ((size_t)y * srcW + fx0) * 4 + 1 + ch;
-                                    float *d = plane.data() + (size_t)y * srcW + fx0;
-                                    for (int x = fx0; x < fx1; ++x, s += 4, ++d) *d = *s;
-                                }
-                                // H over the box's x-range, padded rows.
-                                mm::GaussianBlurH_Rect(plane.data(), tmp.data(),
-                                    (int)srcW, (int)srcH, kern,
-                                    box_x0, box_x1, h_y0, h_y1);
-                                // V over the box only.
-                                mm::GaussianBlurV_Rect(tmp.data(), plane.data(),
-                                    (int)srcW, (int)srcH, kern,
-                                    box_x0, box_x1, box_y0, box_y1);
-                                // Scatter the box into `low`.
-                                for (int y = box_y0; y < box_y1; ++y) {
-                                    const float *s = plane.data() + (size_t)y * srcW + box_x0;
-                                    float *d = low.data() + ((size_t)y * srcW + box_x0) * 3 + ch;
-                                    for (int x = box_x0; x < box_x1; ++x, ++s, d += 3) *d = *s;
-                                }
-                            }
-                        }
-                        ER_PERF_T(tg1);
-#if ER_PERF_LOG
-                        ER_PerfLog("  gauss3    %.1f ms  (band box %dx%d)\n",
-                                   ER_PERF_DT(tg0, tg1),
-                                   (bx1 >= bx0) ? bx1 - bx0 + 1 : 0,
-                                   (by1 >= by0) ? by1 - by0 + 1 : 0);
-#endif
-                    } catch (const std::bad_alloc &) {
-                        err = PF_Err_OUT_OF_MEMORY;
-                        goto cleanup;
                     }
+                    for (int y = 0; y < Hi - 1; ++y) {
+                        for (int x = 0; x < Wi; ++x) {
+                            const size_t j = (size_t)y * Wi + x;
+                            if (!core[j] || !core[j + Wi]) continue;
+                            acc += std::fabs(lumAt(j) - lumAt(j + (size_t)Wi));
+                            ++cnt;
+                        }
+                    }
+                    // Mean |neighbour diff| ~ grain std * ~1.13 for white noise;
+                    // GrainAt() spans [-1,1] (std ~0.577), so scale the mean by
+                    // 1/(1.13*0.577) ≈ 1.53 to make grain*amp match the plate's
+                    // measured neighbour spread. Approximate is fine — the look
+                    // is judged in AE, and Detail scales it anyway.
+                    const double meanDiff = cnt ? acc / (double)cnt : 0.0;
+                    grainAmp = (float)(meanDiff * 1.53);
+                    ER_PERF_T(tg1);
+#if ER_PERF_LOG
+                    ER_PerfLog("  grain-amp %.1f ms  (amp=%.4f, %zu core px)\n",
+                               ER_PERF_DT(tg0, tg1), grainAmp, cnt);
+#endif
                 }
 
                 // Alpha Choke field — anchored at the ALPHA'S OWN edge (see
@@ -1125,10 +1075,11 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 rc.src        = srcBuf.data();
                 rc.dist       = doBand ? dist.data() : nullptr;
                 rc.ext        = doBand ? ext.data()  : nullptr;
-                rc.low        = doBand ? low.data()  : nullptr;
                 rc.chokeField = haveChoke ? chokeField.data() : nullptr;
                 rc.extendF    = (float)p.extendF;
+                rc.innerSoft  = (float)(p.extendF * ER_INNER_SOFT_FRAC);
                 rc.detail01   = (float)(p.detailF / 100.0);
+                rc.grainAmp   = doBand ? grainAmp : 0.f;
                 rc.chokeF     = haveChoke ? (float)p.chokeF : 0.f;
                 rc.srcW = srcW; rc.srcOX = srcOX; rc.srcOY = srcOY;
                 rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;

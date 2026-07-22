@@ -51,57 +51,86 @@ int main()
         Check(ok, "blendweight", "");
     }
 
-    // 2. ComposeBandRGB at w=0 returns low+hi for any detail — and when the
-    //    caller sets hi = orig-low, that IS orig, bit-exact in each term.
+    // 2. ComposeBandRGB (grain method) at w=0 returns orig EXACTLY for any
+    //    detail/grain — grain is weighted by w, so the band's outer edge is
+    //    seamless ("Detail 0 vs 100 differs only inside the band").
     {
-        const float low[3] = { 0.3f, 0.5f, 0.2f };
-        const float ext[3] = { 0.9f, 0.1f, 0.4f };
-        const float hi[3]  = { 0.05f, -0.03f, 0.11f };
+        const float orig[3] = { 0.3f, 0.5f, 0.2f };
+        const float ext[3]  = { 0.9f, 0.1f, 0.4f };
         float o0[3], o1[3];
-        mm::ComposeBandRGB(low, ext, hi, 0.f, 0.f, o0);
-        mm::ComposeBandRGB(low, ext, hi, 0.f, 1.f, o1);
+        mm::ComposeBandRGB(orig, ext, 0.7f, 0.f, 0.f, o0);   // grain, detail 0
+        mm::ComposeBandRGB(orig, ext, 0.7f, 0.f, 1.f, o1);   // grain, detail 1
         bool ok = true;
         for (int c = 0; c < 3; ++c) {
-            ok &= (o0[c] == o1[c]);                    // detail irrelevant at w=0
-            ok &= (o0[c] == low[c] + hi[c]);           // == orig, exactly
+            ok &= (o0[c] == o1[c]);        // detail/grain irrelevant at w=0
+            ok &= (o0[c] == orig[c]);      // == orig, exactly (no seam)
         }
         Check(ok, "band-w0-exact-orig", "detail 0 vs 1 identical at w=0");
     }
 
-    // 3. ComposeBandRGB at w=1: detail=1 → ext+hi; detail=0 → ext.
+    // 3. ComposeBandRGB at w=1: base is ext, plus detail*grain added to all ch.
     {
-        const float low[3] = { 0.3f, 0.5f, 0.2f };
-        const float ext[3] = { 0.9f, 0.1f, 0.4f };
-        const float hi[3]  = { 0.05f, -0.03f, 0.11f };
+        const float orig[3] = { 0.3f, 0.5f, 0.2f };
+        const float ext[3]  = { 0.9f, 0.1f, 0.4f };
+        const float grain   = 0.08f;
         float d1[3], d0[3];
-        mm::ComposeBandRGB(low, ext, hi, 1.f, 1.f, d1);
-        mm::ComposeBandRGB(low, ext, hi, 1.f, 0.f, d0);
+        mm::ComposeBandRGB(orig, ext, grain, 1.f, 1.f, d1);  // detail 1
+        mm::ComposeBandRGB(orig, ext, grain, 1.f, 0.f, d0);  // detail 0
         double worst = 0.0;
         for (int c = 0; c < 3; ++c) {
-            worst = std::fmax(worst, std::fabs((double)d1[c] - (double)(ext[c] + hi[c])));
+            worst = std::fmax(worst, std::fabs((double)d1[c] - (double)(ext[c] + grain)));
             worst = std::fmax(worst, std::fabs((double)d0[c] - (double)ext[c]));
         }
         char d[64]; snprintf(d, sizeof d, "worst|diff|=%.3g", worst);
         Check(worst < 1e-6, "band-w1-endpoints", d);
     }
 
-    // 4. Continuity at the band's outer edge: as w -> 0, out -> orig for any
-    //    detail (no seam at d = Extend at Detail 0).
+    // 4. Grain NEVER darkens on average: for zero-mean grain, the composite's
+    //    expected value equals lerp(orig, ext, w) — no directional bias. Check
+    //    the mean of ComposeBandRGB over a symmetric grain sweep is unbiased.
     {
-        const float low[3] = { 0.4f, 0.4f, 0.4f };
-        const float ext[3] = { 0.8f, 0.2f, 0.6f };
-        const float hi[3]  = { 0.1f, 0.1f, -0.1f };
-        double worst = 0.0;
-        for (float w : { 1e-3f, 1e-4f, 1e-5f }) {
+        const float orig[3] = { 0.4f, 0.4f, 0.4f };
+        const float ext[3]  = { 0.8f, 0.2f, 0.6f };
+        double sum[3] = {0,0,0}; int n = 0;
+        for (float g = -1.f; g <= 1.0001f; g += 0.05f) {  // symmetric zero-mean
             float o[3];
-            mm::ComposeBandRGB(low, ext, hi, w, 0.f, o);   // harshest: detail 0
-            for (int c = 0; c < 3; ++c)
-                worst = std::fmax(worst,
-                    std::fabs((double)o[c] - (double)(low[c] + hi[c])) / (double)w);
+            mm::ComposeBandRGB(orig, ext, g, 0.6f, 1.f, o);
+            for (int c = 0; c < 3; ++c) sum[c] += o[c];
+            ++n;
         }
-        // Error must vanish LINEARLY with w (bounded slope), not stall.
-        char d[64]; snprintf(d, sizeof d, "worst |err|/w=%.3g", worst);
-        Check(worst < 2.0, "band-outer-continuity", d);
+        double worst = 0.0;
+        for (int c = 0; c < 3; ++c) {
+            const double mean = sum[c] / n;
+            const double base = orig[c] + (ext[c] - orig[c]) * 0.6;  // lerp
+            worst = std::fmax(worst, std::fabs(mean - base));
+        }
+        char d[64]; snprintf(d, sizeof d, "grain mean bias=%.3g (no darkening)", worst);
+        Check(worst < 1e-6, "grain-unbiased", d);
+    }
+
+    // 4b. Inner-ease BlendWeight: w -> 0 at the core (d->0) AND at d>=extend,
+    //     rises in between, and peaks inside the band. This is what softens the
+    //     band/core handoff (the wide-light-wrap line). The 2-arg form must be
+    //     UNCHANGED (hard inner, w=1 at core).
+    {
+        bool ok = true;
+        const float ext = 32.f, inner = 0.15f * ext;  // ~4.8px
+        ok &= mm::BlendWeight(0.f, ext, inner) == 0.f;      // core: no replace now
+        ok &= mm::BlendWeight(0.001f, ext, inner) < 0.05f;  // just outside: still low
+        ok &= mm::BlendWeight(ext, ext, inner) == 0.f;      // outer edge: 0
+        // Rises then falls: sample a few points, peak strictly inside.
+        const float a = mm::BlendWeight(inner, ext, inner);     // end of inner ease
+        const float b = mm::BlendWeight(1.f, ext, inner);       // very inner
+        ok &= (a > b);                                          // eases up outward
+        ok &= (a > 0.5f);                                       // reaches strong replace
+        // 2-arg form unchanged (hard inner). Inside the inner-ease region the
+        // 3-arg weight is strictly lower (it's ramping up); at/after `inner`
+        // they coincide (innerW == 1), so compare at a point INSIDE the ease.
+        ok &= mm::BlendWeight(0.f, ext) == 1.f;
+        ok &= mm::BlendWeight(inner * 0.5f, ext) > mm::BlendWeight(inner * 0.5f, ext, inner);
+        // inner<=0 recovers the hard curve.
+        ok &= mm::BlendWeight(5.f, ext, 0.f) == mm::BlendWeight(5.f, ext);
+        Check(ok, "blendweight-inner", "eases 0 at core, peaks in band");
     }
 
     // 5. ChokeInAlpha: identity / ramp / zero, and profile preservation.

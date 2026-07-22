@@ -41,7 +41,7 @@ typedef short int			int16;
 #define MINOR_VERSION	0
 #define BUG_VERSION		0
 #define STAGE_VERSION	PF_Stage_DEVELOP
-#define BUILD_VERSION	14
+#define BUILD_VERSION	17
 
 // ---------------------------------------------------------------------------
 // Parameter ranges and defaults. The locked FIVE — Premult is internal-only

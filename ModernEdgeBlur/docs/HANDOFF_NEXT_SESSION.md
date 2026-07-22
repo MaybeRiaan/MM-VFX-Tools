@@ -17,42 +17,34 @@ BEFORE doing anything** (this repo was found 11 commits behind once already).
 
 **Where things stand (verify with `git fetch`):**
 - Stages 0-4: DONE, all AE gates user-confirmed.
-- **Stage 5 (CPU performance): DONE, gate re-defined + PASSED 2026-07-22
-  (v1.0.0.14).** Everything is BYTE-IDENTICAL to Stage 4 output — proven by
-  headless tests, not asserted. Landed: an injected parallel-for
-  (`src/common/MM_Parallel.h`, `iterate_generic` backend in AE, serial in
-  tests) threading the EDT / Gaussian / pull-push; zero per-frame allocation
-  (grow-only `thread_local` scratch everywhere, MFR-safe, no global state);
-  and a band-box-limited Detail Gaussian (`GaussianBlurH/V_Rect` — blur only
-  the blend band's bounding box + kernel margin, clamp source to the full
-  image so used pixels are bit-identical). The original <40ms/4K gate was
-  re-defined (unreachable on the 8c/8t i7-9700K with correctness-preserving
-  CPU work; 4K-realtime is Stage 6/GPU's job) to: big multiplicative speedup
-  (~1150ms→~300ms in AE) + zero alloc churn + clean soak + byte-identical.
-  A box-blur approximation was tried and REJECTED (2.3x slower — the blur is
-  memory-bandwidth-bound at 4K, not compute-bound). Full detail + the exact
-  test list is in `docs/EdgeRepair.md`'s Stage 5 entry.
+- **Stage 5 (CPU performance): DONE, gate re-defined + PASSED 2026-07-22.**
+  Injected parallel-for (`src/common/MM_Parallel.h`, `iterate_generic` backend
+  in AE, serial in tests) threading the EDT / pull-push; zero per-frame
+  allocation (grow-only `thread_local` scratch everywhere, MFR-safe, no global
+  state); early-out passthrough. Gate re-defined (original <40ms/4K unreachable
+  on the 8c/8t i7-9700K with correctness-preserving CPU work; 4K-realtime is
+  Stage 6/GPU's job): big speedup (~1150ms→~300ms in AE) + zero alloc churn +
+  clean soak. Full detail in `docs/EdgeRepair.md`'s Stage 5 entry.
+- **Detail method REPLACED + inner softness (2026-07-22, v1.0.0.17, AE-
+  confirmed):** frequency separation was DARKENING the edge (a luminance edge
+  and texture are the same frequency, so `hi = orig - blur(orig)` re-added a
+  signed edge step). Detail is now **synthetic grain** (`src/common/
+  MM_Grain.h`): zero-mean per-pixel luma noise, amplitude auto-estimated from
+  the trusted core, `out = lerp(orig,ext,w) + w*detail*grain`. Cannot darken,
+  fixed the premultiplied-input rim, dropped the Gaussian pass. Also added an
+  **inner-band ease** (`BlendWeight` 3-arg, `inner = 0.15*Extend`) so the band
+  blends back into the real core colour instead of leaving a hard line on wide
+  light wraps. Both user-confirmed in AE. (The Stage-5 band-box Gaussian and
+  its two tests were removed as moot once the Gaussian went away.)
 
-**NEXT — a KNOWN, SEPARATE issue surfaced at the Stage 5 gate (NOT a Stage-5
-regression; proven identical with the band-box on and off via the
-`EDGEREPAIR_FULLBLUR` A/B toggle, since removed):**
-On **premultiplied-alpha input footage**, raising Detail re-introduces a light
-edge rim. LIVE keyed footage (true straight edge RGB) is clean. Root cause: the
-plugin's locked STRAIGHT-alpha convention — a premultiplied export has
-multiplied semi-transparent edge RGB toward the matte colour, so
-`low = gaussianBlur(origStraightRGB)` and `hi = orig - low` (in
-`ER_ResultRow`, `src/EdgeRepair.cpp`) capture a spurious high-frequency step at
-the alpha boundary, and Detail (`out += w*detail*hi`) amplifies it into a rim.
-The `hi` guard currently zeroes only at `a <= 1e-6` (fully transparent), NOT
-across the semi-transparent band where the rim lives. This is an input-
-convention interaction, same failure SURFACE as the Gate-4 round-2
-alpha-weighted-blur bug but a different trigger. **Do NOT just start coding a
-fix — first confirm with the user how they want premultiplied input handled**
-(options to weigh, none chosen yet: detect & unpremultiply-on-input then
-re-premult; attenuate `hi` by an alpha-gradient / coverage term across the
-band; document it as a footage-prep requirement (straight in) and add no code;
-or a combination). The brief forbids new user params without an explicit ask,
-so a "premult input" knob is off the table unless the user requests it.
+**NEXT — View Mode deliverables (see `docs/HANDOFF_VIEWMODES.md`, which is
+gated on Stage 5 being merged — now done).** Promote the diagnostic View Mode
+entries into real deliverables per the user's intent: rename "Result" ->
+"Composited" (label only), Extended Colour = opaque clean-plate colour source,
+Distance Field = opaque distance-as-luminance usable as a luma/track matte
+downstream (polarity + white-point mapping are GATE DECISIONS, not guesses),
+Core Matte stays diagnostic. No new params; disk IDs 101-105 untouched. Read
+that file and confirm the mapping choices with the user before coding.
 
 **Build/test mechanics — do not relearn these the hard way:**
 - Build with `build_edgerepair.ps1`, NEVER `build.ps1` (that bumps

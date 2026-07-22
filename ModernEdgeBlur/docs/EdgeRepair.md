@@ -40,10 +40,18 @@ Keyed/rotoscoped footage has contaminated semi-transparent edge pixels
 4. **Blends** within the band `0 < d <= Extend`: replaces the original RGB's
    low frequencies with the extended colour, weighted by distance. Original
    alpha passes through unchanged (unless choked).
-5. **Detail** (frequency separation): `out = extendedLow + (origRGB -
-   gaussianBlur(origRGB, r)) * detail`, so plate grain/texture/motion-blur
-   micro-detail survives on top of the decontaminated colour base within the
-   blend band. This is the differentiator.
+5. **Detail** (SYNTHETIC GRAIN — changed 2026-07-22, replacing frequency
+   separation): `out = lerp(origRGB, ext, w) + w * detail * grain`, where
+   `grain` is zero-mean luma noise scaled to the plate's own local grain
+   amplitude (auto-estimated from the trusted core). So the repaired flat
+   colour gets believable grain matched to the footage, instead of the plate's
+   real high frequencies. This is the differentiator. (The old frequency-
+   separation split `out = extendedLow + (origRGB - gaussianBlur(origRGB,r)) *
+   detail` DARKENED the edge like a multiply — a real luminance edge and
+   texture are the same frequency, so `hi = orig - low` re-added a signed edge
+   step. Grain is zero-mean by construction and never sourced from orig's edge,
+   so it cannot darken; it also fixed the premultiplied-input rim and dropped
+   the Gaussian pass. See MM_Composite.h / MM_Grain.h.)
 6. **Alpha Choke** (default 0 = pure RGB operator): remaps output alpha along
    the same distance field. Positive chokes the matte inward with smooth
    Euclidean falloff; negative grows it. No morphological min/max filters —
@@ -288,10 +296,39 @@ before continuing. Keep every stage compiling and loadable in AE.
   texture — a fundamental limit, not a bug). Deciding this is expectation,
   not defect, the user chose to soften the out-of-box result rather than add
   a param: **Detail default lowered 100 -> 50** (`ER_DETAIL_DFLT` in
-  `EdgeRepair.h`; range unchanged 0..100; spec table above updated). OPEN
-  DESIGN NOTE (revisit only if the user re-raises): whether Detail should
-  roll off in the innermost band, or a separate rim-suppression control — no
-  new param without an explicit ask per the brief.
+  `EdgeRepair.h`; range unchanged 0..100; spec table above updated).
+
+  **DETAIL METHOD REPLACED + inner softness added (2026-07-22, v1.0.0.16,
+  user-confirmed in AE after Stage 5):** revisiting Detail on live footage, the
+  frequency-separation split was still DARKENING the edge like a multiply/
+  overlay (not just re-adding contamination) — because a real luminance edge
+  and texture are the same frequency, so `hi = orig - gaussianBlur(orig)` at
+  the matte boundary is a SIGNED edge step, and re-adding it inside the band
+  paints that step back on. This is a fundamental limit of frequency
+  separation for this job, not tuning. **Detail is now SYNTHETIC GRAIN**
+  (`src/common/MM_Grain.h`): deterministic zero-mean per-pixel luma noise,
+  amplitude auto-estimated from the trusted core (mean |luma neighbour diff|
+  over core pixels * 1.53), composited as `out = lerp(orig,ext,w) +
+  w*detail*grain` (`ComposeBandRGB`). Zero-mean by construction and never
+  sourced from orig's edge → CANNOT darken (headless-proven: mean composite
+  bias ~1e-4). Bonus: fixes the premultiplied-input rim (never touches orig's
+  edge RGB) and DROPS the Detail Gaussian pass entirely. User AE-confirmed: no
+  darkening at any Detail 0..100, grain plausible + self-scales with footage
+  grain, on both live keyed and premultiplied footage. The Gaussian header/
+  test remain (general utility) but nothing in the plugin calls them now.
+
+  Same round, the OPEN DESIGN NOTE was resolved: a hard `w=1` replacement at
+  the core boundary left a visible line where band meets core on WIDE LIGHT
+  WRAPS (band side = flat `ext`, core side = real `orig`). Fixed by reshaping
+  the blend weight with an INNER EASE — `w = smoothstep(0,inner,d) *
+  (1 - smoothstep(0,extend,d))`, `inner = ER_INNER_SOFT_FRAC(0.15) * Extend` —
+  so w ramps 0->1 up from the core instead of snapping, blending the band back
+  into the real core colour. Reshapes the WEIGHT only; sample points/distance
+  field unchanged. No new param (tied to Extend, resolution-relative). User
+  confirmed 15% "feels good". `BlendWeight` gained a 3-arg (extend, inner)
+  form; the 2-arg form is unchanged for back-compat. Tests: `test_grain.cpp`
+  (grain zero-mean/decorrelated/seamless/no-darkening), `test_composite.cpp`
+  `blendweight-inner` (eases 0 at core, peaks in band).
 
   NOTE for Stage 5: the Gaussian/EDT/fill run single-threaded and allocate
   per frame — Result at 4K float will be slow (seconds/frame); that is Stage
@@ -335,25 +372,25 @@ before continuing. Keep every stage compiling and loadable in AE.
   2026-07-22 via an A/B (`EDGEREPAIR_FULLBLUR` env toggle, since removed):
   band-box vs full-frame blur gave identical results on real footage.
 
-  Tests (all headless, `tests/build_tests.ps1`, no AE): `test_bandblur.cpp`
-  (band-box low == full-frame low for every used pixel, 7 shapes, 0 diffs),
-  `test_bandcomposite.cpp` (end-to-end composite byte-identical at Detail
-  0/50/100 even with stale reused scratch), `test_soak.cpp` (2000-frame
-  determinism + 0 allocations/frame after warm-up), plus the existing
-  distancefield/gaussian/pullpush/composite tests still green. Bench harness:
+  Tests (all headless, `tests/build_tests.ps1`, no AE): `test_soak.cpp`
+  (2000-frame determinism + 0 allocations/frame after warm-up), plus
+  distancefield/gaussian/pullpush/composite/grain all green. Bench harness:
   `tests/run_perf.ps1` (serial-vs-threaded bit-compare + timings). AE perf
   instrumentation: `ER_PERF_LOG` in `EdgeRepair.cpp` (default 0), read with
   `tests/read_ae_perf.ps1`.
 
-  KNOWN, SEPARATE ISSUE (NOT a Stage-5 regression — proven identical with the
-  band-box on and off): on PREMULTIPLIED-alpha input footage, raising Detail
-  can re-introduce a light edge rim. Root cause: the plugin's locked STRAIGHT-
-  alpha convention — a premultiplied export has multiplied semi-transparent
-  edge RGB toward the matte colour, so `low=blur(orig)` and `hi=orig-low`
-  capture a spurious step at the alpha boundary that Detail amplifies. Live
-  keyed footage (true straight edge RGB) is clean. This is an input-convention
-  interaction to address on its own; the `hi` guard currently only zeroes at
-  a<=1e-6 (fully transparent), not across the semi-transparent band.
+  SUPERSEDED NOTE: Stage 5's band-box-limited Gaussian (blur only the Detail
+  blend band's bbox) and its `test_bandblur.cpp`/`test_bandcomposite.cpp`
+  guardrails were REMOVED on 2026-07-22 when Detail switched from frequency
+  separation to synthetic grain (see the Stage 4 entry) — grain needs no
+  Gaussian at all, so the band-box optimisation became moot. The
+  `GaussianBlurH/V_Rect` region-limited passes were removed with it. The rest
+  of Stage 5 (threading, zero-alloc, early-out) stands unchanged.
+
+  RESOLVED (was a known separate issue): premultiplied-alpha input re-adding a
+  light edge rim at high Detail — the synthetic-grain Detail fixed it (grain
+  never touches orig's edge RGB), confirmed in AE on premultiplied footage
+  2026-07-22.
 - **Stage 6 — GPU path.** NOT STARTED, only after 0–5 signed off. DX12/HLSL
   kernels mirroring the CPU math exactly (threshold, Jump Flood distance,
   pull–push mip chain, composite). `PF_OutFlag2_SUPPORTS_GPU_RENDER_F32` +
