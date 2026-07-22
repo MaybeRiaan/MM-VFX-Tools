@@ -41,7 +41,7 @@ typedef short int			int16;
 #define MINOR_VERSION	0
 #define BUG_VERSION		0
 #define STAGE_VERSION	PF_Stage_DEVELOP
-#define BUILD_VERSION	10
+#define BUILD_VERSION	12
 
 // ---------------------------------------------------------------------------
 // Parameter ranges and defaults. The locked FIVE — Premult is internal-only
@@ -64,7 +64,12 @@ typedef short int			int16;
 // frequencies laid back over the extended colour base within the blend band.
 #define ER_DETAIL_MIN		  0.0
 #define ER_DETAIL_MAX		100.0
-#define ER_DETAIL_DFLT		100.0
+// Default lowered 100 -> 50 (2026-07-22): at 100 the plate's high frequencies
+// are re-added at full strength over the extended base, and a same-scale
+// contamination ring rides back on top (frequency separation cannot tell it
+// from legitimate edge texture). 50 keeps texture while halving that re-add,
+// a less aggressive out-of-box result. The knob still spans 0..100.
+#define ER_DETAIL_DFLT		 50.0
 
 // Alpha Choke: remap output alpha along the distance field. 0 = pure RGB
 // operator (alpha untouched). Positive chokes inward, negative grows. px.

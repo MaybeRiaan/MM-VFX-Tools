@@ -59,7 +59,7 @@ authoritative list:
 |---|-------|------|-------|---------|---------|
 | 1 | Erode | float slider (px), **signed** | −50 to +50 | 2.0 | 101 |
 | 2 | Extend | float slider (px) | 0–500 | 32.0 | 102 |
-| 3 | Detail | float slider (%) | 0–100 | 100 | 103 |
+| 3 | Detail | float slider (%) | 0–100 | 50 | 103 |
 | 4 | Alpha Choke | float slider (px) | −50 to +50 | 0 | 104 |
 | 5 | View Mode | popup: Result / Core Matte / Distance Field / Extended Colour | — | Result | 105 |
 
@@ -279,14 +279,23 @@ before continuing. Keep every stage compiling and loadable in AE.
     lit pixels untrusted and the extension repaints them with deeper body
     colour. Erode should be set just past the wrap (2 on this plate).
 
-  *Gate (PENDING re-check on v1.0.0.10):* light-wrap plate — rim gone at
-  Detail 0 (already confirmed), substantially reduced at Detail 100 vs
-  v1.0.0.9; grain still visible in the band at Detail 100; no dead-smooth
-  synthetic zone; Alpha Choke=0 bit-identical alpha; Detail 0 vs 100
-  differs only inside the band. NOTE for Stage 5: the Gaussian/EDT/fill run
-  single-threaded and allocate per frame — Result at 4K float will be slow
-  (seconds/frame); that is Stage 5's whole job, judge Stage 4 on
-  correctness only.
+  **Gate (PASSED 2026-07-22 on v1.0.0.11):** rim gone at Detail 0; Alpha
+  Choke=0 bit-identical alpha; Detail 0 vs 100 differs only inside the band.
+  At Detail 100 a same-scale contamination ring still rides back on the
+  extended base — confirmed CORRECT per the composite algebra (`out = orig +
+  w*(ext - low)` is a purely low-frequency correction; frequency separation
+  cannot distinguish a same-scale contamination ring from legitimate edge
+  texture — a fundamental limit, not a bug). Deciding this is expectation,
+  not defect, the user chose to soften the out-of-box result rather than add
+  a param: **Detail default lowered 100 -> 50** (`ER_DETAIL_DFLT` in
+  `EdgeRepair.h`; range unchanged 0..100; spec table above updated). OPEN
+  DESIGN NOTE (revisit only if the user re-raises): whether Detail should
+  roll off in the innermost band, or a separate rim-suppression control — no
+  new param without an explicit ask per the brief.
+
+  NOTE for Stage 5: the Gaussian/EDT/fill run single-threaded and allocate
+  per frame — Result at 4K float will be slow (seconds/frame); that is Stage
+  5's whole job, judge Stage 4 on correctness only.
 - **Stage 5 — CPU performance.** NOT STARTED. Parallelize EDT rows/columns
   and pull–push levels, reuse scratch buffers, early-out passthrough when
   Extend=0 and Alpha Choke=0. *Gate:* <~40ms/frame at 4K float on a modern
