@@ -2,6 +2,7 @@
 build/
 tests/build/
 tests/out/
+tests/ae_smoke_frame*.png
 *.aex
 *.obj
 *.pdb

@@ -53,12 +53,101 @@
 #include <string>
 #include <vector>
 
+// ===========================================================================
+// TEMPORARY DIAGNOSTIC LOGGING (GT_DIAG_LOG).
+// Appends lines to  %TEMP%\GrainTransfer_diag.log .
+// Purpose: answer the in-AE validation checklist items 3/4/5 with hard
+// numbers — resolved colour encode, cache HIT/MISS per frame, and the grain
+// sigmas actually measured (plus a multi-radius probe showing how much grain
+// energy the fixed 2px high-pass discards). Set GT_DIAG_LOG to 0 — or delete
+// this block and the three guarded call sites — to strip it entirely. Not for
+// release: the multi-radius probe does two extra full-image blurs per cache
+// miss.
+// ===========================================================================
+#define GT_DIAG_LOG 1
+
+#if GT_DIAG_LOG
+#include <windows.h>
+#include <algorithm>
+#include <cstdarg>
+#include <cstdio>
+
+static void GT_Log(const char *fmt, ...)
+{
+    char dir[MAX_PATH];
+    const DWORD dn = GetTempPathA(MAX_PATH, dir);
+    if (dn == 0 || dn > MAX_PATH - 24) return;
+    const std::string path = std::string(dir) + "GrainTransfer_diag.log";
+
+    // Format the whole line (with newline) into one buffer, then write once —
+    // keeps lines intact when AE renders frames on multiple threads.
+    char line[1024];
+    va_list ap; va_start(ap, fmt);
+    int len = vsnprintf(line, sizeof(line) - 2, fmt, ap);
+    va_end(ap);
+    if (len < 0) return;
+    if (len > (int)sizeof(line) - 2) len = (int)sizeof(line) - 2;
+    line[len]     = '\n';
+    line[len + 1] = '\0';
+
+    FILE *f = nullptr;
+    if (fopen_s(&f, path.c_str(), "a") != 0 || !f) return;
+    fwrite(line, 1, (size_t)len + 1, f);
+    fclose(f);
+}
+
+// Robust grain-amplitude estimate: median(|residual|) × 1.4826 over a
+// subsample (same robust estimator MeasureResponse uses per band). Content
+// edges barely move the median, so the trend of this across high-pass radii
+// reveals how much true grain lives below the 2px cutoff.
+static float GT_DiagMadSigma(const float *res, size_t N)
+{
+    if (!N) return 0.f;
+    const size_t step = N > 200000 ? N / 200000 : 1;
+    std::vector<float> a;
+    a.reserve(N / step + 1);
+    for (size_t i = 0; i < N; i += step) a.push_back(std::fabs(res[i]));
+    if (a.empty()) return 0.f;
+    std::nth_element(a.begin(), a.begin() + a.size() / 2, a.end());
+    return a[a.size() / 2] * 1.4826f;
+}
+#endif // GT_DIAG_LOG
+
 // Fixed analysis constants — deliberately not user-facing (paring knife).
 // TILE candidates: analysis needs at least one tile-sized patch, so small
 // grain samples fall back to smaller (still seamless) tiles.
 static const int   GT_TILE_CANDIDATES[3] = { 256, 128, 64 };
 static const int   GT_TILE_COUNT = 8;      // tiles in the bank
-static const float GT_BLUR_SIGMA = 2.0f;   // high-pass split radius (px)
+
+// High-pass split radius. Grain clump size scales with plate resolution, so a
+// single fixed radius under-captures coarser grain on high-res plates (2px was
+// tuned near 2K; a 4K plate needs ~4px, else >half the grain energy is thrown
+// away as "content" — the finer/weaker-than-source result). Scale linearly off
+// the long edge from the reference below. Floored at the base (small plates
+// keep the original radius) and capped so content structure can't leak in.
+// NOTE: interim resolution heuristic — the real fix measures grain correlation
+// length from the residual autocorrelation and sets the radius from that.
+static const float GT_BLUR_SIGMA_BASE = 2.0f;      // radius at the reference edge
+static const float GT_BLUR_REF_EDGE   = 2048.0f;   // long edge the base was tuned at
+static const float GT_BLUR_SIGMA_MAX  = 12.0f;     // cap (content-leak guard)
+
+static float GT_BlurSigmaFor(int W, int H)
+{
+    const int longEdge = W > H ? W : H;
+    float s = GT_BLUR_SIGMA_BASE * (float)longEdge / GT_BLUR_REF_EDGE;
+    if (s < GT_BLUR_SIGMA_BASE) s = GT_BLUR_SIGMA_BASE;
+    if (s > GT_BLUR_SIGMA_MAX)  s = GT_BLUR_SIGMA_MAX;
+    return s;
+}
+
+// The Grain Source is analyzed at a FIXED frame (comp time 0), never the
+// current frame. A moving source is thus snapshotted once and its grain
+// character reused for the whole shot — the per-frame stamp still animates the
+// grain, so the output moves without re-analyzing. This makes the analyze-once
+// cache hit on every frame whether or not the source moves. (If comp time 0
+// has no source content the layer just reads as absent there — pick a frame
+// that covers t=0, or this becomes a reference-frame control later.)
+static const A_long GT_SRC_REF_TIME = 0;
 
 // ---------------------------------------------------------------------------
 // Global data: AEGP plugin id (for AEGP suite calls from this effect) and
@@ -125,6 +214,7 @@ static A_Err GT_CacheCompute(AEGP_CCComputeOptionsRefconP optionsP,
     if (!val) return A_Err_ALLOC;
 
     const int W = opt->W, H = opt->H;
+    const float blurSigma = GT_BlurSigmaFor(W, H);
 
     // Residuals once; spectrum + response share them.
     std::vector<float> res[3];
@@ -133,7 +223,7 @@ static A_Err GT_CacheCompute(AEGP_CCComputeOptionsRefconP optionsP,
     try {
         for (int c = 0; c < 3; ++c) {
             res[c].resize((size_t)W * H);
-            gt::HighPassResidual(opt->planes[c], res[c].data(), W, H, GT_BLUR_SIGMA);
+            gt::HighPassResidual(opt->planes[c], res[c].data(), W, H, blurSigma);
             resP[c] = res[c].data();
         }
     } catch (const std::bad_alloc &) {
@@ -155,6 +245,43 @@ static A_Err GT_CacheCompute(AEGP_CCComputeOptionsRefconP optionsP,
     // An unanalyzable source (too small / degenerate) still caches — as an
     // explicitly invalid value — so we don't retry the analysis every frame.
     if (!ok) { val->spec = gt::GrainSpectrum(); val->bank = gt::TileBank(); }
+
+#if GT_DIAG_LOG
+    {
+        // Fixed 2/4/8px reference probe on the green channel (independent of
+        // the radius actually used): the trend shows how much grain lives
+        // below each cutoff. `blur=` is the radius this analysis actually used
+        // — flatSigma/specSigma are measured at that radius, so compare them to
+        // the probe to see how much of the grain the chosen radius now keeps.
+        const size_t N = (size_t)W * H;
+        float s2 = 0.f, s4 = 0.f, s8 = 0.f;
+        try {
+            std::vector<float> r2(N), r4(N), r8(N);
+            gt::HighPassResidual(opt->planes[1], r2.data(), W, H, 2.0f);
+            gt::HighPassResidual(opt->planes[1], r4.data(), W, H, 4.0f);
+            gt::HighPassResidual(opt->planes[1], r8.data(), W, H, 8.0f);
+            s2 = GT_DiagMadSigma(r2.data(), N);
+            s4 = GT_DiagMadSigma(r4.data(), N);
+            s8 = GT_DiagMadSigma(r8.data(), N);
+        } catch (...) {}
+
+        GT_Log("[analyze] %dx%d enc=%d ok=%d blur=%.2f tile=%d patches=%d crossCorr=%.3f | "
+               "specSigma RGB=%.6f/%.6f/%.6f | flatSigma RGB=%.6f/%.6f/%.6f | "
+               "madSigma@2/4/8px[G]=%.6f/%.6f/%.6f",
+               (int)W, (int)H, (int)opt->key.encodeMode, (int)ok, blurSigma,
+               val->spec.n, val->spec.patchesUsed, val->spec.crossCorr,
+               val->spec.sigma[0], val->spec.sigma[1], val->spec.sigma[2],
+               val->resp.flatSigma[0], val->resp.flatSigma[1], val->resp.flatSigma[2],
+               s2, s4, s8);
+        GT_Log("[analyze] band[G] L:sigma = %.3f:%.6f %.3f:%.6f %.3f:%.6f "
+               "%.3f:%.6f %.3f:%.6f",
+               val->resp.lumaMid[0], val->resp.sigma[1][0],
+               val->resp.lumaMid[1], val->resp.sigma[1][1],
+               val->resp.lumaMid[2], val->resp.sigma[1][2],
+               val->resp.lumaMid[3], val->resp.sigma[1][3],
+               val->resp.lumaMid[4], val->resp.sigma[1][4]);
+    }
+#endif
 
     *out_valuePP = val;
     return A_Err_NONE;
@@ -462,10 +589,12 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 // ---------------------------------------------------------------------------
 // PreRender. Checkout the target with the unmodified request (this effect
 // reads only the pixel it writes — no inflation), checkout the Grain Source
-// at its full extent for analysis, resolve the apply space, and stash
-// everything SmartRender needs. Frame index + resolved encode are mixed
-// into the render GUID so AE's frame cache stays honest (grain re-random-
-// izes per frame; Auto can change with project settings, not just params).
+// at its full extent AND at a fixed reference frame (GT_SRC_REF_TIME) for
+// analysis, resolve the apply space, and stash everything SmartRender needs.
+// Sampling the source at a fixed frame is what makes analyze-once hold for a
+// moving source. Frame index + resolved encode are mixed into the render GUID
+// so AE's frame cache stays honest (grain re-randomizes per frame; Auto can
+// change with project settings, not just params).
 // ---------------------------------------------------------------------------
 static PF_Err
 PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
@@ -528,22 +657,24 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
         req.rect.left = -1000000; req.rect.top = -1000000;
         req.rect.right = 1000000; req.rect.bottom = 1000000;
 
+        // Sample the source at the FIXED reference time, not current_time, so
+        // the analysis (and its cache key) is identical on every output frame.
         PF_CheckoutResult src_result;
         AEFX_CLR_STRUCT(src_result);
         PF_Err serr = extra->cb->checkout_layer(in_data->effect_ref,
             GT_SOURCE, GT_SOURCE, &req,
-            in_data->current_time, in_data->time_step, in_data->time_scale,
+            GT_SRC_REF_TIME, in_data->time_step, in_data->time_scale,
             &src_result);
         if (serr == PF_Err_NONE &&
             src_result.result_rect.right > src_result.result_rect.left &&
             src_result.result_rect.bottom > src_result.result_rect.top) {
             prd->hasSource = TRUE;
 
-            // Source param state — the analyze-once cache key. Scoped to
-            // the current checkout time: still sources hash identically on
-            // every frame.
-            A_Time start; start.value = in_data->current_time; start.scale = in_data->time_scale;
-            A_Time dur;   dur.value = in_data->time_step;      dur.scale = in_data->time_scale;
+            // Source param state — the analyze-once cache key. Scoped to the
+            // SAME fixed reference time, so every frame hashes identically and
+            // hits the cache (a moving source no longer re-analyzes per frame).
+            A_Time start; start.value = GT_SRC_REF_TIME;   start.scale = in_data->time_scale;
+            A_Time dur;   dur.value = in_data->time_step;   dur.scale = in_data->time_scale;
             try {
                 suites.ParamUtilsSuite3()->PF_GetCurrentState(
                     in_data->effect_ref, GT_SOURCE, &start, &dur, &prd->srcState);
@@ -684,6 +815,9 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         GT_AnalysisValue *inlineVal = nullptr;
         AEGP_CCCheckoutReceiptP receipt = nullptr;
         AEGP_ComputeCacheSuite1 *ccs = nullptr;
+#if GT_DIAG_LOG
+        bool diagCacheHit = false;
+#endif
 
         if (prd && prd->hasSource) {
             GT_AnalysisOptions opt;
@@ -705,6 +839,9 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 AEGP_CCComputeValueRefconP vp = nullptr;
                 if (ccs->AEGP_GetReceiptComputeValue(receipt, &vp) == A_Err_NONE)
                     analysis = static_cast<const GT_AnalysisValue*>(vp);
+#if GT_DIAG_LOG
+                diagCacheHit = (analysis != nullptr);
+#endif
             }
 
             // Miss: render + unpack the source and analyze (into the cache
@@ -763,6 +900,15 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         // ------------------------------------------------------------------
         const bool canStamp = analysis && analysis->bank.valid() &&
                               analysis->resp.valid && prd;
+
+#if GT_DIAG_LOG
+        GT_Log("[render] frame=%d cache=%s enc=%d %dx%d canStamp=%d hasSource=%d",
+               prd ? (int)prd->frame : -1,
+               diagCacheHit ? "HIT" : "MISS",
+               prd ? (int)prd->encodeMode : -1,
+               (int)W, (int)H, (int)canStamp,
+               (prd && prd->hasSource) ? 1 : 0);
+#endif
 
         if (canStamp) {
             GT_StampRefcon rc;

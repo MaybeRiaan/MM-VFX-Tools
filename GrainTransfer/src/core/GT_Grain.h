@@ -28,6 +28,9 @@ struct GrainSpectrum {
     int n = 0;                        // FFT/tile size (power of two)
     std::vector<float> power[3];      // n*n average |F|² per RGB channel, DC zeroed
     float sigma[3] = { 0, 0, 0 };     // absolute residual sigma per channel (apply space)
+    float crossCorr = 0.f;            // mean cross-channel grain correlation [0,1]:
+                                      // 0 = independent (chroma-heavy/digital look),
+                                      // 1 = monochromatic (luma grain, "unified")
     int patchesUsed = 0;              // grain patches that survived selection
     bool valid() const { return n > 0 && patchesUsed > 0; }
 };
@@ -74,9 +77,13 @@ bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
 
 // Bake `count` RPN tiles from the measured spectrum. Per tile and channel:
 // fresh white-noise field → FFT → keep phase, impose measured magnitude →
-// inverse FFT → normalize to zero mean, unit sigma. Channels use independent
-// phases (film grain is decorrelated across emulsion layers; this is what
-// the sampled per-channel spectra give for free). Deterministic in `seed`.
+// inverse FFT → normalize to zero mean, unit sigma. Channel phases are mixed
+// from a per-tile SHARED phase field and a per-channel independent one,
+// weighted by spec.crossCorr, so the tiles carry the source's measured
+// cross-channel grain correlation (luma-heavy film grain reads unified;
+// crossCorr=0 falls back to fully independent per-channel phases). The
+// per-channel magnitude spectrum is imposed unchanged, so grain size/character
+// per channel is unaffected. Deterministic in `seed`.
 void SynthesizeTileBank(const GrainSpectrum &spec, int count, uint64_t seed,
                         TileBank &out);
 

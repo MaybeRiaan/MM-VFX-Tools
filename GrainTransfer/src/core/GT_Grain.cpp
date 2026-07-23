@@ -149,11 +149,21 @@ bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
     const float winNorm = (float)((double)tileN / winPower);
 
     Fft2D fft(n);
+    std::vector<float> ms[3] = { std::vector<float>(tileN),
+                                 std::vector<float>(tileN),
+                                 std::vector<float>(tileN) };
     std::vector<float> patch(tileN);
     std::vector<kiss_fft_cpx> spec(tileN);
     std::vector<double> accPower[3];
     double accVar[3] = { 0, 0, 0 };
     for (int c = 0; c < 3; ++c) accPower[c].assign(tileN, 0.0);
+
+    // Cross-channel accumulators (mean-subtracted residual, over kept patches)
+    // → the grain's mean pairwise correlation, reproduced at synthesis so the
+    // tiles carry the source's luma/chroma balance instead of assuming
+    // independent (chroma-heavy) channels.
+    double sqSum[3] = { 0, 0, 0 };
+    double crossSum[3] = { 0, 0, 0 };   // [0]=R·G, [1]=G·B, [2]=R·B
 
     int used = 0;
     for (int pj = 0; pj < py; ++pj) {
@@ -162,27 +172,39 @@ bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
             if (s > hi || s < lo) continue;
             ++used;
 
+            // Mean-subtract each channel's patch first (needed intact for the
+            // cross products before windowing).
             for (int c = 0; c < 3; ++c) {
-                // Copy patch, subtract mean, window.
                 double mean = 0.0;
                 for (int y = 0; y < n; ++y) {
                     const float *row = res[c] +
                         ((size_t)(pj * n + y) * W + (size_t)pi * n);
                     for (int x = 0; x < n; ++x) {
-                        patch[(size_t)y * n + x] = row[x];
-                        mean += row[x];
+                        const float v = row[x];
+                        ms[c][(size_t)y * n + x] = v;
+                        mean += v;
                     }
                 }
                 mean /= (double)tileN;
-
                 double var = 0.0;
                 for (size_t i = 0; i < tileN; ++i) {
-                    const float v = (float)(patch[i] - mean);
+                    const float v = (float)(ms[c][i] - mean);
+                    ms[c][i] = v;
                     var += (double)v * v;
-                    patch[i] = v * win[i];
                 }
                 accVar[c] += var / (double)tileN;
+                sqSum[c] += var;
+            }
 
+            for (size_t i = 0; i < tileN; ++i) {
+                crossSum[0] += (double)ms[0][i] * ms[1][i];
+                crossSum[1] += (double)ms[1][i] * ms[2][i];
+                crossSum[2] += (double)ms[0][i] * ms[2][i];
+            }
+
+            // Window + FFT + accumulate power per channel.
+            for (int c = 0; c < 3; ++c) {
+                for (size_t i = 0; i < tileN; ++i) patch[i] = ms[c][i] * win[i];
                 fft.forward(patch.data(), spec.data());
                 double *acc = accPower[c].data();
                 for (size_t i = 0; i < tileN; ++i)
@@ -203,6 +225,16 @@ bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
         out.power[c][0] = 0.f;   // DC — grain is zero-mean by definition
         out.sigma[c] = (float)std::sqrt(accVar[c] / (double)used);
     }
+
+    // Mean pairwise correlation, clamped to [0,1] (grain correlation is
+    // non-negative; noise/negative estimates collapse to independent).
+    const double rRG = crossSum[0] / (std::sqrt(sqSum[0] * sqSum[1]) + 1e-30);
+    const double rGB = crossSum[1] / (std::sqrt(sqSum[1] * sqSum[2]) + 1e-30);
+    const double rRB = crossSum[2] / (std::sqrt(sqSum[0] * sqSum[2]) + 1e-30);
+    double rho = (rRG + rGB + rRB) / 3.0;
+    if (rho < 0.0) rho = 0.0; else if (rho > 1.0) rho = 1.0;
+    out.crossCorr = (float)rho;
+
     return true;
 }
 
@@ -223,38 +255,60 @@ void SynthesizeTileBank(const GrainSpectrum &spec, int count, uint64_t seed,
 
     Fft2D fft(n);
     std::vector<float> noise(tileN);
+    std::vector<float> noiseShared(tileN);
     std::vector<kiss_fft_cpx> spc(tileN);
+    std::vector<kiss_fft_cpx> specShared(tileN);
     std::vector<float> mag(tileN);
 
+    // Cross-channel correlation weight. A per-tile SHARED phase field is mixed
+    // into each channel's own by rho; both donors are FFTs of real fields, so
+    // any linear blend stays Hermitian and the inverse stays real. rho=0 →
+    // fully independent channels (the old behaviour); rho=1 → one shared phase
+    // → monochromatic (luma) grain.
+    float rho = spec.crossCorr;
+    if (rho < 0.f) rho = 0.f; else if (rho > 1.f) rho = 1.f;
+    const float sIndep = std::sqrt(1.f - rho * rho);
+
+    // Box–Muller Gaussian white field into `buf`, deterministic in `key`.
+    auto fillNoise = [&](std::vector<float> &buf, uint64_t key) {
+        Rng rng(key);
+        for (size_t i = 0; i < tileN; i += 2) {
+            float u1 = rng.nextFloat();
+            if (u1 < 1e-12f) u1 = 1e-12f;
+            const float u2 = rng.nextFloat();
+            const float r = std::sqrt(-2.f * std::log(u1));
+            const float a = 6.28318530717959f * u2;
+            buf[i] = r * std::cos(a);
+            if (i + 1 < tileN) buf[i + 1] = r * std::sin(a);
+        }
+    };
+
     for (int t = 0; t < count; ++t) {
+        // Shared phase donor for this tile (identical across all 3 channels).
+        fillNoise(noiseShared, HashSeed(seed, (uint64_t)t, 0x73686172ull));
+        fft.forward(noiseShared.data(), specShared.data());
+
         for (int c = 0; c < 3; ++c) {
             // Magnitude from the measured average power.
             const float *pw = spec.power[c].data();
             for (size_t i = 0; i < tileN; ++i)
                 mag[i] = std::sqrt(pw[i] < 0.f ? 0.f : pw[i]);
 
-            // Fresh white-noise field → its spectrum donates the phase.
-            // (Real field ⇒ Hermitian spectrum ⇒ real inverse. Gaussian via
-            // Box–Muller for a well-conditioned, full-band phase source.)
-            Rng rng(HashSeed(seed, (uint64_t)t * 3 + c, 0x67726169ull));
-            for (size_t i = 0; i < tileN; i += 2) {
-                float u1 = rng.nextFloat();
-                if (u1 < 1e-12f) u1 = 1e-12f;
-                const float u2 = rng.nextFloat();
-                const float r = std::sqrt(-2.f * std::log(u1));
-                const float a = 6.28318530717959f * u2;
-                noise[i] = r * std::cos(a);
-                if (i + 1 < tileN) noise[i + 1] = r * std::sin(a);
-            }
-
+            // Channel-independent phase donor.
+            fillNoise(noise, HashSeed(seed, (uint64_t)t * 3 + c, 0x67726169ull));
             fft.forward(noise.data(), spc.data());
+
+            // Blend shared + independent phase by rho, then impose the measured
+            // per-channel magnitude — grain size/character per channel is
+            // unchanged; only the cross-channel alignment moves.
             for (size_t i = 0; i < tileN; ++i) {
-                const float re = spc[i].r, im = spc[i].i;
+                const float re = rho * specShared[i].r + sIndep * spc[i].r;
+                const float im = rho * specShared[i].i + sIndep * spc[i].i;
                 const float len = std::sqrt(re * re + im * im);
                 if (len > 1e-20f) {
-                    const float s = mag[i] / len;
-                    spc[i].r = re * s;
-                    spc[i].i = im * s;
+                    const float sc = mag[i] / len;
+                    spc[i].r = re * sc;
+                    spc[i].i = im * sc;
                 } else {
                     spc[i].r = mag[i];
                     spc[i].i = 0.f;
