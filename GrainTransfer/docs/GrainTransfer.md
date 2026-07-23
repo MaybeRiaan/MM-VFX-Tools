@@ -41,9 +41,12 @@ content structure in the gate tests). Instead:
   gradient ratio 0.98 — seam-free tiling by construction).
 
 Per frame, the stamp re-randomizes tile choice, offset, and flips from
-(Seed, frame) — grain never freezes, at near-zero cost. Channels use
-independent phases (film grain decorrelates across emulsion layers); the
-per-channel measured spectra and sigmas come free from the same analysis.
+(Seed, frame) — grain never freezes, at near-zero cost. Channels share a
+phase field weighted by the source's measured cross-channel grain correlation
+(`GrainSpectrum.crossCorr`), so luma-dominant film grain reproduces as unified
+rather than chromatic; the per-channel measured spectra and sigmas come free
+from the same analysis. Reproducing that correlation with full fidelity is an
+open thread — see *Cross-channel colour-grain fidelity* below.
 
 **Known, quantified limitation:** frequency separation transfers the residual
 band — ~72% of raw grain energy for fine grain (σ≈0.7 px correlation) with the
@@ -182,6 +185,73 @@ SmartRender stack; cache values are AE-owned and read-only after compute.
    frames → stable memory.
 6. **Benchmark**: same shot with AE Match Grain vs Grain Transfer; record
    per-frame ratio (expect an order of magnitude or more once cached).
+
+## Cross-channel colour-grain fidelity — exploration roadmap
+
+For the next session. The goal is to reproduce the source grain's **measured**
+cross-channel correlation faithfully — not to force it to 1.0 (that would strip
+the plate's real chroma-grain component).
+
+**Current state (v1.0.0.9).** `MeasureGrainSpectrumRes` measures the source
+grain's mean pairwise cross-channel correlation into `GrainSpectrum.crossCorr`
+(∈ [0,1]); `SynthesizeTileBank` reproduces it by blending a per-tile *shared*
+phase field into each channel by ρ = `crossCorr`, then imposing each channel's
+measured magnitude. This moved the look from "digital / RGB-separated" toward
+the plate's unified luma grain (measured `crossCorr ≈ 0.83` on the first test
+plate).
+
+**Known gap.** The *realized* output correlation **undershoots** the measured
+target: taking the phase-angle of a `ρ·shared + √(1−ρ²)·independent` blend is
+nonlinear, so ρ-in ≠ correlation-out. A second, structural ceiling: with pure
+phase-sharing, two channels even at ρ=1 are only as correlated as their
+magnitude spectra are similarly *shaped*
+(`Σ mag_i·mag_j / √(Σ mag_i²·Σ mag_j²)`) — a coarser blue-channel grain caps
+correlation below 1. The options below close the undershoot and/or remove the
+ceiling.
+
+**1. Closed-loop ρ calibration** *(quick win; analysis-time only).*
+After baking, measure the tile bank's actual cross-channel correlation, compare
+to target `crossCorr`, and boost input ρ (2–3 secant steps, or a precomputed
+ρ→realized map) until realized ≈ target. Lives in `SynthesizeTileBank` /
+`GT_CacheCompute`; no per-frame cost. Removes the undershoot with a minimal
+change. Still one scalar ρ, so it won't capture per-pair asymmetry and can't
+beat the spectral-shape ceiling.
+
+**2. Common-factor spatial model** *(the proper fix).*
+Share a *field*, not just phase: `grain_c = a_c·L + N_c`, where `L` is one
+shared unit luma-grain tile added to all channels and `N_c` is independent per
+channel. Solve `a_c` from the measured 3×3 grain covariance `C` (rank-1 factor:
+`a_R = √(C_RG·C_RB / C_GB)` etc., with sign/positivity guards); independent
+variance is `var(N_c) = C_cc − a_c²`. Reproduces the covariance **exactly** — no
+phase-blend nonlinearity, no ceiling — and captures per-pair structure
+(R–G ≠ G–B ≠ R–B). Spectral split: with `power_c = a_c²·P_L + P_Nc`, pick a
+shared spectrum `P_L` (e.g. the sigma-weighted channel average) and set
+`P_Nc = max(power_c − a_c²·P_L, 0)`. Requires storing the covariance (or `a_c`
++ shared/independent spectra) on `GrainSpectrum` and rewriting the synth loop;
+fall back to method 1 / independent on a degenerate (non-PSD) covariance.
+
+**4. Per-frequency cross-spectral (3×3 Cholesky)** *(theoretical ceiling;
+likely overkill).* Measure the full 3×3 cross-spectral density `S(f)` per bin
+(accumulate `F_i(f)·conj(F_j(f))` over patches). Synthesize per bin as
+`F(f) = L(f)·z`, `z` a 3-vector of independent unit complex Gaussians, `L(f)`
+the Cholesky factor of `S(f) = L Lᴴ`; preserve Hermitian symmetry
+(`S(−f) = S(f)ᴴ`). Captures *frequency-dependent* correlation (luma-correlated
+lows, chromatic highs) that 1–2 cannot. Costs ~6 floats/bin (Hermitian 3×3) of
+storage and a per-bin 3×3 factorization at synth; needs regularization when
+`S(f)` is near-singular. Reach for this only if 1–2 fall short on real stocks.
+
+**6. Artistic override** *(optional; off by default).* A "Grain Unify" gain/bias
+on the measured `crossCorr` (or on the covariance in method 2) so an artist can
+push toward monochromatic — or the other way — for a look. Departs from the
+"measure and match" principle and adds a control against the locked-seven-param
+design, so keep it opt-in with the default = faithful (measured) reproduction.
+
+*Also on the table, not detailed here:* opponent-space (Y/Cb/Cr) synthesis — an
+alternative framing of method 2 that additionally fixes the luma-vs-chroma
+energy split but touches the response-curve path — and tightening the
+`crossCorr` **measurement** itself (measure on the flattest mid-luma patches) so
+1/2/4 aim at a truer target. The `GT_DIAG_LOG` build logs `crossCorr` per
+analysis for evaluating any of these against real plates.
 
 ## Non-goals (unchanged from the brief)
 
