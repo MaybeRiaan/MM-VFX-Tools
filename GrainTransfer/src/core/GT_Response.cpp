@@ -1,0 +1,126 @@
+/*  GT_Response.cpp — see GT_Response.h.  */
+
+#include "GT_Response.h"
+#include "GT_Colour.h"
+
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+namespace gt {
+
+void MeasureResponse(const float *const rgb[3], const float *const residual[3],
+                     int W, int H, ResponseCurve &out)
+{
+    out = ResponseCurve();
+    const size_t N = (size_t)W * H;
+    if (!N) return;
+
+    // Luminance plane and its 1st/99th percentiles (subsampled sort — exact
+    // percentiles are not needed for band edges).
+    std::vector<float> luma(N);
+    for (size_t i = 0; i < N; ++i)
+        luma[i] = Luma(rgb[0][i], rgb[1][i], rgb[2][i]);
+
+    const size_t step = N > 65536 ? N / 65536 : 1;
+    std::vector<float> sample;
+    sample.reserve(N / step + 1);
+    for (size_t i = 0; i < N; i += step) sample.push_back(luma[i]);
+    std::sort(sample.begin(), sample.end());
+    const float lo = sample[(size_t)((double)(sample.size() - 1) * 0.01)];
+    const float hi = sample[(size_t)((double)(sample.size() - 1) * 0.99)];
+    const float span = hi - lo;
+    if (span <= 1e-6f) {
+        // Flat plate — no luminance structure to measure; curve collapses
+        // to the overall sigma (which is exactly right for a flat sample).
+        double acc[3] = { 0, 0, 0 };
+        for (int c = 0; c < 3; ++c) {
+            for (size_t i = 0; i < N; ++i)
+                acc[c] += (double)residual[c][i] * residual[c][i];
+            out.flatSigma[c] = (float)std::sqrt(acc[c] / (double)N);
+        }
+        for (int b = 0; b < ResponseCurve::kBands; ++b) {
+            out.lumaMid[b] = lo + ((float)b + 0.5f) * 0.2f;
+            for (int c = 0; c < 3; ++c) out.sigma[c][b] = out.flatSigma[c];
+        }
+        out.valid = true;
+        return;
+    }
+
+    const int K = ResponseCurve::kBands;
+    const float bandW = span / (float)K;
+
+    // Bucket pixel indices by luminance band (subsampled for the MAD sort's
+    // sake on big plates — 6K needs no more than ~100k samples per band).
+    std::vector<std::vector<float>> bandAbs[3];
+    for (int c = 0; c < 3; ++c) bandAbs[c].assign((size_t)K, {});
+    std::vector<size_t> bandCount((size_t)K, 0);
+
+    const size_t pixStep = N > 4000000 ? N / 4000000 : 1;
+    for (size_t i = 0; i < N; i += pixStep) {
+        int b = (int)((luma[i] - lo) / bandW);
+        if (b < 0) b = 0; else if (b >= K) b = K - 1;
+        ++bandCount[(size_t)b];
+        for (int c = 0; c < 3; ++c)
+            bandAbs[c][(size_t)b].push_back(std::fabs(residual[c][i]));
+    }
+
+    // Per-band robust sigma: median(|residual|) × 1.4826 (MAD about an
+    // assumed zero median — the residual is zero-mean by construction).
+    bool measured[ResponseCurve::kBands] = {};
+    const size_t minPix = 500;
+    for (int b = 0; b < K; ++b) {
+        out.lumaMid[b] = lo + ((float)b + 0.5f) * bandW;
+        if (bandCount[(size_t)b] < minPix) continue;
+        measured[b] = true;
+        for (int c = 0; c < 3; ++c) {
+            std::vector<float> &v = bandAbs[c][(size_t)b];
+            std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+            out.sigma[c][b] = v[v.size() / 2] * 1.4826f;
+        }
+    }
+
+    // Unmeasured bands inherit the nearest measured neighbour.
+    for (int b = 0; b < K; ++b) {
+        if (measured[b]) continue;
+        int best = -1, bestDist = K + 1;
+        for (int m = 0; m < K; ++m) {
+            if (!measured[m]) continue;
+            const int d = std::abs(m - b);
+            if (d < bestDist) { bestDist = d; best = m; }
+        }
+        if (best < 0) return;   // nothing measured at all → invalid
+        for (int c = 0; c < 3; ++c) out.sigma[c][b] = out.sigma[c][best];
+    }
+
+    // Flat sigma: pixel-weighted average of band sigmas.
+    size_t total = 0;
+    for (int b = 0; b < K; ++b) total += bandCount[(size_t)b];
+    for (int c = 0; c < 3; ++c) {
+        double acc = 0.0;
+        for (int b = 0; b < K; ++b)
+            acc += (double)out.sigma[c][b] * (double)bandCount[(size_t)b];
+        out.flatSigma[c] = total ? (float)(acc / (double)total) : 0.f;
+    }
+
+    out.valid = true;
+}
+
+float EvalSigma(const ResponseCurve &c, int channel, float L, float trim)
+{
+    const int K = ResponseCurve::kBands;
+    float s;
+    if (L <= c.lumaMid[0]) {
+        s = c.sigma[channel][0];
+    } else if (L >= c.lumaMid[K - 1]) {
+        s = c.sigma[channel][K - 1];
+    } else {
+        int b = 0;
+        while (b < K - 2 && L > c.lumaMid[b + 1]) ++b;
+        const float t = (L - c.lumaMid[b]) / (c.lumaMid[b + 1] - c.lumaMid[b]);
+        s = c.sigma[channel][b] + t * (c.sigma[channel][b + 1] - c.sigma[channel][b]);
+    }
+    return c.flatSigma[channel] + trim * (s - c.flatSigma[channel]);
+}
+
+} // namespace gt
