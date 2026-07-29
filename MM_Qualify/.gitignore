@@ -1,0 +1,15 @@
+# Build output
+/build/
+/tests/out/
+
+# AE SDK — license prohibits redistribution; vendored locally, see README.
+/sdk/
+
+# PiPLTool.exe ships with the AE SDK; not redistributable.
+/resources/PiPLTool.exe
+
+# Editor / OS cruft
+.vs/
+*.user
+.DS_Store
+Thumbs.db

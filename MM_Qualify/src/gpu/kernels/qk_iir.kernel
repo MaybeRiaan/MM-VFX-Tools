@@ -1,0 +1,33 @@
+/*  qk_iir.kernel — one temporal-stabilize IIR step over a tile.
+
+    PLATFORM-FREE (gpu-kernel-rules §0). Counterpart of smart_render.cpp's
+    QK_IIRRow, calling the same QK_IIRStep. gFirst == 1 seeds the state
+    plane from the incoming matte (the warm start at the oldest available
+    history frame). The state plane binds as OUT and is read+written per
+    pixel — a per-pixel-independent RMW, safe by construction.
+
+    Buffer slots:
+      u0  gMIn     f1 incoming matte (this frame's cleaned matte)
+      u4  gState   f1 IIR state, read+write
+*/
+
+#include "../../qk_core.h"
+
+BUF_IN (gMIn,   0);
+BUF_OUT(gState, 0);
+
+PARAM_BLOCK_BEGIN
+    int   gW;
+    int   gRows;
+    int   gFirst;
+    float gKAttack;
+    float gKRelease;
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(qk_iir)
+{
+    QK_GUARD(gW, gRows)
+    const int i = GID_Y * gW + GID_X;
+    const float m = gMIn[i];
+    gState[i] = (gFirst != 0) ? m : QK_IIRStep(gState[i], m, gKAttack, gKRelease);
+}
