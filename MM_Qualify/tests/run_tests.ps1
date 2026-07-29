@@ -1,10 +1,18 @@
 # MM Qualify - run the AE-free core + pipeline-parity tests.
-# Compiles the two test TUs against the vendored SDK headers (for A_long /
+# Compiles the two test TUs against the shared AE SDK headers (for A_long /
 # PF types only) with cl, then runs them. Exit code mirrors the tests
 # (0 = all pass). No AE host, no GPU device required.
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
+
+# Same shared SDK the CMake build uses (AE_SDK_ROOT); override via env var.
+$SdkRoot = if ($env:AE_SDK_ROOT) { $env:AE_SDK_ROOT } else {
+    "E:\OFX DEV\AE SDK\AfterEffectsSDK_25.6_61_win\ae25.6_61.64bit.AfterEffectsSDK\Examples"
+}
+if (-not (Test-Path (Join-Path $SdkRoot "Headers\AE_Effect.h"))) {
+    throw "AE SDK not found at: $SdkRoot (set AE_SDK_ROOT)"
+}
 
 # Enter the VS dev environment for cl.exe.
 $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -21,12 +29,12 @@ call "$vcvars"
 if errorlevel 1 exit /b 1
 cd /d "$outDir"
 cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
-   /I "$Root\sdk\Headers" /I "$Root\sdk\Headers\SP" /I "$Root\sdk\Util" /I "$Root\src" ^
+   /I "$SdkRoot\Headers" /I "$SdkRoot\Headers\SP" /I "$SdkRoot\Util" /I "$Root\src" ^
    "$PSScriptRoot\core_test.cpp" ^
    /Fe:"$coreExe"
 if errorlevel 1 exit /b 1
 cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
-   /I "$Root\sdk\Headers" /I "$Root\sdk\Headers\SP" /I "$Root\sdk\Util" /I "$Root\src" ^
+   /I "$SdkRoot\Headers" /I "$SdkRoot\Headers\SP" /I "$SdkRoot\Util" /I "$Root\src" ^
    "$PSScriptRoot\pipeline_test.cpp" "$Root\src\blur.cpp" "$Root\src\garbage.cpp" "$Root\src\common\MM_Common.cpp" ^
    /Fe:"$pipeExe"
 if errorlevel 1 exit /b 1

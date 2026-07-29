@@ -99,21 +99,24 @@ git remote remove mig
 Repeated for `MM_Qualify` (branch `master`) and `MM_FreqSep` (branch
 `master`). Branch names differ per source repo — check before merging.
 
-### Untracked build inputs carried by hand
+### Untracked build inputs — superseded by SDK consolidation (2026-07-29)
 
-Gitignored files the builds need, copied from the old folders after the
-history merges (they are in no commit, by design):
+At migration time, MM_Qualify and MM_FreqSep vendored a gitignored `sdk/`
+subset plus `resources/PiPLTool.exe`, which were copied over by hand. Later
+the same day both projects were switched to GrainTransfer's convention — the
+shared SDK install referenced by the `AE_SDK_ROOT` CMake cache var (default
+`E:/OFX DEV/AE SDK/AfterEffectsSDK_25.6_61_win/.../Examples`), with
+`PiPLtool.exe` taken from the SDK's own `Resources/`. The vendored copies
+were verified **byte-identical** to the full SDK before the switch, then
+deleted; both projects clean-rebuilt and passed their full test suites
+against the shared SDK. **A fresh clone now needs nothing restored by hand**
+— just an SDK install (override path with `-DAE_SDK_ROOT=...` / the
+`AE_SDK_ROOT` env var for the test runners).
 
-| Project | Item | Why |
-|---|---|---|
-| MM_Qualify | `sdk/` (Headers/Util/Resources subset of AE SDK) | vendored, `CMakeLists` uses `${CMAKE_CURRENT_SOURCE_DIR}/sdk` |
-| MM_Qualify | `resources/PiPLTool.exe` | PiPL resource compiler, required by build |
-| MM_FreqSep | `sdk/`, `resources/PiPLTool.exe` | same |
-| GrainTransfer | — nothing — | SDK referenced by **absolute path** `E:/OFX DEV/AE SDK/...` (cache var `AE_SDK_ROOT`), still valid from the new location |
-
-Not carried: `build/`, `tests/out/`, GrainTransfer's `tests/ae_smoke_frame*.png`
-(all regenerable), and MM_FreqSep's untracked `AE FS.code-workspace` (encodes
-old paths; recreate a workspace at the suite root if wanted).
+Not carried from the old folders: `build/`, `tests/out/`, GrainTransfer's
+`tests/ae_smoke_frame*.png` (all regenerable), and MM_FreqSep's untracked
+`AE FS.code-workspace` (encodes old paths; recreate a workspace at the suite
+root if wanted).
 
 ## Verification results (no-regress gate)
 
@@ -141,7 +144,7 @@ Run this when the in-flight EdgeRepair GPU work reaches a commit point.
 ```bash
 # 0. In the OLD repo: commit everything (git add -A; git commit) so the
 #    migration captures it. Check `git status --ignored --short` for
-#    build-required ignored files (sdk/ at minimum; its sdk has Headers+Util).
+#    build-required ignored files.
 
 # 1-3. Same recipe as above:
 git clone --no-local "/e/OFX DEV/ModernEdgeBlur" "$SCRATCH/ModernEdgeBlur"
@@ -154,7 +157,10 @@ git merge mig/main --allow-unrelated-histories \
     -m "Merge ModernEdgeBlur + EdgeRepair history (from MaybeRiaan/ModernEdgeBlur)"
 git remote remove mig
 
-# 4. Copy untracked build inputs: sdk/ (and anything new in --ignored output)
+# 4. Apply the SDK consolidation (see "Untracked build inputs" above): point
+#    its CMakeLists at AE_SDK_ROOT like the other three projects instead of
+#    copying its vendored sdk/ (verify the vendored copy matches the full SDK
+#    first — diff -rq — in case it was patched).
 # 5. Build BOTH plugins from the new location; run tests; compare .aex output
 #    against the old repo's dist/ before switching development over.
 # 6. Only then: stop working in the old folder (drop a MOVED marker in it).
@@ -191,16 +197,15 @@ Notes specific to this repo:
 
 ## Gotchas & discoveries (for future maintainers)
 
-- **Two SDK strategies coexist.** GrainTransfer points at the full AE SDK by
-  absolute path (`AE_SDK_ROOT` cache var, overridable with `-D`);
-  MM_Qualify / MM_FreqSep / ModernEdgeBlur each vendor a trimmed, gitignored
-  `sdk/` copy inside the project. Left as-is deliberately (no-regress rule).
-  Unifying to one shared SDK reference is a possible later cleanup — touch it
-  only with full rebuild + test verification per project.
-- **`PiPLTool.exe` is gitignored but build-required** in MM_Qualify and
-  MM_FreqSep. A fresh clone of this repo needs it (and `sdk/`) restored by
-  hand — see the table above. Worth revisiting whether these should be
-  tracked or fetched by a setup script.
+- **SDK consolidated 2026-07-29** (was: two coexisting strategies). All three
+  migrated projects now reference one shared SDK install via the
+  `AE_SDK_ROOT` cache var; the vendored `sdk/` copies were verified
+  byte-identical to the full SDK, then removed. ModernEdgeBlur still vendors
+  its `sdk/` in the old repo — apply the same consolidation when it migrates
+  (deferred-migration step 4).
+- **`PiPLTool.exe` was never a separate tool** — it is the SDK's own
+  `Examples/Resources/PiPLtool.exe` (identical md5), so the builds now take
+  it straight from `${AE_SDK_ROOT}/Resources/` and nothing is hand-copied.
 - **Branch names are mixed** (`main` vs `master`) across the old repos; this
   repo standardizes on `main`.
 - **Old repo names ≠ plugin names** in places: folder `GrainMatch` held the

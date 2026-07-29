@@ -70,8 +70,7 @@ MM_Qualify/
                 kernels/qk_prologue_hlsl.h   HLSL vocabulary
                 dx/*.hlsl       2-line shims: prologue + kernel, one per entry
   tests/      core_test.cpp, pipeline_test.cpp, run_tests.ps1
-  resources/  MM_QualifyPiPL.r, Info.plist (mac)   [+ PiPLTool.exe, not in git]
-  sdk/        AE SDK  (NOT in git — see "SDK setup" below)
+  resources/  MM_QualifyPiPL.r, Info.plist (mac)
   build.ps1   Windows build + deploy
   CMakeLists.txt
 ```
@@ -81,14 +80,13 @@ MM_Qualify/
 The Adobe After Effects SDK is **not included** — its license prohibits
 redistribution. Download it (free) from the
 [Adobe After Effects Developer Center](https://developer.adobe.com/after-effects/)
-and populate `sdk/` from the SDK's `Examples/` folder:
+and unzip it anywhere. One shared install serves the whole suite (PiPLtool.exe
+included — it ships in the SDK's `Resources/`); nothing is copied into the
+project.
 
-1. Copy `Examples/Headers`, `Examples/Util`, `Examples/Resources` into
-   `sdk/` here (→ `sdk/Headers`, `sdk/Util`, `sdk/Resources`).
-2. Copy `Examples/Resources/PiPLtool.exe` to `resources/PiPLTool.exe`
-   (Windows build only).
-
-Both `sdk/` and `resources/PiPLTool.exe` are gitignored. Built against
+CMake expects the SDK's `Examples/` directory at the `AE_SDK_ROOT` cache
+variable — default `E:\OFX DEV\AE SDK\AfterEffectsSDK_25.6_61_win\...\Examples`;
+pass `-DAE_SDK_ROOT=<path>` if yours lives elsewhere. Built against
 **AE SDK 25.6** (win, build 61).
 
 ## Build (Windows)

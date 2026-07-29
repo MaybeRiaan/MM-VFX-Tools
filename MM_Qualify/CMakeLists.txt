@@ -9,12 +9,20 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ---------------------------------------------------------------------------
-# Paths. The AE SDK is vendored under sdk/ (self-contained repo); no external
-# path required. RESOURCES holds the PiPL .r and (Windows) PiPLTool.exe.
+# Paths. The AE SDK lives OUTSIDE this repo and is never committed — one
+# shared install serves the whole suite (same convention as GrainTransfer).
+# Override with -DAE_SDK_ROOT=... if the SDK moves. RESOURCES holds the
+# PiPL .r; PiPLtool.exe comes from the SDK's own Resources.
 # ---------------------------------------------------------------------------
-set(SDK_ROOT      "${CMAKE_CURRENT_SOURCE_DIR}/sdk")
+set(AE_SDK_ROOT "E:/OFX DEV/AE SDK/AfterEffectsSDK_25.6_61_win/ae25.6_61.64bit.AfterEffectsSDK/Examples"
+    CACHE PATH "After Effects SDK Examples directory")
+set(SDK_ROOT      "${AE_SDK_ROOT}")
 set(RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
 set(SRC_DIR       "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+if(NOT EXISTS "${SDK_ROOT}/Headers/AE_Effect.h")
+    message(FATAL_ERROR "AE SDK not found at: ${SDK_ROOT} (override with -DAE_SDK_ROOT=...)")
+endif()
 
 include_directories(
     ${SRC_DIR}
@@ -51,9 +59,9 @@ set(TARGET    MM_Qualify)
 # .rc, compile that into the plugin resources). Mirrors MM FreqSep.
 # ===========================================================================
 if(WIN32)
-    set(PIPLTOOL "${RESOURCES_DIR}/PiPLTool.exe")
+    set(PIPLTOOL "${SDK_ROOT}/Resources/PiPLtool.exe")
     if(NOT EXISTS ${PIPLTOOL})
-        message(FATAL_ERROR "PiPLTool.exe not found at: ${PIPLTOOL}")
+        message(FATAL_ERROR "PiPLtool.exe not found at: ${PIPLTOOL}")
     endif()
 
     set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins"

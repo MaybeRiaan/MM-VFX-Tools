@@ -32,6 +32,10 @@ project's `docs/` and README — they are the authoritative record.
 
 ## Fresh-checkout note
 
-Two projects need gitignored build inputs restored by hand (`sdk/`,
-`resources/PiPLTool.exe`) — see the "Untracked build inputs" table in
-[docs/MIGRATION.md](docs/MIGRATION.md).
+The Adobe AE SDK is not in this repo (its license prohibits redistribution).
+One shared install serves every project: all three reference the SDK's
+`Examples/` dir via the `AE_SDK_ROOT` CMake cache var (test runners honour an
+`AE_SDK_ROOT` env var), defaulting to
+`E:\OFX DEV\AE SDK\AfterEffectsSDK_25.6_61_win\...\Examples`. On a new
+machine, unzip the SDK and pass `-DAE_SDK_ROOT=<path>` (or set the env var)
+if it lives elsewhere. Nothing else needs restoring by hand.
