@@ -69,6 +69,7 @@
 #if GT_DIAG_LOG
 #include <windows.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 
@@ -96,20 +97,14 @@ static void GT_Log(const char *fmt, ...)
     fclose(f);
 }
 
-// Robust grain-amplitude estimate: median(|residual|) × 1.4826 over a
-// subsample (same robust estimator MeasureResponse uses per band). Content
-// edges barely move the median, so the trend of this across high-pass radii
-// reveals how much true grain lives below the 2px cutoff.
-static float GT_DiagMadSigma(const float *res, size_t N)
+static int GT_DiagDepthBits(PF_PixelFormat fmt)
 {
-    if (!N) return 0.f;
-    const size_t step = N > 200000 ? N / 200000 : 1;
-    std::vector<float> a;
-    a.reserve(N / step + 1);
-    for (size_t i = 0; i < N; i += step) a.push_back(std::fabs(res[i]));
-    if (a.empty()) return 0.f;
-    std::nth_element(a.begin(), a.begin() + a.size() / 2, a.end());
-    return a[a.size() / 2] * 1.4826f;
+    switch (fmt) {
+        case PF_PixelFormat_ARGB128: return 32;
+        case PF_PixelFormat_ARGB64:  return 16;
+        case PF_PixelFormat_ARGB32:  return 8;
+        default:                     return 0;
+    }
 }
 #endif // GT_DIAG_LOG
 
@@ -172,6 +167,11 @@ typedef struct {
     A_long srcState[4];   // PF_State of the Grain Source layer param
     A_long seed;
     A_long encodeMode;    // resolved gt::Encode
+    A_long pixelFormat;   // render depth (PF_PixelFormat): AE conforms the
+                          // source to project depth, so 8/16/32bpc deliver
+                          // clamped/quantized-vs-full-range pixels → a
+                          // genuinely different analysis. Must key on it, or a
+                          // depth switch reuses the wrong-depth cached result.
 } GT_AnalysisKey;
 
 typedef struct {
@@ -199,6 +199,7 @@ static A_Err GT_CacheGenerateKey(AEGP_CCComputeOptionsRefconP optionsP,
                       (uint64_t)(uint32_t)k[2] << 32 | (uint32_t)k[3], s);
     h2 = gt::HashSeed(h1, (uint64_t)(uint32_t)opt->key.seed,
                       (uint64_t)(uint32_t)opt->key.encodeMode);
+    h2 = gt::HashSeed(h2, (uint64_t)(uint32_t)opt->key.pixelFormat, s);
     out_keyP->bytes[0] = (A_long)(uint32_t)(h1 >> 32);
     out_keyP->bytes[1] = (A_long)(uint32_t)h1;
     out_keyP->bytes[2] = (A_long)(uint32_t)(h2 >> 32);
@@ -212,6 +213,10 @@ static A_Err GT_CacheCompute(AEGP_CCComputeOptionsRefconP optionsP,
     const GT_AnalysisOptions *opt = static_cast<const GT_AnalysisOptions*>(optionsP);
     GT_AnalysisValue *val = new (std::nothrow) GT_AnalysisValue;
     if (!val) return A_Err_ALLOC;
+
+#if GT_DIAG_LOG
+    const auto gtDiagT0 = std::chrono::steady_clock::now();   // pure DSP timer
+#endif
 
     const int W = opt->W, H = opt->H;
     const float blurSigma = GT_BlurSigmaFor(W, H);
@@ -248,31 +253,20 @@ static A_Err GT_CacheCompute(AEGP_CCComputeOptionsRefconP optionsP,
 
 #if GT_DIAG_LOG
     {
-        // Fixed 2/4/8px reference probe on the green channel (independent of
-        // the radius actually used): the trend shows how much grain lives
-        // below each cutoff. `blur=` is the radius this analysis actually used
-        // — flatSigma/specSigma are measured at that radius, so compare them to
-        // the probe to see how much of the grain the chosen radius now keeps.
-        const size_t N = (size_t)W * H;
-        float s2 = 0.f, s4 = 0.f, s8 = 0.f;
-        try {
-            std::vector<float> r2(N), r4(N), r8(N);
-            gt::HighPassResidual(opt->planes[1], r2.data(), W, H, 2.0f);
-            gt::HighPassResidual(opt->planes[1], r4.data(), W, H, 4.0f);
-            gt::HighPassResidual(opt->planes[1], r8.data(), W, H, 8.0f);
-            s2 = GT_DiagMadSigma(r2.data(), N);
-            s4 = GT_DiagMadSigma(r4.data(), N);
-            s8 = GT_DiagMadSigma(r8.data(), N);
-        } catch (...) {}
+        // analyzeMs = pure DSP cost of this analysis (residual blur + spectrum
+        // + response + tile synth), NOT the AE source render/unpack that
+        // precedes it (timed separately in SmartRender as [timing]). Splitting
+        // the two tells us whether the first-frame cost is ours to optimize.
+        const double analyzeMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - gtDiagT0).count();
 
-        GT_Log("[analyze] %dx%d enc=%d ok=%d blur=%.2f tile=%d patches=%d crossCorr=%.3f | "
-               "specSigma RGB=%.6f/%.6f/%.6f | flatSigma RGB=%.6f/%.6f/%.6f | "
-               "madSigma@2/4/8px[G]=%.6f/%.6f/%.6f",
-               (int)W, (int)H, (int)opt->key.encodeMode, (int)ok, blurSigma,
-               val->spec.n, val->spec.patchesUsed, val->spec.crossCorr,
+        GT_Log("[analyze] %dx%d depth=%dbpc enc=%d ok=%d blur=%.2f tile=%d patches=%d crossCorr=%.3f analyzeMs=%.0f | "
+               "specSigma RGB=%.6f/%.6f/%.6f | flatSigma RGB=%.6f/%.6f/%.6f",
+               (int)W, (int)H, GT_DiagDepthBits((PF_PixelFormat)opt->key.pixelFormat),
+               (int)opt->key.encodeMode, (int)ok, blurSigma,
+               val->spec.n, val->spec.patchesUsed, val->spec.crossCorr, analyzeMs,
                val->spec.sigma[0], val->spec.sigma[1], val->spec.sigma[2],
-               val->resp.flatSigma[0], val->resp.flatSigma[1], val->resp.flatSigma[2],
-               s2, s4, s8);
+               val->resp.flatSigma[0], val->resp.flatSigma[1], val->resp.flatSigma[2]);
         GT_Log("[analyze] band[G] L:sigma = %.3f:%.6f %.3f:%.6f %.3f:%.6f "
                "%.3f:%.6f %.3f:%.6f",
                val->resp.lumaMid[0], val->resp.sigma[1][0],
@@ -819,12 +813,26 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         bool diagCacheHit = false;
 #endif
 
+        // Render downsample. Grain analysis needs FULL-RESOLUTION source: at
+        // reduced res AE aliases the grain away, so analyzing downsampled
+        // pixels measures content, not grain (huge sigma, tiny tile — the
+        // "high intensity + pattern" seen at low preview res). So only COMPUTE
+        // at full res; at reduced res reuse the cached full-res analysis if
+        // present, else pass through. The reused full-res tile is rescaled by
+        // the downsample factor so grain keeps its correct apparent size.
+        const double dsx = in_data->downsample_x.den
+            ? (double)in_data->downsample_x.num / (double)in_data->downsample_x.den : 1.0;
+        const double dsy = in_data->downsample_y.den
+            ? (double)in_data->downsample_y.num / (double)in_data->downsample_y.den : 1.0;
+        const bool isFullRes = dsx <= 1.0001 && dsy <= 1.0001;
+
         if (prd && prd->hasSource) {
             GT_AnalysisOptions opt;
             memset(&opt, 0, sizeof(opt));
             memcpy(opt.key.srcState, &prd->srcState, sizeof(opt.key.srcState));
             opt.key.seed = prd->p.seedL;
             opt.key.encodeMode = prd->encodeMode;
+            opt.key.pixelFormat = (A_long)fmt;   // re-analyze on a depth switch
 
             SPBasicSuite *bs = in_data->pica_basicP;
             const bool haveCache = g && g->cache_registered && bs &&
@@ -844,15 +852,37 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
 #endif
             }
 
-            // Miss: render + unpack the source and analyze (into the cache
-            // when available, inline otherwise).
-            if (!analysis) {
+            // Miss: render + unpack the source and analyze — but ONLY at full
+            // resolution (analyzing downsampled source measures content, not
+            // grain). At reduced res with no cached full-res analysis we fall
+            // through to passthrough rather than bake a wrong-scale one.
+            if (!analysis && isFullRes) {
                 PF_EffectWorld *grain_world = nullptr;
+#if GT_DIAG_LOG
+                const auto tCk0 = std::chrono::steady_clock::now();
+#endif
                 PF_Err serr = extra->cb->checkout_layer_pixels(
                     in_data->effect_ref, GT_SOURCE, &grain_world);
+#if GT_DIAG_LOG
+                const double checkoutMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - tCk0).count();
+#endif
                 if (serr == PF_Err_NONE && grain_world &&
                     grain_world->width >= GT_TILE_CANDIDATES[2] &&
                     grain_world->height >= GT_TILE_CANDIDATES[2]) {
+
+#if GT_DIAG_LOG
+                    {
+                        // Source is unpacked with the OUTPUT format (fmt). If AE
+                        // delivers the source at a different depth, that read is
+                        // wrong — log the source's own format to catch it.
+                        PF_PixelFormat srcFmt = PF_PixelFormat_INVALID;
+                        wsP->PF_GetPixelFormat(grain_world, &srcFmt);
+                        GT_Log("[srccheck] sourceDepth=%dbpc outputDepth=%dbpc %s",
+                               GT_DiagDepthBits(srcFmt), GT_DiagDepthBits(fmt),
+                               srcFmt == fmt ? "(match)" : "(MISMATCH!)");
+                    }
+#endif
 
                     const A_long sw = grain_world->width, sh = grain_world->height;
                     std::vector<float> planes[3];
@@ -872,6 +902,20 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                         gtc::ForEachRow(in_data, sh, &rc, GT_SrcPlanesRow);
 
                         opt.W = sw; opt.H = sh;
+
+#if GT_DIAG_LOG
+                        {
+                            // Split the first-frame cost: AE rendering the
+                            // source frame (checkout) vs our unpack. The DSP
+                            // analysis is timed separately as [analyze] analyzeMs.
+                            const double unpackMs =
+                                std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - tCk0).count()
+                                - checkoutMs;
+                            GT_Log("[timing] %ldx%ld sourceCheckout=%.0fms unpack=%.0fms",
+                                   (long)sw, (long)sh, checkoutMs, unpackMs);
+                        }
+#endif
 
                         if (haveCache &&
                             ccs->AEGP_ComputeIfNeededAndCheckout(
@@ -902,9 +946,10 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                               analysis->resp.valid && prd;
 
 #if GT_DIAG_LOG
-        GT_Log("[render] frame=%d cache=%s enc=%d %dx%d canStamp=%d hasSource=%d",
+        GT_Log("[render] frame=%d cache=%s depth=%dbpc ds=%.2f fullRes=%d enc=%d %dx%d canStamp=%d hasSource=%d",
                prd ? (int)prd->frame : -1,
                diagCacheHit ? "HIT" : "MISS",
+               GT_DiagDepthBits(fmt), dsx, (int)isFullRes,
                prd ? (int)prd->encodeMode : -1,
                (int)W, (int)H, (int)canStamp,
                (prd && prd->hasSource) ? 1 : 0);
@@ -921,8 +966,12 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                                        analysis->bank.n);
             rc.sp.amount = (float)(prd->p.amountF / 100.0);
             rc.sp.trim = (float)(prd->p.responseF / 100.0);
-            rc.sp.invScale = (float)(100.0 / (prd->p.sizeF < GT_SIZE_MIN
-                                              ? GT_SIZE_DFLT : prd->p.sizeF));
+            // Tiles are always full-resolution (analysis is full-res-gated).
+            // At reduced render res, scale tile sampling by the downsample
+            // factor so grain keeps its full-res apparent size (dsx = 1 at
+            // full res → no-op).
+            rc.sp.invScale = (float)((100.0 / (prd->p.sizeF < GT_SIZE_MIN
+                                               ? GT_SIZE_DFLT : prd->p.sizeF)) * dsx);
             rc.sp.encode = (gt::Encode)prd->encodeMode;
             rc.sp.previewGrainOnly = prd->p.previewB ? true : false;
             gtc::ForEachRow(in_data, H, &rc, GT_StampRow);

@@ -41,7 +41,7 @@ typedef short int			int16;
 #define MINOR_VERSION	0
 #define BUG_VERSION		0
 #define STAGE_VERSION	PF_Stage_DEVELOP
-#define BUILD_VERSION	9
+#define BUILD_VERSION	13
 
 // ---------------------------------------------------------------------------
 // Parameter ranges and defaults — the locked SEVEN (brief table confirmed).
