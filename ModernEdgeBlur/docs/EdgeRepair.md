@@ -16,12 +16,35 @@ stages land; it is what lets a fresh session resume without re-deriving the
 spec from conversation history. (There is no separate handoff doc — this file
 IS the handoff; it absorbed `docs/HANDOFF_VIEWMODES.md` on 2026-07-22.)
 
-## Current status & resuming (2026-07-22)
+> **GPU work: read [`AE_GPU_Effects.md`](AE_GPU_Effects.md) first.** How AE
+> 2026 actually GPU-accelerates effects (MediaCore GPUVideoFilter /
+> `xGPUFilterEntry` — NOT the documented AE-SDK `SUPPORTS_GPU_RENDER_F32`
+> path), the five-point checklist, the silent-failure traps, and how to
+> verify it is really running. That doc is **suite-wide and applies to all
+> five plugins**; the Stage 6 section below is only Edge Repair's own status
+> and raw experiment log.
 
-- **Tip:** `origin/main` @ `c85d268`, **EdgeRepair v1.0.0.23**. Stages 0–5 are
-  DONE + AE-gated; the view modes are now real deliverables (see that section).
-  **Next real stage is Stage 6 — GPU (NOT STARTED)** — only after the user
-  signs off that 0–5 + the view-mode pass are final.
+## Current status & resuming (2026-07-24)
+
+- **EdgeRepair v1.0.0.26.** Stages 0–5 are DONE + AE-gated. **Stage 6 (GPU):
+  THE GATE MYSTERY IS SOLVED (2026-07-29, high confidence). AE 2026 routes
+  effect GPU rendering through the MediaCore "GPUVideoFilter" mechanism —
+  an `xGPUFilterEntry` export (Premiere-style GPU filter module) bound to
+  the AE effect by match name — NOT through the AE-SDK
+  SUPPORTS_GPU_RENDER_F32 path we implemented. Adobe's own Fractal Noise /
+  Transform / Lumetri and every working GPU third party (Red Giant,
+  Artlist) all export xGPUFilterEntry and have `GPUVideoFilter.0` records
+  in AE's plugin registry (`HKCU\...\After Effects\26.2\PluginCache`);
+  F32-only effects (ours, Jawset Postshot) have no record and never get
+  `what_gpu != NONE`. Both declaration experiments (USE_OUTPUT_EXTENT
+  removal, SUPPORTS_QUERY_DYNAMIC_FLAGS) tested NEGATIVE and the
+  declaration angle is closed. NEXT: implement an xGPUFilterEntry module in
+  EdgeRepair.aex (needs the Premiere Pro SDK GPU headers — free download,
+  not in sdk/) rendering via the existing CUDA PTX. Full evidence chain +
+  plan in "Stage 6 investigation state".** Background: the AE-SDK backends
+  (CUDA + DX12, passthrough kernel) are built and DEVICE_SETUP runs
+  successfully — kept as-is. Kernel math port (JFA+2 distance, pull–push,
+  composite) NOT started; it now targets the GPUVideoFilter module.
 - **This project is built on TWO PCs.** ALWAYS `git fetch origin` and reconcile
   BEFORE touching anything, and `git log --oneline -6` to confirm you're on top
   of the tip above. If you're behind, STOP and reconcile — in-flight edits on
@@ -519,11 +542,328 @@ before continuing. Keep every stage compiling and loadable in AE.
   light edge rim at high Detail — the synthetic-grain Detail fixed it (grain
   never touches orig's edge RGB), confirmed in AE on premultiplied footage
   2026-07-22.
-- **Stage 6 — GPU path.** NOT STARTED, only after 0–5 signed off. DX12/HLSL
-  kernels mirroring the CPU math exactly (threshold, Jump Flood distance,
-  pull–push mip chain, composite). `PF_OutFlag2_SUPPORTS_GPU_RENDER_F32` +
-  GPU device suites. *Gate:* CPU/GPU parity within tolerance, soak test
-  repeated on GPU path.
+- **Stage 6 — GPU path.** IN PROGRESS (started 2026-07-23). Decisions settled
+  with the user that day, grounded in the actual SDK headers (AE 2026 exposes
+  FOUR frameworks — OpenCL/Metal/CUDA/DirectX — via `PF_GPU_Framework`):
+  - **Shared-kernel layout** (the SDK samples' pattern): all per-pixel math
+    lives ONCE in `src/gpu/ER_KernelMath.h`, which compiles as HLSL, CUDA,
+    Metal, OpenCL AND host C++ (so headless tests can call the exact GPU
+    functions). Backend wrapper files (`EdgeRepairKernels.hlsl/.cu/.metal`)
+    hold ONLY entry decorations + buffer plumbing. This is what makes the
+    later Metal build a toolchain step, not a port (explicit user
+    requirement).
+  - **Backends:** DirectX 12 built + shipped now (works on any Windows GPU,
+    incl. the NVIDIA test box; Adobe's own `sdk/Util/DirectXUtils` helper
+    targets it). CUDA source maintained but NOT built — no CUDA toolkit on
+    the build machines (no nvcc); enabling it later = install toolkit + add
+    the nvcc/PTX step + the CUDA branch in `EdgeRepair_GPU.cpp`. Metal
+    source maintained, builds on a Mac later. OpenCL declined. Unsupported
+    frameworks are declined QUIETLY at `PF_Cmd_GPU_DEVICE_SETUP`
+    (`PF_Err_NONE`, null `gpu_data`) → clean CPU fallback, no error dialog.
+  - **Distance on GPU = Jump Flood (JFA+2), approximate** — user-accepted
+    2026-07-23, so the Stage 6 parity gate is **within tolerance**, NOT
+    byte-identical (deliberate break from the CPU stages' discipline; JFA+2
+    error is sub-pixel).
+  - **Plumbing milestone — BUILT (v1.0.0.24), AWAITING AE GATE:**
+    `PF_OutFlag2_SUPPORTS_GPU_RENDER_F32` + `SUPPORTS_DIRECTX_RENDERING`
+    (PiPL OutFlags_2 now `0x2A001400` — must keep matching GlobalSetup);
+    `PF_Cmd_GPU_DEVICE_SETUP/SETDOWN` in `src/EdgeRepair_GPU.cpp` (wraps
+    AE's ID3D12 device/queue in Adobe's `DXContext`, loads precompiled
+    kernels); PreRender raises `PF_RenderOutputFlag_GPU_RENDER_POSSIBLE`
+    only when the framework is supported AND device setup succeeded;
+    SmartRender forks to `ER_SmartRenderGPU` on `what_gpu != NONE` (fork
+    sits BEFORE the pixel-format check — GPU worlds are
+    `PF_PixelFormat_GPU_BGRA128` and must never reach the CPU unpack; no
+    CPU fallback after a GPU error since CPU code cannot address device
+    memory). The output→source offset (srcOX/srcOY) is computed once,
+    pre-fork, from the PreRender rects and fed to kernels as launch params.
+    First kernel = `ER_Passthrough`, a bit-exact raw copy of the output
+    rect from the inflated source — proves device setup, `.cso`/`.rs`
+    loading, world addressing incl. the inflation offset, dispatch, and
+    synchronization before any real math ports. Kernels are compiled at
+    build time by fxc (Windows SDK, globbed in CMake) into
+    `DirectX_Assets/EdgeRepair_*.cso` + `.rs` DEPLOYED NEXT TO THE .AEX
+    (both the AE plugins folder and `dist/` — `dist/DirectX_Assets/` is now
+    part of the deliverable). Binding ABI fixed by
+    `sdk/Util/DirectXUtils.cpp`: root param 0 = CBV table, 1 = UAV table,
+    2 = SRV table, raw ByteAddressBuffers; a per-device mutex serializes
+    the shared D3D12 command list (AE does not promise GPU renders are
+    serialized). Param structs must stay field-identical across
+    `ERPassParams` (HLSL) / `ER_PassParamsCu` / `ER_PassParamsMtl` /
+    `ER_GPU_PassParams` (C++).
+  - ***Milestone gate:*** (1) effect loads clean (PiPL/flags match); (2) with
+    Project Settings → Mercury GPU Acceleration ON, the effect renders the GPU
+    passthrough — i.e. it shows the SOURCE FOOTAGE (params do nothing): that
+    is the success signal that AE took the GPU path end-to-end; (3) toggling
+    GPU acceleration OFF restores the full CPU repair (regression check);
+    (4) no errors/crashes across RAM preview + render queue at 8/16/32bpc.
+
+  - **Stage 6 investigation state (2026-07-23/24) — READ BEFORE THEORIZING.**
+    The gate is BLOCKED: AE never engages the GPU path. All findings below are
+    measured via `ER_GPU_LOG` diagnostics (`EdgeRepair_GPU.cpp`, logs to
+    `%TEMP%\EdgeRepair_gpu.log`; first-N rate limits per event class).
+    - **CUDA backend now exists and initializes successfully in AE.** AE 2026
+      Win/NVIDIA offers effects `what_gpu=CUDA` ONLY (measured; it never
+      probes DIRECTX even with `SUPPORTS_DIRECTX_RENDERING` set — that flag
+      appears to serve Premiere hosts; the Mercury dropdown on the test box
+      lists ONLY Software/CUDA). CUDA host side runs through a runtime
+      `nvcuda.dll` driver-API shim (`src/gpu/ER_CudaShim.h`, no toolkit needed
+      to compile); the kernel ships as PTX (`CUDA_Assets/EdgeRepair_Kernels
+      .ptx`, `compute_75`) built by nvcc from `EdgeRepairKernels.cu`. Build
+      needs CUDA toolkit 12.8 + the `-ccbin` 14.4x toolset + `--use-local-env`
+      + PATH/INCLUDE/VCToolsInstallDir overrides in CMakeLists (CUDA 12.8's
+      nvcc cannot digest VS 2026's newest STL; the older side-by-side 14.4x
+      toolset is used for the PTX step only).
+    - **The failure signature:** `DEVICE_SETUP what_gpu=3 → OK (CUDA backend
+      ready)` at AE launch, then `PRERENDER what_gpu=0, gpu_data=null` on
+      EVERY frame, and `PF_Cmd_SMART_RENDER_GPU` NEVER called. Effect renders
+      correctly on CPU throughout. DEVICE_SETUP firing proves AE parses our
+      PiPL GPU flags and registers the effect as GPU-capable.
+    - **Ruled out empirically (do NOT re-test):** `SUPPORTS_DIRECTX_RENDERING`
+      present vs absent (currently ABSENT, flags2 `0x0A001400`); other effects
+      on the layer (tested with EdgeRepair as the only effect); project bit
+      depth (8/16/32 — 32 confirmed in-log); preview resolution (Full,
+      `ds=1/1` in-log); Fast Previews Off / Final Quality; Render Queue final
+      render; raising `PF_RenderOutputFlag_GPU_RENDER_POSSIBLE`
+      unconditionally (currently in the code, `raised=YES` confirmed in-log);
+      handling `PF_Cmd_SMART_RENDER_GPU` in EffectMain (was genuinely missing
+      — the enum name inverts the word order, `SMART_RENDER_GPU`, which the
+      original SDK survey grep missed — but adding it changed nothing);
+      **checkout-request inflation** (`ER_GPU_DIAG_NOINFLATE=1` forced
+      inflate=0 — `what_gpu` stayed NONE, hypothesis dead; toggle restored
+      to 0).
+    - **KEY GROUND TRUTH (2026-07-24): AE's GPU effect pipeline WORKS on this
+      machine for NATIVE effects.** Animated Fractal Noise (GPU-enabled) RAM-
+      previews significantly faster with Mercury CUDA than Software Only. So
+      the refusal is SPECIFIC to our (third-party) effect — the investigation
+      target is what distinguishes native GPU eligibility from ours in AE
+      2026, NOT machine/driver/project config.
+    - **Third-party GPU effects DO work in AE 2026 generally:** an Adobe bug
+      report (March 2026) shows BorisFX Sapphire WarpBubble2 GPU-RENDERING in
+      AE 2026 on NVIDIA (crashing mid-GPU-render on driver 579.79, fixed by
+      595.71) — so the official third-party GPU path functions in this AE
+      version. Test box driver is 576.28 (functional: native CUDA accelerates,
+      our PTX loads; updating to latest Studio driver is cheap hygiene).
+    - **SPECIMEN DIFF DONE (2026-07-24) — PRIME SUSPECT FOUND:
+      `PF_OutFlag_USE_OUTPUT_EXTENT`.** A PiPL parser (PE-resource walk +
+      property decode, kept as `tools/pipl_dump.py` + `tools/pipl_sweep.py`;
+      validated byte-exact against our own .aex first) swept EVERY .aex under
+      both plugin roots on the test box: 218 PiPLs, 66 declaring
+      SUPPORTS_GPU_RENDER_F32 (1<<25).
+      - Deep Glow and RSMB — the originally planned specimens — do NOT set
+        GPU_RENDER_F32: both drive the GPU out-of-band (RSMB links OpenCL.dll
+        directly; Deep Glow via helper). Their diffs prove nothing; discarded.
+      - REAL official-path specimens found installed instead: Red Giant
+        Optical Glow / Chromatic Displacement (eGLO 0x02008021, eGL2
+        0x0A101409, spec 13.25), RG Spot Clone (0x06008023/0x0B121489), the
+        whole Artlist family (typ. 0x06000430/0x0A901401, spec 13.28),
+        Jawset Postshot (0x00008410/0x02A00402, spec 13.28).
+      - **Per-bit named diff vs ours (0x02000440/0x0A001400): the ONLY flag
+        we set that NO working F32 declarer sets is USE_OUTPUT_EXTENT (eGLO
+        bit 6). There is NO flag that every working declarer sets and we
+        lack.** (Union across all 63 third-party F32 declarers — zero have
+        bit 6. The only .aex on the machine combining GPU_RENDER_F32 with
+        USE_OUTPUT_EXTENT are our own EdgeRepair, MM_FreqSep, MM_Qualify —
+        worth asking whether those two also fail to GPU-render.)
+      - Spec-version gating is DEAD: working declarers ship 13.25 and 13.28,
+        so 13.29 is not required and older isn't excluded.
+      - Framework confirmation: Optical Glow's binary imports nvcuda.dll and
+        uses cuModuleLoad/cuLaunchKernel — the SAME CUDA driver-API pattern
+        as our ER_CudaShim. Our framework choice is right.
+      - **EXPERIMENT 1 — USE_OUTPUT_EXTENT removal: TESTED, NEGATIVE
+        (2026-07-24).** Removed from `src/EdgeRepair.cpp` GlobalSetup AND
+        `resources/EdgeRepairPiPL.r` (eGLO 0x02000440 → 0x02000400), deployed
+        PiPL verified by re-parse, user relaunched AE: log still shows
+        `DEVICE_SETUP OK` then `PRERENDER what_gpu=0` every frame.
+        USE_OUTPUT_EXTENT is ruled out as the (sole) gate. The removal is
+        KEPT (behavior-neutral under SmartFX — extent hints are a
+        classic-render mechanism — and it aligns us with every working GPU
+        declarer; do not reintroduce). Failed-run log preserved as
+        `%TEMP%\EdgeRepair_gpu.extent-fail.<stamp>.log`.
+      - Full property-level dump of working specimens (Optical Glow, Artlist
+        ZoomBlur, Postshot): `aeFL` (AE_Reserved_Info) = 0 for all, same as
+        ours; property sets structurally identical to ours (kind/name/catg/
+        entry-point/ePVR 2.0/eSVR/eVER/eINF/eGLO/eGL2/eMNA/aeFL). After the
+        extent removal our PiPL is a strict clean subset of the working
+        declarers' — **the PiPL angle is EXHAUSTED except OutFlags_2 bit 0.**
+      - **EXPERIMENT 2 — SUPPORTS_QUERY_DYNAMIC_FLAGS: DEPLOYED (fixed
+        handler), AWAITING CLEAN AE TEST.** The last declaration-level
+        difference (RG + all Artlist set it; Postshot doesn't, so it only
+        gates us if Postshot is also secretly non-GPU). Added bit 0 (eGL2
+        0x0A001400 → 0x0A001401 in .r + GlobalSetup), plus a
+        `PF_Cmd_QUERY_DYNAMIC_FLAGS` case in EffectMain and `ER_GPULogEvent`
+        in EdgeRepair_GPU.cpp. **First attempt answered the query by calling
+        GlobalSetup (re-asserting ALL static flags) — AE raised error
+        25::228 "effect cannot change non-dynamic flag bits during
+        PF_Cmd_QUERY_DYNAMIC_FLAGS" on every apply, unsuppressable. LESSON:
+        during QDF, only the dynamic-queryable subset may be written
+        (OutFlags: WIDE_TIME_INPUT, NON_PARAM_VARY, PIX_INDEPENDENT,
+        I_USE_SHUTTER_ANGLE; OutFlags2: I_USE_3D_CAMERA/LIGHTS,
+        DOESNT_NEED_EMPTY_PIXELS, REVEALS_ZERO_ALPHA,
+        DEPENDS_ON_UNREFERENCED_MASKS, OUTPUT_IS_WATERMARKED) — OR them into
+        out_data->out_flags/2; never assign the full static set. Fixed
+        handler ORs in PIX_INDEPENDENT only.** The errored run still proved
+        two things (log preserved as `%TEMP%\EdgeRepair_gpu.qdf-err228.*`):
+        (a) AE sends QUERY_DYNAMIC_FLAGS 8+ times immediately at
+        effect-apply once the bit is declared; (b) that run's
+        `what_gpu=0` is INCONCLUSIVE for the experiment since the QDF
+        error may itself have disqualified GPU — retest with the fixed
+        build before judging.
+    - **EXPERIMENT 2 RESULT (clean retest after handler fix): NEGATIVE —
+      what_gpu still 0. QDF ruled out. The declaration angle is DEAD.**
+    - **ROOT CAUSE FOUND (2026-07-29, high confidence) — AE 2026 routes
+      effect GPU rendering through the MediaCore "GPUVideoFilter"
+      mechanism (`xGPUFilterEntry` export), NOT the AE-SDK
+      SUPPORTS_GPU_RENDER_F32 path we implemented.** Evidence chain, all
+      verified on this box:
+      - AE's plugin registry is literally the Windows registry:
+        `HKCU\Software\Adobe\After Effects\26.2\PluginCache\en_US\` (one key
+        per .aex + `<file>_<loader-uuid>`, values Ignore/DoNotCache/date;
+        the loader's "Loading from the registry" lines in
+        `%APPDATA%\Adobe\After Effects\26.2\Plugin Loading.log` refer to
+        this). 445 entries.
+      - **82 entries carry a `GPUVideoFilter.0` subkey** (fields:
+        GPUVideoFilter.MatchName = `AE.<AE-effect-match-name>`,
+        InterfaceVersion = 2, Plugin Factory Guid, cached Pipl blob). These
+        82 = every Adobe native GPU effect (**FractalNoise.aex — the effect
+        that provably accelerates here — plus Transform, DirectionalBlur,
+        Lumetri, Levels2, Bilateral, all VR effects**) + every GPU
+        third-party (Red Giant OpticalGlow/ChromaDisp/SpotClone, all
+        Artlist, CLEngine).
+      - **Export-table check: FractalNoise, Transform, DirectionalBlur,
+        Lumetri ALL export `xGPUFilterEntry`** — the MediaCore/Premiere GPU
+        filter module entry point — alongside their AE entry points. So do
+        OpticalGlow + Artlist. Adobe's own AE effects are GPU-rendered as
+        GPUVideoFilter modules bound to the AE effect by match name
+        ("AE." prefix).
+      - The only SUPPORTS_GPU_RENDER_F32-only plugins on the machine (ours
+        and Jawset Postshot) have NO GPUVideoFilter record — and neither
+        shows any evidence of GPU rendering. Every fact of our failure
+        signature is explained: AE probes GPU_DEVICE_SETUP from the PiPL
+        flag (AE-SDK side) but its render scheduler only offers GPU
+        (what_gpu != NONE / lightning-bolt badge) to effects with a
+        GPUVideoFilter registration.
+      - Sapphire GPU-rendering in AE 2026 (Adobe tracker) is consistent:
+        BorisFX ships Premiere GPU support = xGPUFilterEntry.
+      - CAVEAT (honesty): Adobe's AE SDK still documents the F32 path, and
+        one forum thread (dkt0, "GPU API") describes SmartRenderGPU firing
+        on an unknown AE version — so the F32 path may work on some
+        AE builds or with some undocumented extra. On THIS box, nothing
+        renders GPU without a GPUVideoFilter record. If a cheap
+        counter-test is ever wanted: build Adobe's own SDK_Invert_ProcAmp
+        (needs full AE SDK zip; sdk/ here is Headers+Util only) and see if
+        IT gets what_gpu — if yes, the F32 path works and the diff hunt
+        reopens; if no, the GPUVideoFilter conclusion is airtight.
+    - **NEW STAGE 6 GPU ROUTE — `xGPUFilterEntry` module: SKELETON LANDED
+      2026-07-29 (v1.0.0.26, deployed, AWAITING FIRST AE TEST).**
+      `src/gpu/ER_GPUFilter.cpp` is a MediaCore GPUVideoFilter module
+      (PrGPUFilterBase subclass + `DECLARE_GPUFILTER_ENTRY`), CUDA-only,
+      passthrough render (raw `cuMemcpyDtoDAsync` input→output; in-place =
+      no-op — SDK_ProcAmp's assumption; added `cuMemcpyDtoDAsync_v2` to
+      `ER_CudaShim.h`). Binding: `outMatchName` left null → "default to the
+      module's pipl" (PrSDKGPUFilter.h) — the host binds to "MM Edge Repair"
+      and should record `AE.MM Edge Repair`, InterfaceVersion 2. Initialize
+      declines non-CUDA frameworks / missing nvcuda → software render =
+      our CPU SmartRender. Deployed .aex export-verified: `EffectMain,
+      PluginDataEntryFunction2, xGPUFilterEntry` — the exact trio the
+      working GPU effects ship.
+      - Premiere Pro 26.0 C++ SDK facts (source of the API): user's copy at
+        `E:\OFX DEV\AE SDK\Premiere Pro 26.0 C++ SDK Windows\`; needed
+        headers copied to `sdk/Premiere/Headers` (all of Examples/Headers) +
+        `sdk/Premiere/Utils/PrGPUFilterModule.h` (gitignored via sdk/;
+        non-redistributable; CMake FATAL_ERRORs with instructions if
+        missing). Only ER_GPUFilter.cpp sees these headers
+        (per-source INCLUDE_DIRECTORIES + PRWIN_ENV define in CMakeLists).
+        GOTCHA: PrGPUFilterModule.h uses PF_TransitionSuite without
+        including it — include `PrSDKAESupport.h` first. Render contract:
+        inFrames[0] = current-time input, render into outFrame or in place;
+        pixel formats PrPixelFormat_GPU_BGRA_4444_32f / _16f (BGRA! —
+        kernel port must handle order + optional half float); params via
+        `GetParam(index, inClipTime)` (index-1 shift: "GPU filters do not
+        include the input frame"); frame deps via GetFrameDependencies
+        (base returns NotImplemented = current frame only). Adobe's
+        Vignette example is the AE-style hybrid reference (its comment:
+        works "in After Effects and Premiere Pro, including CUDA/OpenCL").
+      - **INSTALL LOCATION IS PART OF THE MECHANISM (learned 2026-07-29,
+        first module test).** Test 1 with the .aex in AE's own
+        `Support Files\Plug-ins\` FAILED: no GPUVideoFilter registry record,
+        no GPUVF log events, identical render on CUDA and Software Only —
+        i.e. AE loaded the effect but never looked for its GPU module.
+        AE's `Plugin Loading.log` shows why: our .aex was "recognized by
+        loader 7a7d3cd3-…" (the plain AE-effect loader) while every GPU
+        third party in `Common\Plug-ins\7.0\MediaCore\` loads through the
+        MediaCore path and gets cached WITH a `GPUVideoFilter.0` subkey.
+        **EdgeRepair now installs to
+        `C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\` with
+        `CUDA_Assets\` + `DirectX_Assets\` NEXT TO IT** (CMake:
+        `MEDIACORE_PLUGINS_DIR` + per-target `MEB_INSTALL_DIR_<TARGET>`;
+        ModernEdgeBlur still installs to the AE folder, untouched). The
+        Premiere SDK readme states the same rule for its own kernel assets.
+        Keep exactly ONE copy of EdgeRepair.aex installed — a stale copy in
+        the AE folder would double-register the match name.
+      - **TEST 2 (from MediaCore) — REGISTRATION SUCCEEDED, RENDER DID NOT.**
+        AE created the record:
+        `EdgeRepair.aex_74697f7d-…\GPUVideoFilter.0` with
+        `MatchName = AE.MM Edge Repair`, `InterfaceVersion = 2`, HasPipl=1 —
+        structurally identical to ZoomBlur's. **So the install-location fix
+        WORKED and the module is registered.** But no `EVENT GPUVF …` lines
+        appeared and CUDA/Software rendered identically: AE registered the
+        module and never called CreateInstance/Render. (Note the loader UUID
+        changed to 74697f7d-… — the MediaCore loader, same one Deep Glow
+        uses — confirming the different load path.)
+      - **MISSING DECLARATION FOUND: "PF Pixel Format Suite".** A binary
+        string scan of suite names across the specimens: Optical Glow
+        acquires PF Pixel Format Suite + GPU Device + Video Segment + GPU
+        Image Processing + Memory Manager + PPix; EdgeRepair had every one
+        EXCEPT PF Pixel Format Suite. Per PrSDKAESupport.h, an effect calls
+        `ClearSupportedPixelFormats` / `AddSupportedPixelFormat` **during
+        PF_Cmd_GLOBAL_SETUP** to declare what it accepts — without a GPU
+        format declared, the host has nothing to hand the GPU module.
+        FIXED: `ER_DeclareGPUPixelFormats()` (EdgeRepair_GPU.cpp, called
+        from GlobalSetup) declares `PrPixelFormat_GPU_BGRA_4444_32f` then
+        `_16f`. Our binary's suite profile now matches Optical Glow's
+        exactly. NOTE ZoomBlur does NOT acquire this suite, so it is one
+        working recipe, not provably the only one.
+        GOTCHA: those GPU labels are defined in the PREMIERE headers, which
+        must not enter the AE-SDK TU — but they are built from
+        `MAKE_ADOBE_PRIVATE_PIXEL_FORMAT_FOURCC`, which our AE SDK's own
+        PrSDKPixelFormat.h provides. Use Adobe's macro; never hand-roll the
+        FourCC (the private prefix is `'@'`, byte order is REVERSED, and
+        16f is lowercase `'a'` vs 32f's `'A'` — all three are easy to get
+        wrong, and a wrong value fails silently as "host never offers that
+        format").
+      - **TEST PROTOCOL (next AE launch, now from MediaCore):** (1) apply
+        Edge Repair; (2) does
+        `HKCU\...\26.2\PluginCache\en_US\EdgeRepair.aex_*\GPUVideoFilter.0`
+        appear (check from a shell — decisive); (3) lightning-bolt badge?;
+        (4) `%TEMP%\EdgeRepair_gpu.log` for `EVENT GPUVF Initialize: OK
+        (CUDA)` + `EVENT GPUVF Render (passthrough milestone)`; (5)
+        EXPECTED VISUAL with Mercury CUDA: the effect APPEARS TO DO NOTHING
+        (passthrough) — that IS the success signal; Software Only restores
+        the real CPU render. **"Works the same in CUDA and Software Only"
+        means the GPU module was NOT engaged** (that was test 1's result).
+        Until the kernel port lands, GPU and CPU results intentionally
+        differ — keep Mercury on Software for real work.
+      - After the gate opens: port the four kernel groups into the module
+        (JFA+2 distance, pull–push, composite; BGRA + 16f aware), wire
+        params via GetParam, then bisect/clean the AE-SDK-side experiment
+        scaffolding per the standing rule.
+    - Experiment-state note: extent removal (eGLO 0x02000400), the QDF bit +
+      fixed handler (eGL2 0x0A001401), ER_GPU_LOG, and unconditional
+      GPU_RENDER_POSSIBLE all stay in place — harmless, match working
+      specimens, and the standing bisect-after-success rule still applies
+      if the F32 path ever fires.
+    - Diagnostic scaffolding still in place on purpose until the gate passes:
+      `ER_GPU_LOG=1`, unconditional GPU_RENDER_POSSIBLE (marked EXPERIMENT in
+      `PreRender`), `ER_GPU_DIAG_NOINFLATE` define (now 0). Once GPU renders,
+      bisect the unconditional flag back to the gated form.
+  - **Remaining after the milestone gate:** port the four kernel groups to
+    `ER_KernelMath.h` + wrappers (threshold/erode core matte; JFA+2
+    distance; pull–push mip chain; composite = grain + inner-ease blend +
+    choke — each mirroring its `MM_*.h` twin in the same commit), a
+    headless CPU-vs-GPU parity harness (within-tolerance, runs the shared
+    header's functions on CPU), then the full *Stage 6 gate:* CPU/GPU
+    parity within tolerance on real footage + soak test on the GPU path.
 
 ## Build mechanics specific to Edge Repair
 

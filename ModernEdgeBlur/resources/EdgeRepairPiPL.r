@@ -10,7 +10,7 @@
 #define	MINOR_VERSION	0
 #define	BUG_VERSION		0
 #define	STAGE_VERSION	0	// PF_Stage_DEVELOP (enum value 0) — must match EdgeRepair.h
-#define	BUILD_VERSION	23
+#define	BUILD_VERSION	31
 
 #ifndef AE_OS_WIN
 	#include <AE_General.r>
@@ -61,15 +61,28 @@ resource 'PiPL' (16000) {
 		/* [10] */
 		// MUST match what GlobalSetup() sets at runtime, or AE rejects with
 		// "global outflags mismatch". See EdgeRepair.cpp GlobalSetup.
-		// out_flags  = DEEP_COLOR_AWARE | PIX_INDEPENDENT | USE_OUTPUT_EXTENT
+		// out_flags  = DEEP_COLOR_AWARE | PIX_INDEPENDENT
+		//            | USE_OUTPUT_EXTENT
 		//            = 0x02000000 | 0x400 | 0x40 = 0x02000440
+		// (USE_OUTPUT_EXTENT RESTORED 2026-07-29. Removing it on 2026-07-24 was
+		//  inferred from a sweep of shipping binaries; Adobe's own
+		//  GPUVideoFilter samples both SET it — SDK_ProcAmp uses 0x40 alone,
+		//  Vignette 0x440 and its header says it runs in AE and Premiere.
+		//  Samples beat inference from stripped third-party binaries.)
 		AE_Effect_Global_OutFlags {
 		0x02000440
 		},
-		// out_flags2 = FLOAT_COLOR_AWARE | SUPPORTS_SMART_RENDER | SUPPORTS_THREADED_RENDERING
-		//            = 0x1000 | 0x400 | 0x08000000 = 0x08001400
+		// out_flags2 = FLOAT_COLOR_AWARE | SUPPORTS_SMART_RENDER
+		//            | SUPPORTS_THREADED_RENDERING | SUPPORTS_GPU_RENDER_F32
+		//            = 0x1000 | 0x400 | 0x08000000 | 0x02000000 = 0x0A001400
+		// (SUPPORTS_QUERY_DYNAMIC_FLAGS (bit 0) was added 2026-07-24 as GPU-gate
+		//  experiment 2 and REMOVED 2026-07-29: it never opened the gate and it
+		//  caused an unsuppressable AE error 25::228 on every apply. See the
+		//  GlobalSetup note in EdgeRepair.cpp before ever re-adding it.)
+		// (No SUPPORTS_DIRECTX_RENDERING: it made AE-on-Windows/CUDA offer
+		//  what_gpu=NONE at PreRender — see GlobalSetup note in EdgeRepair.cpp.)
 		AE_Effect_Global_OutFlags_2 {
-		0x08001400
+		0x0A001400
 		},
 		/* [11] */
 		AE_Effect_Match_Name {

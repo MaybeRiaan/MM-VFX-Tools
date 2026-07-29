@@ -57,6 +57,7 @@
 #include "common/MM_Gaussian.h"
 #include "common/MM_Grain.h"
 #include "common/MM_Composite.h"
+#include "EdgeRepair_GPU.h"      // Stage 6: device setup + GPU SmartRender
 
 #include <cmath>
 #include <cstring>
@@ -141,6 +142,13 @@ static const float ER_TEXTURE_BLUR_RADIUS = 4.0f;
 // Inflation was signed off at the Stage 1 gate, so this is OFF now; flip to 1
 // only to re-run the seam test.
 #define ER_TILING_DEBUG 0
+
+// Stage 6 DIAGNOSTIC ONLY — 1 forces the PreRender checkout inflation to 0 to
+// test whether AE's GPU render pipeline refuses effects whose checkout request
+// exceeds the output rect. TESTED 2026-07-24: NOT the cause (what_gpu stayed
+// NONE with zero inflation) — hypothesis ruled out, kept at 0. Renders WRONG
+// output near edges while on — never ship with this set. See docs/EdgeRepair.md.
+#define ER_GPU_DIAG_NOINFLATE 0
 
 // ---------------------------------------------------------------------------
 // Per-render scratch buffers, reused ACROSS frames without any mutable global
@@ -682,14 +690,55 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 {
     out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION,
                                       STAGE_VERSION, BUILD_VERSION);
-    // Must match resources/EdgeRepairPiPL.r literals exactly (0x02000440 /
-    // 0x08001400) or AE rejects with a version/outflags mismatch.
+    // Must match resources/EdgeRepairPiPL.r literals exactly or AE rejects
+    // with a version/outflags mismatch.
+    //
+    // USE_OUTPUT_EXTENT: RESTORED 2026-07-29. It was removed on 2026-07-24 on
+    // the strength of a PiPL sweep (no shipping GPU effect on this box set
+    // it). That inference was wrong: BOTH of Adobe's own GPUVideoFilter
+    // samples set it — SDK_ProcAmp (0x40, the ONLY out_flag it sets) and
+    // Vignette (0x440, which its header says works in AE and Premiere).
+    // Shipping binaries are stripped/obfuscated evidence; the samples are
+    // authoritative.
     out_data->out_flags  = PF_OutFlag_DEEP_COLOR_AWARE |
-                           PF_OutFlag_PIX_INDEPENDENT  |
+                           PF_OutFlag_PIX_INDEPENDENT |
                            PF_OutFlag_USE_OUTPUT_EXTENT;
+    // Stage 6: SUPPORTS_GPU_RENDER_F32 announces the GPU path (AE additionally
+    // requires GPU_RENDER_POSSIBLE per-frame in PreRender). Do NOT add
+    // SUPPORTS_DIRECTX_RENDERING here: it declares the effect's GPU framework
+    // to BE DirectX, and AE-on-Windows runs effects on CUDA — with the DX flag
+    // set, AE completed our CUDA DEVICE_SETUP but then offered what_gpu=NONE
+    // at every PreRender (measured 2026-07-23, ER_GPU_LOG). If Premiere-host
+    // DX12 rendering is ever wanted, set the flag conditionally for that host
+    // (in_data->appl_id) — never unconditionally.
+    // SUPPORTS_QUERY_DYNAMIC_FLAGS was a Stage 6 experiment (2026-07-24) and
+    // is REMOVED (2026-07-29): it never opened the GPU gate — the real
+    // mechanism is the GPUVideoFilter module (docs/AE_GPU_Effects.md) — and
+    // it is a live liability. Handling PF_Cmd_QUERY_DYNAMIC_FLAGS correctly
+    // requires writing ONLY the dynamic-queryable bits into an out_flags AE
+    // hands us pre-populated; anything else raises the unsuppressable AE
+    // error 25::228 ("effect cannot change non-dynamic flag bits") on EVERY
+    // apply. We have no genuinely dynamic flags, so the correct move is not
+    // to declare the capability at all. Do not re-add it without a concrete
+    // need and the exact write-only-dynamic-bits discipline.
     out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE        |
                            PF_OutFlag2_SUPPORTS_SMART_RENDER     |
-                           PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
+                           PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
+                           PF_OutFlag2_SUPPORTS_GPU_RENDER_F32;
+
+    // Pixel-format declaration is PREMIERE-ONLY. Both Adobe GPUVideoFilter
+    // samples guard it with exactly this test:
+    //     if (in_data->appl_id == 'PrMr') { ...AddSupportedPixelFormat... }
+    // In AE the suite genuinely does not exist — our probe returned
+    // kSPSuiteNotFoundError ('S!Fd') for BOTH suite versions, which is the
+    // correct, expected result there rather than a defect to chase. (A suite
+    // name appearing inside a shipping binary such as OpticalGlow only proves
+    // the plugin references it for its Premiere build; it says nothing about
+    // what AE vends.) So this is NOT the reason AE declines to instantiate
+    // our GPUVideoFilter module — that question is still open.
+    if (in_data->appl_id == 'PrMr') {
+        ER_DeclareGPUPixelFormats(in_data, out_data);
+    }
     return PF_Err_NONE;
 }
 
@@ -749,7 +798,11 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
 
     ER_Params p; AEFX_CLR_STRUCT(p);
     ERR(ReadParams(in_data, &p));
+#if ER_GPU_DIAG_NOINFLATE
+    const A_long inflate = 0;   // DIAGNOSTIC — see ER_GPU_DIAG_NOINFLATE note
+#else
     const A_long inflate = err ? 0 : ER_InflateRadius(p);
+#endif
 
     // Stash the inflation amount for SmartRender (rects filled in below,
     // once the checkout reports what AE will actually return). AE owns this
@@ -803,6 +856,30 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
         prd->outRect = extra->output->result_rect;
     }
 
+    // Stage 6: allow the GPU render for this frame when AE offers a framework
+    // this build actually renders on (DX12 for now) AND device setup succeeded
+    // (gpu_data non-null). Without this per-frame flag AE never takes the GPU
+    // path even with SUPPORTS_GPU_RENDER_F32 set. Any frame we don't flag
+    // renders on the CPU pipeline — the always-correct reference.
+    {
+        // EXPERIMENT (2026-07-23): raise GPU_RENDER_POSSIBLE UNCONDITIONALLY.
+        // The original gate (what_gpu != NONE && gpu_data) never fired because
+        // AE offered what_gpu=NONE at every prerender — if AE instead commits
+        // to GPU only AFTER seeing this flag, the gate was a deadlock of our
+        // own making. The flag declares possibility, not a demand; CPU render
+        // contexts ignore it. If this unblocks GPU rendering, bisect: restore
+        // the gate to confirm whether the flag or the SMART_RENDER_GPU handler
+        // (added same round) was the missing piece.
+        const bool gpuPossible = !err;
+        if (gpuPossible)
+            extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+        ER_GPULogPreRenderDecision(extra->input->what_gpu,
+                                   extra->input->gpu_data, gpuPossible,
+                                   (int)extra->input->bitdepth,
+                                   (int)in_data->downsample_x.num,
+                                   (int)in_data->downsample_x.den);
+    }
+
     return err;
 }
 
@@ -829,6 +906,49 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
     if (err || !wsP || !src_world || !out_world) goto cleanup;
 
     {
+        const ER_PreRenderData *prd =
+            static_cast<const ER_PreRenderData*>(extra->input->pre_render_data);
+        const A_long inflate = prd ? prd->inflate : 0;
+
+        const A_long srcW = src_world->width;
+        const A_long srcH = src_world->height;
+        const A_long outW = out_world->width;
+        const A_long outH = out_world->height;
+
+        // Output→source origin offset, from the ACTUAL checkout rects stashed
+        // in PreRender: output pixel (0,0) sits at source pixel
+        // (outRect.left - inRect.left, outRect.top - inRect.top). The old
+        // size-difference inference silently assumed symmetric clamping and
+        // shifted the image when AE clamped the inflated request on one side
+        // only (Stage 4 gate finding). Defensive clamps keep addressing in
+        // bounds if the delivered worlds ever disagree with the rects.
+        // Computed BEFORE the CPU/GPU fork — both paths address the source
+        // world through this same offset (single-sourced here; the GPU kernels
+        // receive it as launch params).
+        A_long srcOX = 0, srcOY = 0;
+        if (prd) {
+            srcOX = prd->outRect.left - prd->inRect.left;
+            srcOY = prd->outRect.top  - prd->inRect.top;
+        }
+        if (srcOX > (srcW - outW)) srcOX = srcW - outW;
+        if (srcOY > (srcH - outH)) srcOY = srcH - outH;
+        if (srcOX < 0) srcOX = 0;
+        if (srcOY < 0) srcOY = 0;
+
+        // -----------------------------------------------------------------
+        // Stage 6: GPU render. AE hands GPU effect worlds (BGRA128 float on
+        // the device) when PreRender raised GPU_RENDER_POSSIBLE; everything
+        // below this branch is the CPU pipeline and never sees GPU worlds.
+        // Currently the plumbing milestone: ER_Passthrough (bit-exact copy)
+        // — the real kernel port replaces it. Do NOT fall back to the CPU
+        // path on GPU error: CPU code cannot address device memory.
+        // -----------------------------------------------------------------
+        if (extra->input->what_gpu != PF_GPU_Framework_NONE) {
+            err = ER_SmartRenderGPU(in_data, out_data, extra,
+                                    src_world, out_world, srcOX, srcOY);
+            goto cleanup;
+        }
+
         PF_PixelFormat fmt = PF_PixelFormat_INVALID;
         ERR(wsP->PF_GetPixelFormat(out_world, &fmt));
         if (err) goto cleanup;
@@ -847,31 +967,8 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         mm::ScopedParallelBackend parallelGuard(
             mm::MakeIterateGenericBackend(in_data));
 
-        const ER_PreRenderData *prd =
-            static_cast<const ER_PreRenderData*>(extra->input->pre_render_data);
-        const A_long inflate = prd ? prd->inflate : 0;
-
-        const A_long srcW = src_world->width;
-        const A_long srcH = src_world->height;
-        const A_long outW = out_world->width;
-        const A_long outH = out_world->height;
-
-        // Output→source origin offset, from the ACTUAL checkout rects stashed
-        // in PreRender: output pixel (0,0) sits at source pixel
-        // (outRect.left - inRect.left, outRect.top - inRect.top). The old
-        // size-difference inference silently assumed symmetric clamping and
-        // shifted the image when AE clamped the inflated request on one side
-        // only (Stage 4 gate finding). Defensive clamps keep addressing in
-        // bounds if the delivered worlds ever disagree with the rects.
-        A_long srcOX = 0, srcOY = 0;
-        if (prd) {
-            srcOX = prd->outRect.left - prd->inRect.left;
-            srcOY = prd->outRect.top  - prd->inRect.top;
-        }
-        if (srcOX > (srcW - outW)) srcOX = srcW - outW;
-        if (srcOY > (srcH - outH)) srcOY = srcH - outH;
-        if (srcOX < 0) srcOX = 0;
-        if (srcOY < 0) srcOY = 0;
+        // (prd / inflate / srcW..outH / srcOX / srcOY were computed above,
+        // before the CPU/GPU fork — see the Stage 6 branch.)
 
         // Unpack the whole inflated source into one ARGB float buffer. Scratch
         // is reused across frames (see ER_Scratch) — fully overwritten by the
@@ -1218,6 +1315,20 @@ PF_Err EffectMain(PF_Cmd cmd, PF_InData *in_data, PF_OutData *out_data,
             case PF_Cmd_PARAMS_SETUP:     err = ParamsSetup(in_data, out_data, params, output);        break;
             case PF_Cmd_SMART_PRE_RENDER: err = PreRender(in_data, out_data, (PF_PreRenderExtra*)extra); break;
             case PF_Cmd_SMART_RENDER:     err = SmartRender(in_data, out_data, (PF_SmartRenderExtra*)extra); break;
+            // Stage 6: GPU renders arrive on their OWN command (missed in the
+            // first plumbing pass — the enum name is SMART_RENDER_GPU, not
+            // GPU_..., which the original SDK survey grep didn't match). Same
+            // PF_SmartRenderExtra payload; SmartRender's what_gpu fork routes
+            // it to ER_SmartRenderGPU.
+            case PF_Cmd_SMART_RENDER_GPU: err = SmartRender(in_data, out_data, (PF_SmartRenderExtra*)extra); break;
+            // Stage 6: per-GPU-device lifecycle (EdgeRepair_GPU.cpp). Setup
+            // errors are the designed CPU fallback for frameworks this build
+            // does not render on (see ER_GPUFrameworkSupported).
+            case PF_Cmd_GPU_DEVICE_SETUP:   err = ER_GPUDeviceSetup(in_data, out_data, (PF_GPUDeviceSetupExtra*)extra);     break;
+            case PF_Cmd_GPU_DEVICE_SETDOWN: err = ER_GPUDeviceSetdown(in_data, out_data, (PF_GPUDeviceSetdownExtra*)extra); break;
+            // No PF_Cmd_QUERY_DYNAMIC_FLAGS case: we no longer declare
+            // SUPPORTS_QUERY_DYNAMIC_FLAGS (see GlobalSetup). AE only sends
+            // the command to effects that advertise it.
         }
     } catch (PF_Err &e) { err = e; }
     return err;
