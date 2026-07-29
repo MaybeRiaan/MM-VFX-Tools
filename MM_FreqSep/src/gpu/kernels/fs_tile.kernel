@@ -1,0 +1,101 @@
+/*  fs_tile.kernel — host data movement: AE GPU world ↔ tile plane.
+
+    PLATFORM-FREE (docs/gpu-kernel-rules.md §0). No filtering math lives here —
+    only the two facts every platform host shares:
+
+    1. AE GPU worlds are PF_PixelFormat_GPU_BGRA128: interleaved float, channel
+       order B,G,R,A, with a row pitch that need not equal width*16 bytes.
+       All kernel/CPU math is ARGB (mm::UnpackRow order). BGRA reversed IS
+       ARGB, so the swizzle is a pure index reversal (3 - c) both ways.
+       This holds on DX12 and Metal alike — worlds are BGRA128 on both — which
+       is why this lives in a shared kernel and not in the DX host.
+
+    2. The GPU pipeline is internally tiled in horizontal bands: a tile plane
+       is a tightly-packed ARGB copy of world rows [worldY0, worldY0 + tileH),
+       full world width. Band margins/overlap are the HOST's job (see
+       mm_gpu_host.h); these kernels just move the rows they are told to.
+
+    No clamping, no filtering, no alpha handling — a pure copy either way.
+
+    Buffer slots (order is contract; Metal binds identically):
+      fs_load_tile:  IN0 world (BGRA, pitched)   OUT0 tile (ARGB, packed)
+      fs_store_tile: IN0 tile  (ARGB, packed)    OUT0 world (BGRA, pitched)
+      fs_fill_ones:  OUT0 single-float plane
+*/
+
+// ===========================================================================
+// Load: world rows [gLdWorldY0 .. +gLdH) → packed ARGB tile, swizzling BGRA.
+// gLdPitch is the world row pitch in FLOATS (rowbytes / 4).
+// ===========================================================================
+
+BUF_IN (gLdWorld, 0);
+BUF_OUT(gLdTile,  0);
+
+PARAM_BLOCK_BEGIN
+    int gLdW;         // tile width in pixels (== world width)
+    int gLdH;         // tile rows to copy
+    int gLdWorldY0;   // first world row
+    int gLdPitch;     // world row pitch in floats
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(fs_load_tile)
+{
+    FS_GUARD(gLdW, gLdH)
+
+    const int t = FS_IDX(GID_X, GID_Y, gLdW);
+    const int w = (gLdWorldY0 + GID_Y) * gLdPitch + GID_X * 4;
+
+    // BGRA → ARGB: index reversal.
+    gLdTile[t + 0] = gLdWorld[w + 3];
+    gLdTile[t + 1] = gLdWorld[w + 2];
+    gLdTile[t + 2] = gLdWorld[w + 1];
+    gLdTile[t + 3] = gLdWorld[w + 0];
+}
+
+// ===========================================================================
+// Store: packed ARGB tile → world rows [gStWorldY0 .. +gStH), swizzling back.
+// ===========================================================================
+
+BUF_IN (gStTile,  0);
+BUF_OUT(gStWorld, 0);
+
+PARAM_BLOCK_BEGIN
+    int gStW;         // tile width in pixels (== world width)
+    int gStH;         // tile rows to copy
+    int gStWorldY0;   // first world row written
+    int gStPitch;     // world row pitch in floats
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(fs_store_tile)
+{
+    FS_GUARD(gStW, gStH)
+
+    const int t = FS_IDX(GID_X, GID_Y, gStW);
+    const int w = (gStWorldY0 + GID_Y) * gStPitch + GID_X * 4;
+
+    // ARGB → BGRA: the same reversal.
+    gStWorld[w + 0] = gStTile[t + 3];
+    gStWorld[w + 1] = gStTile[t + 2];
+    gStWorld[w + 2] = gStTile[t + 1];
+    gStWorld[w + 3] = gStTile[t + 0];
+}
+
+// ===========================================================================
+// Fill: constant 1.0 over a single-float plane. Used for the matte weight
+// plane while no matte layer is connected (matte == 1.0 everywhere, matching
+// fs::SampleMatte's inactive behaviour). Replaced by a real fs_matte kernel
+// when the matte driver moves onto the GPU.
+// ===========================================================================
+
+BUF_OUT(gFillDst, 0);
+
+PARAM_BLOCK_BEGIN
+    int gFillW;       // plane width  (floats per row)
+    int gFillH;       // plane height
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(fs_fill_ones)
+{
+    FS_GUARD(gFillW, gFillH)
+    gFillDst[GID_Y * gFillW + GID_X] = 1.0f;
+}

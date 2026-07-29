@@ -1,0 +1,31 @@
+# Adobe After Effects SDK — vendored locally for building, but its license
+# prohibits redistribution, so it must NEVER be committed/pushed. Developers
+# drop their own copy into sdk/ (see README).
+/sdk/
+
+# PiPLTool.exe ships with the Adobe AE SDK (Examples/Resources) — same license,
+# do not redistribute. Copied from the SDK by the developer (see README).
+/resources/PiPLTool.exe
+
+# Build output
+/build/
+/tests/out/
+
+# Local CMake user files
+CMakeUserPresets.json
+
+# Editor / OS cruft
+.vs/
+.vscode/
+*.user
+.DS_Store
+Thumbs.db
+
+# Compiled plugin (produced by the build, deployed to AE)
+*.aex
+*.plugin
+*.obj
+*.pdb
+*.exp
+*.lib
+*.ilk

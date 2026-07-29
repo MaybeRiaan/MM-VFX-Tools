@@ -1,0 +1,130 @@
+/*  fs_compose.kernel — band recombine + View modes.
+
+    PLATFORM-FREE (docs/gpu-kernel-rules.md §0). Counterpart of FS_ComposeRow in
+    src/smart_render.cpp:344-419, and it reproduces src/fs_core.h's arithmetic
+    EXACTLY — including the associativity.
+
+    THE IDENTITY PROPERTY (do not "simplify" the recombine):
+    RecombineChannel is written as src + (proc - src) * m, NOT as the algebraically
+    equal lerp(src, proc, m) or lo + g*hi rearrangements. At texGain == 1 and
+    m == 1 this form collapses to out == src in EXACT float arithmetic, which is
+    what makes the identity test pass to ~2 ulp instead of "close enough". Any
+    rewrite here silently breaks that guarantee on GPU only.
+
+    Reads the inflated src/lo planes through the srcOX/srcOY origin offset and
+    writes an output-sized plane, mirroring the CPU compose loop's addressing.
+
+    Buffer slots (order is contract; Metal binds identically):
+      t0  gSrc    inflated premultiplied ARGB, pristine source
+      t1  gLo     inflated premultiplied ARGB, low band (blurred, blurred-alpha)
+      t2  gMatte  output-sized single-float matte weights, 1.0 when inactive
+      u0  gDst    output-sized premultiplied ARGB
+*/
+
+BUF_IN (gSrc,   0);
+BUF_IN (gLo,    1);
+BUF_IN (gMatte, 2);
+BUF_OUT(gDst,   0);
+
+PARAM_BLOCK_BEGIN
+    int   gOutW;      // output width
+    int   gOutH;      // output height
+    int   gSrcW;      // inflated source width (stride for gSrc / gLo)
+    int   gSrcOX;     // output -> source origin offset, x
+    int   gSrcOY;     // output -> source origin offset, y
+    int   gView;      // FS_VIEW_* : 0=Result 1=Low 2=High 3=Matte
+    float gTexGain;   // High Band Texture / 100
+    float gMix;       // Mix / 100
+PARAM_BLOCK_END
+
+// Matches the CPU compose loop's coverage epsilon exactly.
+#define FS_EPS 1e-8f
+
+KERNEL_ENTRY(fs_compose)
+{
+    FS_GUARD(gOutW, gOutH)
+
+    const int ox = GID_X;
+    const int oy = GID_Y;
+
+    const int so = FS_IDX(ox + gSrcOX, oy + gSrcOY, gSrcW);
+    const int oo = FS_IDX(ox, oy, gOutW);
+
+    const float a  = gSrc[so + 0];
+    const float la = gLo [so + 0];
+
+    // Straight colour. lo renormalized by the BLURRED alpha == alpha-weighted
+    // average of straight colour: the anti-fringing step (rules §3.5).
+    float s0, s1, s2;
+    if (a > FS_EPS) {
+        const float inva = 1.0f / a;
+        s0 = gSrc[so + 1] * inva;
+        s1 = gSrc[so + 2] * inva;
+        s2 = gSrc[so + 3] * inva;
+    } else {
+        s0 = 0.0f; s1 = 0.0f; s2 = 0.0f;
+    }
+
+    float l0, l1, l2;
+    if (la > FS_EPS) {
+        const float invla = 1.0f / la;
+        l0 = gLo[so + 1] * invla;
+        l1 = gLo[so + 2] * invla;
+        l2 = gLo[so + 3] * invla;
+    } else {
+        // No coverage anywhere in the kernel -> no meaningful low band; fall
+        // back to source so hi degenerates to 0 (matches CPU).
+        l0 = s0; l1 = s1; l2 = s2;
+    }
+
+    const float matteW = gMatte[oy * gOutW + ox];
+
+    if (gView == 1) {
+        // Low band, re-premultiplied by the SOURCE alpha.
+        gDst[oo + 0] = a;
+        gDst[oo + 1] = l0 * a;
+        gDst[oo + 2] = l1 * a;
+        gDst[oo + 3] = l2 * a;
+    } else if (gView == 2) {
+        // High band inspection: texGain*(src-lo) + 0.5, opaque, straight.
+        // == fs::HighBandDisplay. Legitimately exceeds [0,1]; stays unclamped.
+        gDst[oo + 0] = 1.0f;
+        gDst[oo + 1] = gTexGain * (s0 - l0) + 0.5f;
+        gDst[oo + 2] = gTexGain * (s1 - l1) + 0.5f;
+        gDst[oo + 3] = gTexGain * (s2 - l2) + 0.5f;
+    } else if (gView == 3) {
+        // Matte weight as an opaque greyscale field.
+        gDst[oo + 0] = 1.0f;
+        gDst[oo + 1] = matteW;
+        gDst[oo + 2] = matteW;
+        gDst[oo + 3] = matteW;
+    } else {
+        // Result.
+        if (a > FS_EPS) {
+            const float m = matteW * gMix;
+
+            // fs::RecombineChannel, associativity preserved verbatim.
+            // hi = src - lo; proc = lo + texGain*hi; out = src + (proc-src)*m
+            const float h0 = s0 - l0;
+            const float h1 = s1 - l1;
+            const float h2 = s2 - l2;
+            const float p0 = l0 + gTexGain * h0;
+            const float p1 = l1 + gTexGain * h1;
+            const float p2 = l2 + gTexGain * h2;
+            const float o0 = s0 + (p0 - s0) * m;
+            const float o1 = s1 + (p1 - s1) * m;
+            const float o2 = s2 + (p2 - s2) * m;
+
+            gDst[oo + 0] = a;
+            gDst[oo + 1] = o0 * a;
+            gDst[oo + 2] = o1 * a;
+            gDst[oo + 3] = o2 * a;
+        } else {
+            // Fully transparent source: exact passthrough of premultiplied ~0.
+            gDst[oo + 0] = a;
+            gDst[oo + 1] = gSrc[so + 1];
+            gDst[oo + 2] = gSrc[so + 2];
+            gDst[oo + 3] = gSrc[so + 3];
+        }
+    }
+}

@@ -1,0 +1,144 @@
+/*  fs_matte.kernel — matte driver: layer-space Fit mapping + bilinear sample
+    + channel extraction, one thread per output pixel.
+
+    PLATFORM-FREE (docs/gpu-kernel-rules.md §0). Line-by-line counterpart of
+    src/matte.cpp (OutputToMatte + SampleBilinear) and src/matte.h
+    (MatteChannelValue) — transcribed, not re-derived, and diffed against the
+    real fs::SampleMatte by tests/gpu_parity_test.cpp. If you change matte.cpp,
+    change this AND the transcription in that test.
+
+    Differences from the CPU path that are PLUMBING, not math:
+      - Reads the matte's AE GPU world directly: BGRA channel order, pitched
+        rows (see fs_tile.kernel note 1). The CPU path reads an unpacked ARGB
+        plane; same values, different indices.
+      - Writes one band of the single-float weight plane that fs_compose
+        consumes as gMatte: rows [0, gMtOutH) of the plane correspond to
+        output rows [gMtOutY0, gMtOutY0 + gMtOutH).
+
+    THE INVARIANTS (mirrored from matte.cpp — do not drift):
+      - All Fit mapping runs in FULL-RES layer space; gMtDsx/gMtDsy reconcile
+        the downsampled buffer coords with the full-res ref frames. This is
+        what makes the matte land identically at any preview resolution.
+      - Bilinear taps interpolate the PREMULTIPLIED values (a layer's visible
+        appearance over black); luma channels are coverage-gated (× alpha).
+      - Edge policy: Fit-to-Layer CLAMPS taps to the edge texel (the matte
+        covers the frame); Center/Top-Left read out-of-bounds as transparent
+        (a smaller matte confines the effect). This clamp is UI semantics for
+        the matte placement — unrelated to the blur kernels' skip-don't-clamp
+        rule, which is about convolution coverage.
+
+    Buffer slots (order is contract; Metal binds identically):
+      IN0  gMtWorld  matte GPU world, premultiplied BGRA float, pitched
+      OUT0 gMtDst    output-band weight plane, single float per pixel
+*/
+
+// FS_MATTE_CHAN_* / FS_MATTE_FIT_* mirrored from src/params.h — keep in sync.
+#define FS_MT_CHAN_ALPHA     1
+#define FS_MT_CHAN_ALPHA_INV 2
+#define FS_MT_CHAN_LUMA      3
+#define FS_MT_CHAN_LUMA_INV  4
+
+#define FS_MT_FIT_FIT     1
+#define FS_MT_FIT_CENTER  2
+#define FS_MT_FIT_TOPLEFT 3
+
+BUF_IN (gMtWorld, 0);
+BUF_OUT(gMtDst,   0);
+
+PARAM_BLOCK_BEGIN
+    int   gMtOutW;        // output width (weight-plane row stride)
+    int   gMtOutH;        // rows in this band
+    int   gMtOutY0;       // first GLOBAL output row of this band
+    int   gMtW;           // matte world width  (pixels)
+    int   gMtH;           // matte world height (rows)
+    int   gMtPitch;       // matte world row pitch in floats
+    int   gMtOriginX;     // matte world origin in matte-layer coords
+    int   gMtOriginY;
+    int   gMtRefW;        // matte LAYER frame (full-res)
+    int   gMtRefH;
+    int   gMtOutOriginX;  // output world origin (downsampled buffer coords)
+    int   gMtOutOriginY;
+    int   gMtSrcRefW;     // source LAYER frame (full-res) — Fit maps FROM this
+    int   gMtSrcRefH;
+    float gMtDsx;         // downsample ratio (num/den <= 1)
+    float gMtDsy;
+    int   gMtChannel;     // FS_MT_CHAN_*
+    int   gMtFit;         // FS_MT_FIT_*
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(fs_matte)
+{
+    FS_GUARD(gMtOutW, gMtOutH)
+
+    const int ox = GID_X;
+    const int oy = GID_Y + gMtOutY0;   // global output row
+
+    // ---- OutputToMatte (matte.cpp) ----------------------------------------
+    // Step 1 — full-res source-layer coordinate of this output pixel center.
+    const float invdsx = (gMtDsx > 0.0f) ? 1.0f / gMtDsx : 1.0f;
+    const float invdsy = (gMtDsy > 0.0f) ? 1.0f / gMtDsy : 1.0f;
+    const float lx = ((float)ox + 0.5f + (float)gMtOutOriginX) * invdsx;
+    const float ly = ((float)oy + 0.5f + (float)gMtOutOriginY) * invdsy;
+
+    // Step 2 — source-layer → matte-layer (both full-res), per Fit mode.
+    float mlx, mly;
+    if (gMtFit == FS_MT_FIT_CENTER) {
+        const float offx = ((float)gMtSrcRefW - (float)gMtRefW) * 0.5f;
+        const float offy = ((float)gMtSrcRefH - (float)gMtRefH) * 0.5f;
+        mlx = lx - offx;
+        mly = ly - offy;
+    } else if (gMtFit == FS_MT_FIT_TOPLEFT) {
+        mlx = lx;
+        mly = ly;
+    } else {
+        const float u = lx / (float)(gMtSrcRefW > 0 ? gMtSrcRefW : 1);
+        const float v = ly / (float)(gMtSrcRefH > 0 ? gMtSrcRefH : 1);
+        mlx = u * (float)gMtRefW;
+        mly = v * (float)gMtRefH;
+    }
+
+    // Step 3 — matte-layer (full-res) → downsampled matte-world pixel.
+    const float mx = mlx * gMtDsx - (float)gMtOriginX;
+    const float my = mly * gMtDsy - (float)gMtOriginY;
+
+    // ---- SampleBilinear (matte.cpp) ---------------------------------------
+    // Pixel centers at integer+0.5; shift so floor gives the lower-left tap.
+    const float fx = mx - 0.5f;
+    const float fy = my - 0.5f;
+    const int   x0 = (int)KF_FLOOR(fx);
+    const int   y0 = (int)KF_FLOOR(fy);
+    const float tx = fx - (float)x0;
+    const float ty = fy - (float)y0;
+
+    const int clampEdge = (gMtFit == FS_MT_FIT_FIT) ? 1 : 0;
+
+    float a = 0.0f, r = 0.0f, g = 0.0f, b = 0.0f;
+    for (int j = 0; j < 2; ++j) {
+        int yy = y0 + j;
+        const float wyj = (j == 0) ? (1.0f - ty) : ty;
+        if (clampEdge != 0) { yy = yy < 0 ? 0 : (yy >= gMtH ? gMtH - 1 : yy); }
+        else if (yy < 0 || yy >= gMtH) continue;
+        for (int i = 0; i < 2; ++i) {
+            int xx = x0 + i;
+            const float wxi = (i == 0) ? (1.0f - tx) : tx;
+            if (clampEdge != 0) { xx = xx < 0 ? 0 : (xx >= gMtW ? gMtW - 1 : xx); }
+            else if (xx < 0 || xx >= gMtW) continue;   // outside → transparent
+            const float w = wxi * wyj;
+            const int   p = yy * gMtPitch + xx * 4;    // world is B,G,R,A
+            a += w * gMtWorld[p + 3];
+            r += w * gMtWorld[p + 2];
+            g += w * gMtWorld[p + 1];
+            b += w * gMtWorld[p + 0];
+        }
+    }
+
+    // ---- MatteChannelValue (matte.h) — Rec.709, luma coverage-gated -------
+    const float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+    float wgt;
+    if      (gMtChannel == FS_MT_CHAN_ALPHA_INV) wgt = 1.0f - a;
+    else if (gMtChannel == FS_MT_CHAN_LUMA)      wgt = luma * a;
+    else if (gMtChannel == FS_MT_CHAN_LUMA_INV)  wgt = (1.0f - luma) * a;
+    else                                         wgt = a;
+
+    gMtDst[GID_Y * gMtOutW + ox] = wgt;
+}

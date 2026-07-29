@@ -1,0 +1,213 @@
+/*  fs_guided.kernel — O(1)-window guided filter (He et al.), self-guided,
+    per-channel, alpha-weighted. Counterpart of src/guided.cpp.
+
+    PLATFORM-FREE (docs/gpu-kernel-rules.md §0). Five entry points, dispatched
+    in the same order guided.cpp runs its stages:
+
+      1. fs_guided_box        box sums          (run 4x: stats, squares, A, B)
+      2. fs_guided_squares    src   -> s2       [a, a*p^2]
+      3. fs_guided_ab         stats -> sa/sb    [a, a*A], [a, a*B]
+      4. fs_guided_final      sa/sb -> dst      q = meanA*p + meanB
+
+    ---------------------------------------------------------------------------
+    THE ONE DELIBERATE DIVERGENCE FROM THE CPU (read before editing):
+
+    guided.cpp's box sum is a SERIAL sliding window — each output reuses the
+    previous accumulator (guided.cpp:59-66). That is O(1) per pixel and ideal on
+    CPU, but it is the wrong shape for a GPU: it parallelizes only across
+    scanlines (a few hundred threads), and each thread carries a serial
+    dependency chain the length of the image.
+
+    This kernel instead sums each window DIRECTLY, one thread per pixel: O(r)
+    work but fully parallel across every pixel. At the radii this effect uses
+    (GuidedRadius(sigma=8) ~= 9, a 19-tap window) that trade is strongly
+    favourable.
+
+    Crucially it is also NUMERICALLY EXACT against the CPU, but only if the
+    accumulator is double. Measured (tests/, and a standalone probe over
+    W=256..4096, R=4..25):
+
+        direct sum in double  ->  0.000e+00  vs the CPU sliding window
+        direct sum in float   ->  up to 9.5e-06, growing with radius
+
+    9.5e-06 would pass the 1e-5 tolerance only barely and would degrade further
+    at larger radii, so float accumulation is NOT acceptable here. Accumulate in
+    ACCUM_T (double under HLSL), store float.
+
+    >> METAL NOTE: Apple GPUs do not support double in shaders. The Metal
+    >> prologue must define ACCUM_T plus ACC_ADD/ACC_SUB as a compensated
+    >> (Kahan) float summation rather than a plain double. This is a prologue
+    >> concern by design — the kernel body below must not change. See
+    >> docs/gpu-kernel-rules.md §4.
+    ---------------------------------------------------------------------------
+
+    Zero extension at buffer edges (taps outside contribute nothing), matching
+    guided.cpp — the sums are alpha-normalized downstream, so a shrunken window
+    changes only the reported coverage alpha, never the straight colour.
+*/
+
+// Constants mirrored from src/guided.h — keep in sync.
+#define FS_GUIDED_WEPS 1e-6f
+#define FS_GUIDED_AEPS 1e-8f
+
+// ===========================================================================
+// Stage 1 — box sum, one thread per pixel, UNNORMALIZED (guided.cpp:88-96).
+// Separable: dispatched once horizontally, once vertically.
+// ===========================================================================
+
+BUF_IN (gBoxSrc, 0);
+BUF_OUT(gBoxDst, 0);
+
+PARAM_BLOCK_BEGIN
+    int gW;
+    int gH;
+    int gR;
+    int gHorizontal;
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(fs_guided_box)
+{
+    FS_GUARD(gW, gH)
+
+    const int x = GID_X;
+    const int y = GID_Y;
+    const int R = gR;
+
+    // Accumulate in ACCUM_T (double on DX) — see the divergence note above.
+    ACCUM_T a0 = ACC_ZERO, a1 = ACC_ZERO, a2 = ACC_ZERO, a3 = ACC_ZERO;
+
+    int i0, i1;
+    if (gHorizontal != 0) {
+        i0 = (x - R < 0)      ? -x           : -R;
+        i1 = (x + R > gW - 1) ? (gW - 1 - x) :  R;
+    } else {
+        i0 = (y - R < 0)      ? -y           : -R;
+        i1 = (y + R > gH - 1) ? (gH - 1 - y) :  R;
+    }
+
+    for (int i = i0; i <= i1; ++i) {
+        const int o = (gHorizontal != 0) ? FS_IDX(x + i, y,     gW)
+                                         : FS_IDX(x,     y + i, gW);
+        a0 = ACC_ADD(a0, gBoxSrc[o + 0]);
+        a1 = ACC_ADD(a1, gBoxSrc[o + 1]);
+        a2 = ACC_ADD(a2, gBoxSrc[o + 2]);
+        a3 = ACC_ADD(a3, gBoxSrc[o + 3]);
+    }
+
+    const int o = FS_IDX(x, y, gW);
+    gBoxDst[o + 0] = ACC_GET(a0);
+    gBoxDst[o + 1] = ACC_GET(a1);
+    gBoxDst[o + 2] = ACC_GET(a2);
+    gBoxDst[o + 3] = ACC_GET(a3);
+}
+
+// ===========================================================================
+// Stage 2 — squares: src -> s2 = [a, a*p^2]  (guided.cpp:118-138)
+// a*p^2 == premult^2 / a.
+// ===========================================================================
+
+BUF_IN (gSqSrc, 0);
+BUF_OUT(gSqDst, 0);
+
+KERNEL_ENTRY(fs_guided_squares)
+{
+    FS_GUARD(gW, gH)
+    const int o = FS_IDX(GID_X, GID_Y, gW);
+
+    const float a = gSqSrc[o + 0];
+    gSqDst[o + 0] = a;
+    if (a > FS_GUIDED_AEPS) {
+        const float inva = 1.0f / a;
+        gSqDst[o + 1] = gSqSrc[o + 1] * gSqSrc[o + 1] * inva;
+        gSqDst[o + 2] = gSqSrc[o + 2] * gSqSrc[o + 2] * inva;
+        gSqDst[o + 3] = gSqSrc[o + 3] * gSqSrc[o + 3] * inva;
+    } else {
+        gSqDst[o + 1] = 0.0f;
+        gSqDst[o + 2] = 0.0f;
+        gSqDst[o + 3] = 0.0f;
+    }
+}
+
+// ===========================================================================
+// Stage 3 — linear coefficients: (src, s1, s2) -> sa/sb  (guided.cpp:143-172)
+// Carried as [a, a*A] / [a, a*B] so the NEXT box pass aggregates them
+// alpha-weighted (transparent centres don't vote).
+// ===========================================================================
+
+BUF_IN (gABSrc, 0);
+BUF_IN (gABm1,  1);   // s1 = box(src)     = [box(a), box(a*p)]
+BUF_IN (gABm2,  2);   // s2 = box(squares) = [box(a), box(a*p^2)]
+BUF_OUT(gABsa,  0);
+BUF_OUT(gABsb,  1);
+
+PARAM_BLOCK_BEGIN
+    int   gABW;
+    int   gABH;
+    float gEps;
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(fs_guided_ab)
+{
+    FS_GUARD(gABW, gABH)
+    const int o = FS_IDX(GID_X, GID_Y, gABW);
+
+    const float a = gABSrc[o + 0];
+    const float N = gABm1 [o + 0];
+
+    if (N > FS_GUIDED_WEPS) {
+        const float invN = 1.0f / N;
+        gABsa[o + 0] = a;
+        gABsb[o + 0] = a;
+        for (int c = 1; c < 4; ++c) {
+            const float mean = gABm1[o + c] * invN;
+            float var = gABm2[o + c] * invN - mean * mean;
+            if (var < 0.0f) var = 0.0f;          // float cancellation guard
+            const float A = var / (var + gEps);
+            gABsa[o + c] = a * A;
+            gABsb[o + c] = a * (mean * (1.0f - A));
+        }
+    } else {
+        // No coverage in the stats window — contribute nothing, weight included.
+        for (int c = 0; c < 4; ++c) { gABsa[o + c] = 0.0f; gABsb[o + c] = 0.0f; }
+    }
+}
+
+// ===========================================================================
+// Stage 4 — final: (src, boxed sa/sb) -> dst  (guided.cpp:177-202)
+// q = meanA*p + meanB in straight colour, re-premultiplied by the windowed
+// mean coverage, so the caller's renormalize-by-blurred-alpha compose consumes
+// this identically to the Gaussian path (rules §3.5).
+// ===========================================================================
+
+BUF_IN (gFinSrc, 0);
+BUF_IN (gFinSa,  1);
+BUF_IN (gFinSb,  2);
+BUF_OUT(gFinDst, 0);
+
+PARAM_BLOCK_BEGIN
+    int   gFinW;
+    int   gFinH;
+    float gInvCount;   // 1 / ((2rx+1)*(2ry+1)) — full-window coverage norm
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(fs_guided_final)
+{
+    FS_GUARD(gFinW, gFinH)
+    const int o = FS_IDX(GID_X, GID_Y, gFinW);
+
+    const float N2 = gFinSa[o + 0];              // box(a), aggregation pass
+    if (N2 > FS_GUIDED_WEPS) {
+        const float invN2 = 1.0f / N2;
+        const float abar  = N2 * gInvCount;
+        const float a     = gFinSrc[o + 0];
+        const float inva  = (a > FS_GUIDED_AEPS) ? (1.0f / a) : 0.0f;
+        gFinDst[o + 0] = abar;
+        for (int c = 1; c < 4; ++c) {
+            const float p = gFinSrc[o + c] * inva;    // straight (0 if a ~ 0)
+            const float q = gFinSa[o + c] * invN2 * p + gFinSb[o + c] * invN2;
+            gFinDst[o + c] = q * abar;                // NO clamping (§3.3)
+        }
+    } else {
+        for (int c = 0; c < 4; ++c) gFinDst[o + c] = 0.0f;  // caller falls back to src
+    }
+}
