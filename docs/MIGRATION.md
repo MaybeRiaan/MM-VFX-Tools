@@ -119,8 +119,19 @@ old paths; recreate a workspace at the suite root if wanted).
 
 Recorded after building **from the new locations**:
 
-<!-- VERIFICATION -->
-_(pending — filled in below after builds/tests run)_
+All three projects built and tested from the new locations on 2026-07-29,
+using each project's own `build.ps1` / test scripts, unmodified:
+
+| Project | Build | Tests |
+|---|---|---|
+| GrainTransfer | ✅ `GrainTransfer.aex` v1.0.0.13 (built with `-NoBuildIncrement`) | ✅ all headless core gates (FFT, RPN, response, determinism, 6K perf) + real-footage smoke, 0 failures |
+| MM_Qualify | ✅ `MM_Qualify.aex`, deployed to AE | ✅ 93/93 core math + 10/10 tiled-vs-untiled pipeline parity |
+| MM_FreqSep | ✅ `MM_FreqSep.aex`, deployed to AE | ✅ 21/21 core (identity/guided/matte) + 27/27 GPU kernel parity |
+
+One non-fatal note: GrainTransfer's post-build deploy could not overwrite the
+`.aex` in the AE plugins folder because After Effects was open with the plugin
+loaded (file lock). The build script treats this as non-fatal; the next build
+with AE closed will deploy normally.
 
 ## Deferred migration: ModernEdgeBlur + EdgeRepair
 
