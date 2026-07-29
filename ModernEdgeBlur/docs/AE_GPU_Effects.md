@@ -209,6 +209,48 @@ files for this reason.
 
 ---
 
+## 3a. Ruled out — do not retry these
+
+As of 2026-07-29 EdgeRepair reaches **registration but not instantiation**: AE
+writes a `GPUVideoFilter.0` record whose shape is byte-identical to Adobe's own
+`SDK_ProcAmp` sample (same `InterfaceVersion = 2`, same Plugin Factory Guid,
+same MediaCore loader GUID `74697f7d-…`), and then never calls
+`CreateInstance` / `Initialize`. Seven hypotheses were tested against a live
+AE, each costing a restart. **All were negative.** Recorded so the next plugin
+does not pay for them again:
+
+| # | Hypothesis | Result |
+|---|---|---|
+| 1 | `SUPPORTS_DIRECTX_RENDERING` confuses AE-on-CUDA | removed — no change |
+| 2 | `SUPPORTS_QUERY_DYNAMIC_FLAGS` gates GPU | no change, and caused 25::228 |
+| 3 | Install location (AE Plug-ins vs MediaCore) | MediaCore is required for the *record*, but does not yield instantiation |
+| 4 | Missing GPU pixel-format declaration | **the suite is Premiere-only** — see §2.3; not an AE gate |
+| 5 | `USE_OUTPUT_EXTENT` must be absent | reversed — both samples SET it; restoring it changed nothing |
+| 6 | `SUPPORTS_SMART_RENDER` disqualifies GPU filters | false — `Vignette` declares it, handles SmartFX, and GPU-renders |
+| 7 | Missing classic `PF_Cmd_RENDER` handler | added it; AE never called it (SmartFX effects are driven purely through SmartFX) and no instantiation |
+
+What is *known good*: the module exports `xGPUFilterEntry`, `Startup` runs and
+succeeds (proven by the registry record it writes), the match name binds
+(`AE.<match name>`), and the AE-side flag set matches the working samples on
+every GPU-relevant bit.
+
+**Caution about "reference" samples.** `SDK_ProcAmp` and `SDK_CrossDissolve`
+are **Premiere** samples and are *not* usable as AE references:
+`SDK_ProcAmp`'s CPU `Render` is wrapped in `if (in_data->appl_id == 'PrMr')`
+and its GPU `Initialize` has no CUDA branch (OpenCL/DirectX/Metal only), so on
+AE-on-NVIDIA it declines GPU **and** no-ops on CPU — it renders a **black
+frame in AE by design**. We briefly mistook that black frame for evidence the
+GPU module had run. `SDK_CrossDissolve` is a transition (a Premiere concept)
+and has no AE path at all. **`Vignette` is the only AE-relevant sample** — its
+header states it works in both hosts.
+
+The remaining untested explanation is that AE 2026 may not instantiate
+third-party GPUVideoFilters at all, special-casing its own bundled effects.
+Static comparison has been exhausted; that question needs Adobe developer
+support, not more local probing.
+
+---
+
 ## 4. How to tell whether it's actually working
 
 The failure mode is silent, so use these three signals — in this order of
