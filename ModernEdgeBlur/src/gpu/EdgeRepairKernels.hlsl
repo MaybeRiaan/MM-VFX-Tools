@@ -2,8 +2,22 @@
 
     THIN WRAPPER ONLY: entry decorations, resource bindings, and the root
     signature. All per-pixel mathematics lives in ER_KernelMath.h (the shared
-    multi-backend header) — see the lockstep contract there. The .cu / .metal
-    wrappers mirror this file one-to-one.
+    multi-backend header) — see the lockstep contract there.
+
+    STATUS after the Stage 6 kernel port: only ER_Passthrough is mirrored here.
+    The CUDA wrapper (EdgeRepairKernels.cu) carries the full 19-entry pipeline
+    because CUDA is the framework AE actually offers effects on this platform;
+    the DX12 HOST side (ER_RenderDX12) is likewise still the passthrough
+    milestone, so mirroring the remaining entries now would ship kernels no
+    host can dispatch and no gate can check. Finishing DX12 means writing the
+    entry wrappers here against the same ER_KernelMath.h functions and issuing
+    ER_RenderCUDA's pass sequence through DXShaderExecution — the MATH is
+    already shared and needs no porting.
+
+    fxc still compiles this file every build, and it type-checks the WHOLE
+    translation unit including the shared header — which is how the header
+    stays honest about HLSL's rules (it has already caught one C++/CUDA-only
+    construct: a ternary over a struct type).
 
     Build (CMake custom command, fxc from the Windows 10/11 SDK):
         fxc /T cs_5_1      /E ER_Passthrough    → DirectX_Assets/EdgeRepair_Passthrough.cso
@@ -30,18 +44,46 @@
     "DescriptorTable(CBV(b0))," \
     "DescriptorTable(UAV(u0, numDescriptors = 2))"
 
-/* Keep in exact sync with ER_GPU_PassParams in src/EdgeRepair_GPU.cpp
-   (8 x 4-byte fields, 32 bytes — well under the 256-byte CBV slot). */
+/* Keep in exact sync with ER_GPU_PassParams (src/EdgeRepair_GPU.cpp),
+   ER_PassParamsCu (.cu) and ER_PassParamsMtl (.metal): 28 x 4-byte fields =
+   112 bytes, laid out in 7 groups of 16 so this cbuffer packs identically —
+   well under the 256-byte CBV slot DXShaderExecution::SetParamBuffer allows. */
 cbuffer ERPassParams : register(b0)
 {
-    int gSrcPitchF;   // source row pitch in FLOATS (rowbytes / 4)
-    int gDstPitchF;   // dest   row pitch in FLOATS
-    int gSrcOX;       // output (0,0) sits at source (gSrcOX, gSrcOY)
+    // worlds
+    int gSrcPitchF;      // source world row pitch in FLOATS (rowbytes / 4)
+    int gDstPitchF;      // dest   world row pitch in FLOATS
+    int gSrcOX;          // output (0,0) sits at source (gSrcOX, gSrcOY)
     int gSrcOY;
-    int gOutW;        // output world dimensions
+    int gOutW;           // output world dimensions
     int gOutH;
-    int gPad0;        // keep 16-byte HLSL packing explicit
-    int gPad1;
+    int gW;              // inflated source dims == scratch plane dims
+    int gH;
+
+    // pass-local geometry (pull–push mip levels / jump-flood step)
+    int gLvlOffFine;
+    int gLvlOffCoarse;
+    int gLvlWFine;
+    int gLvlHFine;
+    int gLvlWCoarse;
+    int gLvlHCoarse;
+    int gJfaStep;
+    int gMode;           // ER_CLASSIFY_* / ER_CORE_MODE_*, pass-dependent
+
+    // effect params
+    float gErode;
+    float gExtend;
+    float gSoftness;
+    float gDetail01;
+    float gChoke;
+    float gThresh;       // core-matte alpha threshold (0.5)
+    int   gChokeMode;    // ER_CHOKE_MODE_*
+    int   gView;         // ER_VIEW_M_*
+
+    int gBandRequested;  // host: Extend > 0 (field + fill were dispatched)
+    int gGrainBlocks;
+    int gFlagSlot;
+    int gCount;
 };
 
 RWByteAddressBuffer gSrc : register(u0);   // inflated source world (read)

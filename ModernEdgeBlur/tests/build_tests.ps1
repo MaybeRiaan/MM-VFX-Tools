@@ -7,6 +7,10 @@
 $ErrorActionPreference = "Stop"
 $TestsDir = $PSScriptRoot
 $CommonDir = Join-Path (Split-Path $TestsDir -Parent) "src\common"
+# The GPU kernel math (src\gpu\ER_KernelMath.h) also compiles as plain host
+# C++ — that is what lets test_gpuparity.cpp call the EXACT functions the GPU
+# runs and diff them against their MM_*.h twins with no GPU in the loop.
+$GpuDir = Join-Path (Split-Path $TestsDir -Parent) "src\gpu"
 
 $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
 $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
@@ -17,6 +21,7 @@ if (Test-Path $work) { Remove-Item $work -Recurse -Force }
 New-Item -ItemType Directory -Path $work | Out-Null
 
 Copy-Item (Join-Path $CommonDir "*.h") $work -Force
+Copy-Item (Join-Path $GpuDir "ER_KernelMath.h") $work -Force
 $tests = Get-ChildItem $TestsDir -Filter "test_*.cpp"
 
 $fail = 0

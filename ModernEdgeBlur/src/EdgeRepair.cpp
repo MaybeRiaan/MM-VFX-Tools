@@ -929,17 +929,24 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         if (srcOX < 0) srcOX = 0;
         if (srcOY < 0) srcOY = 0;
 
+        // Params are read BEFORE the CPU/GPU fork: both paths need the same
+        // values, and PF_CHECKOUT_PARAM is a host call that must not happen
+        // against GPU worlds any differently than against CPU ones.
+        ER_Params p; AEFX_CLR_STRUCT(p);
+        ERR(ReadParams(in_data, &p));
+        if (err) goto cleanup;
+
         // -----------------------------------------------------------------
         // Stage 6: GPU render. AE hands GPU effect worlds (BGRA128 float on
         // the device) when PreRender raised GPU_RENDER_POSSIBLE; everything
         // below this branch is the CPU pipeline and never sees GPU worlds.
-        // Currently the plumbing milestone: ER_Passthrough (bit-exact copy)
-        // — the real kernel port replaces it. Do NOT fall back to the CPU
-        // path on GPU error: CPU code cannot address device memory.
+        // The CUDA backend runs the full pipeline; DIRECTX is still the
+        // passthrough milestone (EdgeRepair_GPU.cpp). Do NOT fall back to the
+        // CPU path on GPU error: CPU code cannot address device memory.
         // -----------------------------------------------------------------
         if (extra->input->what_gpu != PF_GPU_Framework_NONE) {
             err = ER_SmartRenderGPU(in_data, out_data, extra,
-                                    src_world, out_world, srcOX, srcOY);
+                                    src_world, out_world, p, srcOX, srcOY);
             goto cleanup;
         }
 
@@ -947,10 +954,6 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         ERR(wsP->PF_GetPixelFormat(out_world, &fmt));
         if (err) goto cleanup;
         if (mm::PixelBytes(fmt) == 0) { err = PF_Err_BAD_CALLBACK_PARAM; goto cleanup; }
-
-        ER_Params p; AEFX_CLR_STRUCT(p);
-        ERR(ReadParams(in_data, &p));
-        if (err) goto cleanup;
 
         // Install AE's iterate_generic as the parallel backend for every
         // mm::ParallelFor inside the algorithm cores (EDT, Gaussian, pull–push)

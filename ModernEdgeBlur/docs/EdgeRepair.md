@@ -24,21 +24,18 @@ IS the handoff; it absorbed `docs/HANDOFF_VIEWMODES.md` on 2026-07-22.)
 > five plugins**; the Stage 6 section below is only Edge Repair's own status
 > and raw experiment log.
 
-## Current status & resuming (2026-07-29)
+## Current status & resuming (2026-07-30)
 
-- **EdgeRepair v1.0.0.32** (committed `ed0200d`). Stages 0–5 are DONE +
-  AE-gated. The CPU path is the shipping path: correct, threaded, ~300 ms/frame
-  at 4K on 8 threads.
-- **Stage 6 (GPU): GATE OPEN — AE renders us on CUDA (2026-07-30).**
-  AE now hands us `what_gpu = CUDA` at PreRender and calls
-  `PF_Cmd_SMART_RENDER_GPU` at 4K. Confirmed both in the log and visually (a
-  deliberate marker zeroes the top eighth of the frame on CUDA and vanishes
-  under Mercury → Software Only).
+- **EdgeRepair v1.0.0.36.** Stages 0–5 are DONE + AE-gated. The CPU path is the
+  reference path: correct, threaded, ~300 ms/frame at 4K on 8 threads.
+- **Stage 6 (GPU): AE gate OPEN, and the CUDA kernel port is LANDED —
+  AWAITING ITS OWN AE GATE (2026-07-30).**
 
-  **The mechanism is the documented AE-SDK F32 path**, not the MediaCore
-  GPUVideoFilter mechanism an earlier revision of these docs claimed —
-  GPUVideoFilter is *Premiere's* path. The full, corrected route is
-  `docs/AE_GPU_Effects.md`; read it before GPU work on any plugin.
+  *Gate open (v1.0.0.34):* AE hands us `what_gpu = CUDA` at PreRender and calls
+  `PF_Cmd_SMART_RENDER_GPU` at 4K. **The mechanism is the documented AE-SDK F32
+  path**, not the MediaCore GPUVideoFilter mechanism an earlier revision of
+  these docs claimed — GPUVideoFilter is *Premiere's* path. The full, corrected
+  route is `docs/AE_GPU_Effects.md`; read it before GPU work on any plugin.
 
   What actually unblocked it, after seven failed hypotheses: **`GPU_DEVICE_SETUP`
   must re-affirm `out_data->out_flags2 = PF_OutFlag2_SUPPORTS_GPU_RENDER_F32`**
@@ -52,11 +49,15 @@ IS the handoff; it absorbed `docs/HANDOFF_VIEWMODES.md` on 2026-07-22.)
   `<AE SDK>\Examples\Effect\SDK_Invert_ProcAmp`, and instrumenting it — it
   GPU-renders on this box, which proved the F32 path works for third parties.
 
-  **Still to do:** the kernel math port (JFA+2 distance, pull–push, composite).
-  The GPU path currently runs a passthrough plus the temporary visible marker
-  (`ER_GPU_VISIBLE_MARKER` in `EdgeRepair_GPU.cpp` — delete when real kernels
-  land). `src/gpu/ER_GPUFilter.cpp` (the GPUVideoFilter module) is now inert in
-  AE; keep it only if Premiere support is wanted.
+  *Kernel port (this round):* the GPU now runs the REAL pipeline on CUDA, not a
+  passthrough — see the Stage 6 entry below for the pass list, the memory
+  layout, and what is still unported (DX12 host orchestration, Metal). The
+  temporary `ER_GPU_VISIBLE_MARKER` is deleted; the effect's own output is the
+  proof it ran. **Not yet AE-verified — the AE gate is the next action** (test
+  protocol in the Stage 6 entry).
+
+  `src/gpu/ER_GPUFilter.cpp` (the GPUVideoFilter module) is inert in AE and
+  built OFF by default; keep it only if Premiere support is wanted.
 - **This project is built on TWO PCs.** ALWAYS `git fetch origin` and reconcile
   BEFORE touching anything, and `git log --oneline -6` to confirm you're on top
   of the tip above. If you're behind, STOP and reconcile — in-flight edits on
@@ -554,11 +555,139 @@ before continuing. Keep every stage compiling and loadable in AE.
   light edge rim at high Detail — the synthetic-grain Detail fixed it (grain
   never touches orig's edge RGB), confirmed in AE on premultiplied footage
   2026-07-22.
-- **Stage 6 — GPU path.** GATE OPEN 2026-07-30 (started 2026-07-23): AE drives
-  us on CUDA via the AE-SDK F32 path; kernel math port is what remains. See
-  "Current status" at the top of this file and `docs/AE_GPU_Effects.md` before
-  resuming. The design decisions below still stand. Settled with the user
-  2026-07-23,
+- **Stage 6 — GPU path.** AE gate OPEN 2026-07-30; **CUDA kernel port LANDED
+  the same day (v1.0.0.36), awaiting its own AE gate.** See "Current status" at
+  the top of this file and `docs/AE_GPU_Effects.md` before resuming.
+
+  ### Kernel port — what landed (2026-07-30, v1.0.0.36)
+
+  The CUDA backend now runs the whole repair on the GPU, mirroring
+  `SmartRender`'s CPU pipeline pass for pass. All four View Modes render on
+  GPU; there is no "GPU does something different" mode left except the two
+  documented divergences below.
+
+  - **Shared math, four targets — as designed.** Every per-pixel formula moved
+    into `src/gpu/ER_KernelMath.h`, which compiles as HLSL, CUDA, Metal AND
+    host C++. Each function names its `MM_*.h` twin in a comment; the lockstep
+    contract at the top of that file is now load-bearing rather than aspirational.
+  - **19 CUDA entry points** in `src/gpu/EdgeRepairKernels.cu` (thin wrappers —
+    entry decorations and buffer plumbing only): `ER_Passthrough`, `ER_Zero`,
+    `ER_ExtractAlpha`, `ER_Classify`, `ER_MakeCore`, `ER_JfaInitAlpha`,
+    `ER_JfaInitMask`, `ER_JfaStep`, `ER_JfaResolve`, `ER_PPInit`, `ER_PPPull`,
+    `ER_PPPush`, `ER_PPResolve`, `ER_GrainPartial`, `ER_GrainFinal`,
+    `ER_Composite`, `ER_ViewCore`, `ER_ViewDist`, `ER_ViewExt`. Names are
+    resolved by string at device setup; **a missing entry declines the whole
+    CUDA backend** rather than failing mid-render (the classic stale-PTX
+    symptom, and there is no CPU fallback once worlds are device memory).
+  - **Pass sequence** (`ER_RenderCUDA`, EdgeRepair_GPU.cpp): alpha plane →
+    interior → [erode field] → core matte → core distance field → pull–push
+    fill → grain amplitude → [alpha-choke field] → composite/view. Same
+    host-side branch decisions as the CPU (`earlyOut`, `doBand`, the three
+    `BuildCoreMatte` modes), computed from the same params.
+  - **Host-side branching WITHOUT host readback.** The CPU asks questions
+    between passes ("empty core?", "did the fill find a seed?", "is there an
+    alpha edge at all?") and branches. The GPU can't — a readback would mean
+    synchronizing AE's stream. So the producing kernels `atomicOr` a bit into a
+    tiny device flags buffer (`ER_FLAG_CORE/FILL/CHOKE/INTERIOR/EXTERIOR`) and
+    the consuming kernels test it. Every CPU early-out has a matching device
+    flag; `test_gpuparity` covers the degenerate cases explicitly.
+  - **Memory.** ONE cached device allocation per GPU device, sub-divided per
+    render (planes, two jump-flood seed buffers, the pull–push mip chain,
+    partials, flags) and grown only when a bigger frame arrives — the device-side
+    analogue of Stage 5's `ER_Scratch`, so a steady-state render allocates
+    nothing. Only what the current view needs is reserved: a Core Matte view at
+    Erode 0 pays for neither the chain (~4/3 × 16 B/px) nor the distance plane.
+    Freed at `GPU_DEVICE_SETDOWN`.
+  - **Concurrency.** `renderLock` now guards the whole enqueue AND the shared
+    scratch. That is sufficient *because* every launch goes on AE's single
+    per-device stream, which is FIFO: serializing the enqueue serializes
+    execution, so render A's passes finish before render B's touch the scratch.
+    AE still owns stream synchronization — we never sync.
+  - **BGRA, not ARGB.** GPU worlds are `PF_PixelFormat_GPU_BGRA128`; the CPU
+    path's `UnpackRow` ARGB convention does not apply. Kernels read `.z/.y/.x`
+    for R/G/B and `.w` for alpha. Scratch planes are tightly packed at
+    pitch == W, which is NOT the worlds' pitch — mixing the two is the easiest
+    bug to write here.
+  - **Params** are read in `SmartRender` BEFORE the CPU/GPU fork and passed to
+    `ER_SmartRenderGPU`; the launch block is one 112-byte struct that must stay
+    field-identical across `ER_GPU_PassParams` (C++) / `ERPassParams` (HLSL) /
+    `ER_PassParamsCu` / `ER_PassParamsMtl`. A `static_assert` pins the size.
+  - **`ER_GPU_VISIBLE_MARKER` deleted** — it existed only because the milestone
+    passthrough rendered bit-identically to the CPU.
+
+  ### Two accepted divergences (why the gate is "within tolerance")
+
+  1. **Distance = Jump Flood (JFA+2), not the exact EDT.** User-accepted
+     2026-07-23. Measured by `tests/test_gpuparity.cpp` against
+     `mm::EuclideanDistanceTransform` on five seed topologies (single seed,
+     disc, sparse noise, thin line, two corners): **worst error 0.0000 px** —
+     exact on those shapes. The test asserts a 0.5 px tolerance rather than
+     locking in "happens to be exact".
+  2. **Grain amplitude sums in float, not double.** The CPU accumulates
+     `|luma neighbour diff|` serially in `double`; the GPU uses a fixed
+     256×256 grid, block-reduces in shared memory, and finalizes serially over
+     256 partials. Measured relative difference on a synthetic plate: **0.0**,
+     with the pair COUNT matching exactly (the test asserts both).
+
+  Everything else is **bit-identical**, and proven so rather than asserted —
+  see the parity harness below.
+
+  ### `tests/test_gpuparity.cpp` — the parity harness (headless, no GPU)
+
+  Runs the GPU's own functions on the CPU (that is what the host-C++ mode of
+  `ER_KernelMath.h` is for) and diffs them against the `MM_*.h` originals:
+  blend weight, smoothstep, band composite, both choke directions, the grain
+  hash + amplitude conversion, the core-matte decision across all three erode
+  branches + degenerate seed sets, the Distance Field view value, the
+  pull–push value helpers, world/plane addressing, and seed packing — all
+  `==`, no epsilon. Plus three composition-level checks that validate the HOST
+  wiring, not just the formulas: the whole pull–push chain built exactly as
+  `ER_RenderCUDA` schedules it vs `mm::PullPushFill` (worst 6e-7), the grain
+  reduction in its real grid shape, and the JFA schedule vs the exact EDT.
+  Runs in `tests/build_tests.ps1` alongside the rest (all 7 files green).
+
+  ### NOT ported — deliberately, with reasons
+
+  - **DX12 host orchestration** is still the passthrough milestone. Nothing on
+    the test box exercises it (AE offers CUDA only; the Premiere GPUVideoFilter
+    module is built OFF by default), so porting it would mean ~400 lines of
+    multi-pass D3D12 descriptor plumbing that no gate can check. The MATH is
+    already shared, so finishing it is orchestration only: mirror the CUDA
+    entries in `EdgeRepairKernels.hlsl` and issue the same pass sequence
+    through `DXShaderExecution`. fxc still compiles the HLSL every build and
+    type-checks the whole translation unit — which already caught one
+    C++/CUDA-only construct in the shared header (a ternary over a struct
+    type), so the header stays honest about HLSL's rules for free.
+  - **Metal** likewise: param struct kept in sync, entries not mirrored, no Mac
+    to gate on.
+  - **The unconditional `GPU_RENDER_POSSIBLE` in PreRender** stays for this
+    round on purpose — changing it in the same build as the kernel port would
+    put two variables into one AE test. Bisecting it back to the gated form
+    (`what_gpu != NONE && gpu_data`) is the next cleanup AFTER the kernel gate
+    passes.
+
+  ### *Stage 6 kernel gate — the test protocol*
+
+  With Project Settings → Mercury GPU Acceleration = CUDA:
+  1. Apply Edge Repair to a keyed plate. **The result must now MATCH the CPU
+     render** (Mercury → Software Only), not pass through — that is the whole
+     point of this round. Compare at Erode 2 / Extend 32 / Detail 50.
+  2. Sweep every param, and all four View Modes on both settings. Distance
+     Field and Extended Colour are opaque deliverables; Composited keeps the
+     original alpha unless Alpha Choke is touched.
+  3. Alpha Choke 0 must leave alpha untouched; non-zero must choke/grow the
+     same way the CPU does.
+  4. Extend 0 + Choke 0 = the effect does nothing (early-out passthrough).
+  5. RAM preview + Render Queue, 8/16/32 bpc, no errors or crashes.
+  6. `%TEMP%\EdgeRepair_gpu.log` should show `GPU plan view=… scratch=…MB`
+     lines and no `cuLaunchKernel(...) FAILED`.
+  If GPU rendering stops engaging entirely (log shows `PRERENDER what_gpu=0`),
+  that is a regression in the AE gate, not the kernels — the flag experiment
+  above is the first thing to look at.
+
+  ### Earlier Stage 6 design decisions (still standing)
+
+  Settled with the user 2026-07-23,
   grounded in the actual SDK headers (AE 2026 exposes FOUR frameworks —
   OpenCL/Metal/CUDA/DirectX — via `PF_GPU_Framework`):
   - **Shared-kernel layout** (the SDK samples' pattern): all per-pixel math
@@ -873,13 +1002,14 @@ before continuing. Keep every stage compiling and loadable in AE.
       `ER_GPU_LOG=1`, unconditional GPU_RENDER_POSSIBLE (marked EXPERIMENT in
       `PreRender`), `ER_GPU_DIAG_NOINFLATE` define (now 0). Once GPU renders,
       bisect the unconditional flag back to the gated form.
-  - **Remaining after the milestone gate:** port the four kernel groups to
-    `ER_KernelMath.h` + wrappers (threshold/erode core matte; JFA+2
-    distance; pull–push mip chain; composite = grain + inner-ease blend +
-    choke — each mirroring its `MM_*.h` twin in the same commit), a
-    headless CPU-vs-GPU parity harness (within-tolerance, runs the shared
-    header's functions on CPU), then the full *Stage 6 gate:* CPU/GPU
-    parity within tolerance on real footage + soak test on the GPU path.
+  - **DONE 2026-07-30 (v1.0.0.36) — see "Kernel port" above:** the four kernel
+    groups are in `ER_KernelMath.h` + the CUDA wrapper (threshold/erode core
+    matte; JFA+2 distance; pull–push mip chain; composite = grain + inner-ease
+    blend + choke, each mirroring its `MM_*.h` twin), and the headless
+    CPU-vs-GPU parity harness is `tests/test_gpuparity.cpp`. **Remaining:** the
+    AE kernel gate (protocol above) — CPU/GPU parity within tolerance on real
+    footage + a soak test on the GPU path — then the PreRender flag bisect, and
+    optionally DX12/Metal orchestration.
 
 ## Build mechanics specific to Edge Repair
 

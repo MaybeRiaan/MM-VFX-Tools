@@ -76,13 +76,18 @@ __attribute__((format(printf, 1, 2)))
 void ER_GPULogEventF(const char *fmt, ...);
 
 /* GPU SmartRender. Called from EdgeRepair.cpp's SmartRender when
-   extra->input->what_gpu != NONE, with the already-checked-out GPU worlds and
-   the output→source origin offset (srcOX/srcOY, derived from the PreRender
-   rects — same values the CPU path uses; that logic stays single-sourced in
-   EdgeRepair.cpp). Currently renders the Stage 6 plumbing milestone:
-   ER_Passthrough (bit-exact copy of the output rect from the inflated
-   source). The real kernel pipeline replaces this as the port lands. */
+   extra->input->what_gpu != NONE, with the already-checked-out GPU worlds, the
+   parameters, and the output→source origin offset (srcOX/srcOY, derived from
+   the PreRender rects — same values the CPU path uses; both stay single-sourced
+   in EdgeRepair.cpp and are read BEFORE the CPU/GPU fork).
+
+   CUDA runs the full pipeline (core matte -> JFA+2 distance -> pull–push fill
+   -> grain -> composite, plus all four View Modes). DIRECTX is still the
+   passthrough milestone — see ER_RenderDX12's note in the .cpp. There is no CPU
+   fallback after a GPU error: the worlds are device memory and CPU code cannot
+   address them. */
+struct ER_Params;
 PF_Err ER_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data,
                          PF_SmartRenderExtra *extra,
                          PF_EffectWorld *src_world, PF_EffectWorld *out_world,
-                         A_long srcOX, A_long srcOY);
+                         const ER_Params &prm, A_long srcOX, A_long srcOY);

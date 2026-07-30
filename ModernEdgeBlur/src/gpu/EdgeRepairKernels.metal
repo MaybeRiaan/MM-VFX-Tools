@@ -3,9 +3,16 @@
     SOURCE MAINTAINED, BUILDS ON MAC ONLY: kept in lockstep with
     EdgeRepairKernels.hlsl so the eventual Mac build is a toolchain step
     (metal → metallib, loaded via MTLDevice in ER_GPUDeviceSetup's Metal
-    branch), not a port. No kernel-source work should be needed on the Mac —
-    that is the point of the shared-kernel layout (Stage 6 decision,
-    2026-07-23).
+    branch), not a port. No MATH work is needed on the Mac — that is the point
+    of the shared-kernel layout (Stage 6 decision, 2026-07-23): every formula
+    already lives in ER_KernelMath.h and compiles for Metal.
+
+    STATUS after the Stage 6 kernel port: only ER_Passthrough is mirrored here,
+    matching the HLSL wrapper. The full 19-entry pipeline lives in the CUDA
+    wrapper because that is the framework AE offers effects on Windows/NVIDIA.
+    Bringing Metal up = writing the same thin entry wrappers over the shared
+    header's functions plus the Metal branch of ER_GPUDeviceSetup, against a
+    Mac that can actually run the gate.
 
     THIN WRAPPER ONLY: entry decorations and buffer plumbing. All per-pixel
     mathematics lives in ER_KernelMath.h — see the lockstep contract there.
@@ -19,17 +26,44 @@ using namespace metal;
 #define ER_GPU_METAL 1
 #include "ER_KernelMath.h"
 
-/* Matches cbuffer ERPassParams (HLSL) / ER_GPU_PassParams (C++). */
+/* Matches cbuffer ERPassParams (HLSL) / ER_PassParamsCu (.cu) /
+   ER_GPU_PassParams (C++) field for field — 28 x 4 bytes = 112. */
 struct ER_PassParamsMtl
 {
-    int srcPitchF;
-    int dstPitchF;
-    int srcOX;
-    int srcOY;
-    int outW;
-    int outH;
-    int pad0;
-    int pad1;
+    // worlds
+    int   srcPitchF;
+    int   dstPitchF;
+    int   srcOX;
+    int   srcOY;
+    int   outW;
+    int   outH;
+    int   W;
+    int   H;
+
+    // pass-local geometry
+    int   lvlOffFine;
+    int   lvlOffCoarse;
+    int   lvlWFine;
+    int   lvlHFine;
+    int   lvlWCoarse;
+    int   lvlHCoarse;
+    int   jfaStep;
+    int   mode;
+
+    // effect params
+    float erode;
+    float extend;
+    float softness;
+    float detail01;
+    float choke;
+    float thresh;
+    int   chokeMode;
+    int   view;
+
+    int   bandRequested;
+    int   grainBlocks;
+    int   flagSlot;
+    int   count;
 };
 
 /* ER_Passthrough — see the HLSL twin for semantics. Raw 4-float pixel copy of
