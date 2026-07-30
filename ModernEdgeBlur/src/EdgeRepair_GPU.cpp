@@ -68,6 +68,13 @@
 // ---------------------------------------------------------------------------
 #define ER_GPU_LOG 1
 
+// TEMPORARY visual proof that the GPU path executed. The Stage 6 milestone
+// kernel is a passthrough, so GPU output is bit-identical to CPU output and no
+// amount of looking at the frame can tell you whether the GPU ran. With this
+// on, the top eighth of the frame is zeroed on the GPU path only. Set to 0 (or
+// delete both this and the block in ER_RenderCUDA) once real kernels land.
+#define ER_GPU_VISIBLE_MARKER 1
+
 #if ER_GPU_LOG
 #include <atomic>
 #include <cstdarg>
@@ -326,6 +333,13 @@ PF_Err ER_GPUDeviceSetup(PF_InData *in_data, PF_OutData *out_data,
 
     if (!err) {
         extra->output->gpu_data = gpu_data;
+        // Re-affirm GPU support for THIS device. Adobe's AE GPU sample
+        // (Examples/Effect/SDK_Invert_ProcAmp) does exactly this — a plain
+        // assignment, not an OR — in every successful backend branch (CUDA,
+        // OpenCL, DirectX, Metal). Without it AE completes GPU_DEVICE_SETUP
+        // and then offers what_gpu=NONE at every PreRender forever, which is
+        // precisely the symptom we chased for seven failed experiments.
+        out_data->out_flags2 = PF_OutFlag2_SUPPORTS_GPU_RENDER_F32;
         ER_GPU_LOGF("  -> OK (%s backend ready)\n",
                     gpu_data->framework == PF_GPU_Framework_CUDA
                         ? "CUDA" : "DX12");
@@ -601,6 +615,24 @@ static PF_Err ER_RenderCUDA(PF_InData *in_data, PF_OutData *out_data,
                     (int)res);
                 err = PF_Err_INTERNAL_STRUCT_DAMAGED;
             }
+#if ER_GPU_VISIBLE_MARKER
+            // TEMPORARY — delete when the real kernels land.
+            // The milestone kernel is a passthrough, so its output is
+            // bit-identical to the CPU path and the Mercury CUDA-vs-Software
+            // A/B cannot see it (this is exactly why several earlier "same
+            // result" tests were uninformative). Zero the top eighth of the
+            // OUTPUT world so "the GPU path ran" is unmistakable on screen.
+            // Also proves device-pointer + pitch addressing is correct, which
+            // the kernel port depends on.
+            if (res == ER_CUDA_SUCCESS && cu.MemsetD8Async) {
+                const size_t rowBytes = (size_t)p.dstPitchF * sizeof(float);
+                const size_t band     = (size_t)(p.outH / 8);
+                if (band > 0) {
+                    cu.MemsetD8Async(dstp, 0, rowBytes * band,
+                                     gpu_data->cuStream);
+                }
+            }
+#endif
         }
     }
 

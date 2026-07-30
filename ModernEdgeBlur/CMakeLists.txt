@@ -125,7 +125,14 @@ add_meb_plugin(ModernEdgeBlur "${RESOURCES_DIR}/ModernEdgeBlurPiPL.r"
 set(MM_COMMON_SOURCES
     "${SRC_DIR}/common/MM_Common.cpp")
 
-set(MEB_INSTALL_DIR_EdgeRepair "${MEDIACORE_PLUGINS_DIR}")
+# 2026-07-30: back to AE's own Plug-ins folder (the default). EdgeRepair was
+# moved to MediaCore to chase the GPUVideoFilter mechanism; that turned out to
+# be the PREMIERE GPU path. AE drives GPU through the documented AE-SDK F32
+# path (GPU_DEVICE_SETUP + SMART_RENDER_GPU), verified on this box by building
+# Adobe's own AE GPU sample (Examples/Effect/SDK_Invert_ProcAmp), which loads
+# from AE's Plug-ins folder and GPU-renders on CUDA. Adobe's sample build files
+# say the same: "Set it to your After Effects plug-ins folder".
+# set(MEB_INSTALL_DIR_EdgeRepair "${MEDIACORE_PLUGINS_DIR}")   # Premiere path
 add_meb_plugin(EdgeRepair "${RESOURCES_DIR}/EdgeRepairPiPL.r"
     "${SRC_DIR}/EdgeRepair.cpp"
     "${SRC_DIR}/EdgeRepair_Strings.cpp"
@@ -209,7 +216,7 @@ add_dependencies(EdgeRepair EdgeRepairShaders)
 # discipline as the plugin binary itself; fails harmlessly if AE holds them).
 add_custom_command(TARGET EdgeRepair POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${ER_DX_ASSETS}" "${MEDIACORE_PLUGINS_DIR}/DirectX_Assets"
+            "${ER_DX_ASSETS}" "${MEB_INSTALL_DIR_EdgeRepair_RESOLVED}/DirectX_Assets"
     COMMENT "Installing EdgeRepair DirectX_Assets next to the deployed .aex"
     VERBATIM
 )
@@ -299,7 +306,7 @@ if(NVCC_EXE)
     add_dependencies(EdgeRepair EdgeRepairCudaPTX)
     add_custom_command(TARGET EdgeRepair POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "${ER_CUDA_ASSETS}" "${MEDIACORE_PLUGINS_DIR}/CUDA_Assets"
+                "${ER_CUDA_ASSETS}" "${MEB_INSTALL_DIR_EdgeRepair_RESOLVED}/CUDA_Assets"
         COMMENT "Installing EdgeRepair CUDA_Assets next to the deployed .aex"
         VERBATIM
     )
@@ -308,4 +315,4 @@ else()
 endif()
 
 message(STATUS "ModernEdgeBlur.aex → ${AE_PLUGINS_DIR}")
-message(STATUS "EdgeRepair.aex + kernel assets → ${MEDIACORE_PLUGINS_DIR} (GPUVideoFilter host)")
+message(STATUS "EdgeRepair.aex + kernel assets → ${MEB_INSTALL_DIR_EdgeRepair_RESOLVED}")

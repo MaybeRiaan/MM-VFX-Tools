@@ -693,52 +693,46 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
     // Must match resources/EdgeRepairPiPL.r literals exactly or AE rejects
     // with a version/outflags mismatch.
     //
-    // USE_OUTPUT_EXTENT: RESTORED 2026-07-29. It was removed on 2026-07-24 on
-    // the strength of a PiPL sweep (no shipping GPU effect on this box set
-    // it). That inference was wrong: BOTH of Adobe's own GPUVideoFilter
-    // samples set it — SDK_ProcAmp (0x40, the ONLY out_flag it sets) and
-    // Vignette (0x440, which its header says works in AE and Premiere).
-    // Shipping binaries are stripped/obfuscated evidence; the samples are
-    // authoritative.
+    // 2026-07-30: this flag set now MIRRORS Adobe's own AE GPU sample,
+    // Examples/Effect/SDK_Invert_ProcAmp (AE SDK), which was built and
+    // AE-verified on this box to GPU-render on CUDA (SMART_RENDER_GPU called
+    // 22x, what_gpu=3 at PreRender). It is a working specimen of the
+    // documented AE-SDK F32 path — the path we had wrongly written off.
+    //
+    // USE_OUTPUT_EXTENT is NOT set: Adobe's AE GPU sample declares
+    // eGLO 0x02000400, i.e. PIX_INDEPENDENT | DEEP_COLOR_AWARE only. (It was
+    // briefly restored on 2026-07-29 after seeing it in the *Premiere*
+    // GPUVideoFilter samples; those are the wrong reference for AE.)
     out_data->out_flags  = PF_OutFlag_DEEP_COLOR_AWARE |
-                           PF_OutFlag_PIX_INDEPENDENT |
-                           PF_OutFlag_USE_OUTPUT_EXTENT;
-    // Stage 6: SUPPORTS_GPU_RENDER_F32 announces the GPU path (AE additionally
-    // requires GPU_RENDER_POSSIBLE per-frame in PreRender). Do NOT add
-    // SUPPORTS_DIRECTX_RENDERING here: it declares the effect's GPU framework
-    // to BE DirectX, and AE-on-Windows runs effects on CUDA — with the DX flag
-    // set, AE completed our CUDA DEVICE_SETUP but then offered what_gpu=NONE
-    // at every PreRender (measured 2026-07-23, ER_GPU_LOG). If Premiere-host
-    // DX12 rendering is ever wanted, set the flag conditionally for that host
-    // (in_data->appl_id) — never unconditionally.
-    // SUPPORTS_QUERY_DYNAMIC_FLAGS was a Stage 6 experiment (2026-07-24) and
-    // is REMOVED (2026-07-29): it never opened the GPU gate — the real
-    // mechanism is the GPUVideoFilter module (docs/AE_GPU_Effects.md) — and
-    // it is a live liability. Handling PF_Cmd_QUERY_DYNAMIC_FLAGS correctly
-    // requires writing ONLY the dynamic-queryable bits into an out_flags AE
-    // hands us pre-populated; anything else raises the unsuppressable AE
-    // error 25::228 ("effect cannot change non-dynamic flag bits") on EVERY
-    // apply. We have no genuinely dynamic flags, so the correct move is not
-    // to declare the capability at all. Do not re-add it without a concrete
-    // need and the exact write-only-dynamic-bits discipline.
+                           PF_OutFlag_PIX_INDEPENDENT;
+
     out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE        |
                            PF_OutFlag2_SUPPORTS_SMART_RENDER     |
-                           PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
-                           PF_OutFlag2_SUPPORTS_GPU_RENDER_F32;
+                           PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
 
-    // Pixel-format declaration is PREMIERE-ONLY. Both Adobe GPUVideoFilter
-    // samples guard it with exactly this test:
-    //     if (in_data->appl_id == 'PrMr') { ...AddSupportedPixelFormat... }
-    // In AE the suite genuinely does not exist — our probe returned
-    // kSPSuiteNotFoundError ('S!Fd') for BOTH suite versions, which is the
-    // correct, expected result there rather than a defect to chase. (A suite
-    // name appearing inside a shipping binary such as OpticalGlow only proves
-    // the plugin references it for its Premiere build; it says nothing about
-    // what AE vends.) So this is NOT the reason AE declines to instantiate
-    // our GPUVideoFilter module — that question is still open.
+    // GPU declaration, exactly as the AE sample does it: announce F32 + DIRECTX
+    // for every host EXCEPT Premiere, which instead wants pixel formats. AE
+    // additionally requires GPU_RENDER_POSSIBLE per-frame in PreRender, and —
+    // the piece we were missing for seven experiments — a re-affirmation of
+    // SUPPORTS_GPU_RENDER_F32 in GPU_DEVICE_SETUP (see ER_GPUDeviceSetup).
+    //
+    // SUPPORTS_DIRECTX_RENDERING was previously removed here on the theory that
+    // it declares the effect's framework to BE DirectX and confuses AE-on-CUDA.
+    // Adobe's AE sample sets it unconditionally in this same non-Premiere
+    // branch and still receives what_gpu=CUDA, so that theory was wrong.
+    //
+    // Do NOT add SUPPORTS_QUERY_DYNAMIC_FLAGS: it never affected the GPU gate
+    // and mishandling PF_Cmd_QUERY_DYNAMIC_FLAGS raises an unsuppressable AE
+    // error 25::228 on EVERY apply (AE hands out_flags PRE-populated, so even
+    // OR-ing one dynamic bit leaves non-dynamic bits set and counts as
+    // changing them). Our flags are static, so we simply don't declare it.
     if (in_data->appl_id == 'PrMr') {
         ER_DeclareGPUPixelFormats(in_data, out_data);
+    } else {
+        out_data->out_flags2 |= PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 |
+                                PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING;
     }
+
     return PF_Err_NONE;
 }
 

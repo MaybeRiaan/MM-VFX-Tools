@@ -1,352 +1,333 @@
 # GPU-accelerating an After Effects effect (AE 2026, Windows/NVIDIA)
 
-**Audience: any plugin in this suite.** This is the general, reusable
-writeup — EdgeRepair happened to be the plugin that paid the discovery cost,
-but nothing here is EdgeRepair-specific. Per-plugin status and the raw
-experiment log live in `docs/EdgeRepair.md` ("Stage 6 investigation state").
+**Audience: any plugin in this suite.** EdgeRepair paid the discovery cost;
+nothing here is EdgeRepair-specific. Per-plugin status lives in that plugin's
+own doc.
 
-Everything below was established empirically on the test box
-(Win 10, i7-9700K, RTX 3070 Ti, driver 576.28, AE 2026 / 26.2, Mercury CUDA)
-between 2026-07-23 and 2026-07-29. Where something is *believed* rather than
-*measured*, it says so.
+Verified end-to-end on the test box (Win 10, i7-9700K, RTX 3070 Ti, driver
+576.28, AE 2026 / 26.2, Mercury CUDA) on **2026-07-30**: EdgeRepair receives
+`what_gpu = CUDA` at PreRender and AE calls `PF_Cmd_SMART_RENDER_GPU` at 4K.
+Where something is *believed* rather than *measured*, it says so.
 
----
-
-## 1. The headline: the documented AE-SDK GPU path did not work
-
-The AE C++ SDK documents a GPU path built from
-`PF_OutFlag2_SUPPORTS_GPU_RENDER_F32`, `PF_Cmd_GPU_DEVICE_SETUP`,
-`PF_RenderOutputFlag_GPU_RENDER_POSSIBLE`, and `PF_Cmd_SMART_RENDER_GPU`.
-
-**We implemented all of it, correctly, and AE never rendered a GPU frame.**
-The signature: AE runs `GPU_DEVICE_SETUP` successfully at launch (so it *did*
-parse our GPU flags), then offers `what_gpu = NONE` at every single PreRender
-and never calls `PF_Cmd_SMART_RENDER_GPU`.
-
-What actually drives GPU effect rendering in AE 2026 is the **MediaCore
-GPUVideoFilter** mechanism — a Premiere-style GPU filter module exported as
-`xGPUFilterEntry`, bound to the AE effect by match name.
-
-Evidence (all verifiable on any machine with these plugins installed):
-
-| Check | Result |
-|---|---|
-| Plugins on disk declaring `SUPPORTS_GPU_RENDER_F32` | 66 of 218 PiPLs |
-| Adobe natives that GPU-accelerate (Fractal Noise, Transform, Directional Blur, Lumetri) | **all export `xGPUFilterEntry`** |
-| Working 3rd-party GPU effects (Red Giant, Artlist, CLEngine) | **all export `xGPUFilterEntry`** |
-| Plugins with the F32 flag but no `xGPUFilterEntry` (ours, Jawset Postshot) | **never get `what_gpu != NONE`** |
-| AE's plugin registry (`HKCU\Software\Adobe\After Effects\26.2\PluginCache\en_US`) | 82 entries carry a `GPUVideoFilter.0` subkey — exactly the GPU-capable population |
-
-**Caveat, stated honestly:** Adobe still documents the F32 path, and one
-Adobe forum thread describes `SmartRenderGPU` firing for a developer on an
-unstated AE version. It may work on other builds or need something
-undocumented. On *this* configuration, nothing GPU-renders without a
-GPUVideoFilter registration. A cheap future counter-test: build Adobe's own
-`SDK_Invert_ProcAmp` sample from the full AE SDK and see whether it gets
-`what_gpu`.
+> ### Read this first if you saw the previous version
+> An earlier revision of this document claimed the documented AE-SDK GPU path
+> "did not work" and that AE GPU-renders through the MediaCore
+> **GPUVideoFilter** (`xGPUFilterEntry`) mechanism. **That was wrong**, and it
+> cost three days and seven failed experiments.
+>
+> **GPUVideoFilter is Premiere Pro's GPU path. The documented AE-SDK F32 path
+> is After Effects'.** The old conclusion came from inferring host behaviour by
+> sweeping installed third-party `.aex` files. Those binaries ship for *both*
+> hosts, so their contents say nothing about which path AE drives.
+>
+> §7 records the wrong turns so nobody repeats them.
 
 ---
 
-## 2. What a GPU-capable effect needs — the checklist
+## 1. The mechanism
 
-Five things. Miss any one and the failure is **silent** — the effect just
-renders on the CPU with no error, and (this is the cruel part) *looks
-completely fine*.
-
-### 2.1 Export `xGPUFilterEntry` — a GPUVideoFilter module
-
-Needs the **Premiere Pro C++ SDK** (free Adobe download; the AE SDK does not
-contain these headers). Requires `PrSDKGPUFilter.h`,
-`PrSDKGPUDeviceSuite.h`, `PrSDKGPUImageProcessingSuite.h`, and
-`PrGPUFilterModule.h` (the last one lives in the SDK's
-`Examples/Projects/GPUVideoFilter/Utils/`, not in `Examples/Headers/`).
-
-Subclass `PrGPUFilterBase`, implement `Initialize` + `Render`, and export via
-`DECLARE_GPUFILTER_ENTRY(PrGPUFilterModule<YourClass>)`. See
-`src/gpu/ER_GPUFilter.cpp` for a working, commented skeleton.
-
-The SDK's own reference implementations are worth reading:
-`SDK_ProcAmp` (simplest), `Vignette` (AE-style hybrid — its header comment
-explicitly says it works "in After Effects and Premiere Pro").
-
-### 2.2 Install to the MediaCore folder, not AE's Plug-ins folder
+AE 2026 GPU-renders third-party effects through exactly the path the AE SDK
+documents:
 
 ```
-C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\
+GLOBAL_SETUP        declare SUPPORTS_GPU_RENDER_F32 (+ DIRECTX_RENDERING)
+      ↓
+GPU_DEVICE_SETUP    once per device — build your context, AND re-affirm
+                    out_flags2 = SUPPORTS_GPU_RENDER_F32   ← easy to miss
+      ↓
+SMART_PRE_RENDER    AE offers input->what_gpu; you raise GPU_RENDER_POSSIBLE
+      ↓
+SMART_RENDER_GPU    a separate command — worlds hold DEVICE pointers
+      ↓
+GPU_DEVICE_SETDOWN  tear down
 ```
 
-with `CUDA_Assets\` / `DirectX_Assets\` **next to the .aex** (the Premiere
-SDK readme states this rule for kernel assets).
+`xGPUFilterEntry` / MediaCore / `GPUVideoFilter.0` registry records are **not
+part of this** and are not needed for AE. Build a GPUVideoFilter module only if
+you also want to ship into Premiere.
 
-From AE's own `Support Files\Plug-ins\`, the effect loads through the plain
-AE-effect loader (`7a7d3cd3-…` in AE's `Plugin Loading.log`), AE never looks
-for a GPU module, and **no `GPUVideoFilter.0` record is created**. From
-MediaCore it loads through the MediaCore loader (`74697f7d-…`) and gets one.
-Adobe's own natives are the exception that proves the rule — they're
-special-cased inside AE's install.
+---
 
-Keep exactly **one** installed copy; a stale copy in the AE folder
-double-registers the match name.
+## 2. The checklist
 
-### 2.3 Declare GPU pixel formats — **Premiere only; NOT an AE step**
+Six things. Miss any one and the failure is **silent**: the effect renders on
+the CPU with no error and looks perfect.
 
-> **Corrected 2026-07-29.** An earlier revision of this document listed this
-> as a required AE step and claimed its absence was why AE registers a GPU
-> module but never instantiates it. **That was wrong**, and it cost several
-> AE round-trips. It is recorded here so nobody repeats it.
+### 2.1 Declare the GPU flags — and guard the Premiere branch
 
-Guard the call on the host. Both of Adobe's GPUVideoFilter samples do
-exactly this — `SDK_ProcAmp_CPU.cpp:37` and `Vignette_CPU.cpp:92`:
+Mirror Adobe's own AE GPU sample (`SDK_Invert_ProcAmp`, §6):
 
 ```cpp
-if (in_data->appl_id == 'PrMr') {          // Premiere ONLY
-    ClearSupportedPixelFormats(effect_ref);
-    AddSupportedPixelFormat(effect_ref, PrPixelFormat_VUYA_4444_32f);
-    // ...formats in descending order of preference
+out_data->out_flags  = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE;
+out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE
+                     | PF_OutFlag2_SUPPORTS_SMART_RENDER
+                     | PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
+
+if (in_data->appl_id == 'PrMr') {
+    // Premiere wants pixel formats instead (see §5)
+} else {
+    out_data->out_flags2 |= PF_OutFlag2_SUPPORTS_GPU_RENDER_F32
+                          | PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING;
 }
 ```
 
-In After Effects the suite genuinely **does not exist**: acquiring it returns
-`kSPSuiteNotFoundError` (`'S!Fd'` = `0x53214664`) for *both* suite versions.
-That is the correct, expected result in AE — not a defect to chase.
+- **`SUPPORTS_DIRECTX_RENDERING` is correct for AE.** It does not force the
+  effect onto DirectX; Adobe sets it unconditionally for non-Premiere hosts and
+  still receives `what_gpu = CUDA`.
+- **Do not set `USE_OUTPUT_EXTENT`.** Adobe's AE GPU sample declares
+  `eGLO 0x02000400` — `PIX_INDEPENDENT | DEEP_COLOR_AWARE` only.
+- **Do not declare `SUPPORTS_QUERY_DYNAMIC_FLAGS`** unless you genuinely have
+  dynamic flags — see §5.
 
-**Do not infer host behaviour from shipping binaries.** Finding the string
-`"PF Pixel Format Suite"` inside `OpticalGlow.aex` (and 21 others) looks like
-proof that AE vends the suite. It is not — it only shows the plugin
-references it for its *Premiere* build, behind this same `'PrMr'` guard.
-Adobe's samples are authoritative about the host; stripped third-party
-binaries are not.
+### 2.2 Re-affirm GPU support in `GPU_DEVICE_SETUP` ← **the one that bit us**
 
-**Never acquire it with `AEFX_AcquireSuite`.** On failure that helper sets
-`PF_OutFlag_DISPLAY_ERROR_MESSAGE` (`0x100`) on `out_data->out_flags` and
-writes `return_msg` (`sdk/Util/AEFX_SuiteHelper.c:51-57`). Called from
-`GLOBAL_SETUP` — where this call belongs — that silently corrupts the
-reported global outflags and AE refuses to load the plugin with
-*"global outflags mismatch ... code flags are 2000500 and PiPL flags are
-2000400"* (**25::16**); `0x500` vs `0x400` is exactly that bit. Go through
-`in_data->pica_basicP->AcquireSuite` directly so a miss is silent.
+After building your per-device context, **assign** (not OR):
 
-**FourCC trap** (still applies when you do this for Premiere). The
-`PrPixelFormat_GPU_*` labels live in the *Premiere* headers, which shouldn't
-be pulled into an AE-SDK translation unit. Build them with
-`MAKE_ADOBE_PRIVATE_PIXEL_FORMAT_FOURCC` from the AE SDK's own
-`PrSDKPixelFormat.h`. **Never hand-roll the constant** — the private prefix
-is `'@'` (not `'A'`), byte order is reversed, and 16f is lowercase `'a'`
-against 32f's `'A'`. Each mistake fails silently as "the host never offers
-that format."
+```cpp
+out_data->out_flags2 = PF_OutFlag2_SUPPORTS_GPU_RENDER_F32;
+```
 
-### 2.4 Keep the AE-side declarations (harmless, and they match the working set)
+Adobe's sample does this in *every* successful backend branch (CUDA, OpenCL,
+DirectX, Metal). Without it, AE completes `GPU_DEVICE_SETUP` happily and then
+offers `what_gpu = NONE` at **every** PreRender, forever. That is a perfect
+imitation of "AE doesn't support third-party GPU effects", and it is why seven
+other hypotheses were chased first.
 
-Red Giant and Artlist ship *both* the AE GPU flags and the GPU module. Ours
-now declare `SUPPORTS_GPU_RENDER_F32`, `FLOAT_COLOR_AWARE`,
-`SUPPORTS_SMART_RENDER`, `SUPPORTS_THREADED_RENDERING`.
+If you decline a device (unsupported framework, missing driver), just return
+`PF_Err_NONE` without setting `gpu_data` — AE falls back to CPU cleanly.
 
-Worth knowing before you copy that set: **neither Adobe sample declares
-`SUPPORTS_GPU_RENDER_F32`.** `SDK_ProcAmp` sets `OutFlags 0x40 / OutFlags_2
-0x100`; `Vignette` sets `0x440 / 0x1440`. Both GPU-render. That flag belongs
-to the *other* (documented, non-functional here) path in §1, and is very
-likely inert for the GPUVideoFilter mechanism. It appears harmless, so we
-still ship it, but do not assume it is doing anything.
+### 2.3 Raise `GPU_RENDER_POSSIBLE` in PreRender
 
-Three specific notes:
+```cpp
+extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+```
 
-- **Do not declare `SUPPORTS_QUERY_DYNAMIC_FLAGS`** unless the effect really
-  has dynamic flags — it is not part of the GPU recipe and it is an easy
-  route to a per-apply AE error. See the 25::228 entry in §3.
+Unconditional is fine (Adobe's sample does it before anything else). AE still
+decides per frame — expect `what_gpu = NONE` for thumbnails and heavily
+downsampled draft renders even when GPU is working.
 
-- **`PF_OutFlag_USE_OUTPUT_EXTENT` — set it.** *(Reversed 2026-07-29.)* An
-  earlier revision said never to set it, inferred from a sweep showing zero
-  of 63 shipping third-party GPU declarers using it. **Adobe's own samples
-  contradict that sweep**: `SDK_ProcAmp` declares `0x40` — that flag *alone*,
-  nothing else — and `Vignette`, whose header says it runs in both AE and
-  Premiere, declares `0x440`. Prefer samples over inference from stripped
-  binaries.
-- **Do not set `SUPPORTS_DIRECTX_RENDERING`** for AE. It declares the
-  effect's framework to *be* DirectX; AE-on-Windows drives effects on CUDA.
-  Set it conditionally for Premiere hosts (`in_data->appl_id`) if ever wanted.
+### 2.4 Handle `PF_Cmd_SMART_RENDER_GPU` — it is a **separate command**
 
-### 2.5 Match the PiPL and the runtime flags exactly
+```cpp
+case PF_Cmd_SMART_RENDER:     err = SmartRender(...); break;
+case PF_Cmd_SMART_RENDER_GPU: err = SmartRender(...); break;   // easy to omit
+case PF_Cmd_GPU_DEVICE_SETUP:    err = GPUDeviceSetup(...);    break;
+case PF_Cmd_GPU_DEVICE_SETDOWN:  err = GPUDeviceSetdown(...);  break;
+```
 
-`AE_Effect_Global_OutFlags`/`_2` in the `.r` file must equal what
-`GlobalSetup` sets at runtime, or AE rejects the plugin with a misleading
-"version mismatch" error. Our build script mirrors the version bump into both
-files for this reason.
+Inside, branch on `extra->input->what_gpu != PF_GPU_Framework_NONE`. **Never
+fall back to the CPU path on a GPU error** — CPU code cannot address device
+memory.
 
----
+### 2.5 Install to **AE's** Plug-ins folder
 
-## 3. Hard-won gotchas
+```
+C:\Program Files\Adobe\Adobe After Effects 2026\Support Files\Plug-ins\
+```
 
-- **`PF_Cmd_QUERY_DYNAMIC_FLAGS` — do not declare it unless you truly need
-  it.** `SUPPORTS_QUERY_DYNAMIC_FLAGS` is **not** part of the GPU recipe (it
-  was tried as a gate experiment and did nothing), and getting its handler
-  even slightly wrong raises an **unsuppressable AE error 25::228** —
-  *"effect cannot change non-dynamic flag bits during
-  PF_Cmd_QUERY_DYNAMIC_FLAGS"* — on **every apply of the effect**.
-  We hit 25::228 twice: first by re-asserting the full static flag set (via
-  `GlobalSetup`), then again by OR-ing a single dynamic bit into
-  `out_data->out_flags`. AE hands you that struct **pre-populated**, so
-  OR-ing still leaves non-dynamic bits set and AE counts that as changing
-  them. Only these bits may be touched — OutFlags: `WIDE_TIME_INPUT`,
-  `NON_PARAM_VARY`, `PIX_INDEPENDENT`, `I_USE_SHUTTER_ANGLE`; OutFlags2:
-  `I_USE_3D_CAMERA/LIGHTS`, `DOESNT_NEED_EMPTY_PIXELS`, `REVEALS_ZERO_ALPHA`,
-  `DEPENDS_ON_UNREFERENCED_MASKS`, `OUTPUT_IS_WATERMARKED`.
-  **If your flags are all static (the normal case), simply don't declare the
-  capability** — AE only sends the command to effects that advertise it, so
-  the error becomes impossible. That is what EdgeRepair does now.
-- **`PrGPUFilterModule.h` doesn't compile standalone** — it uses
-  `PF_TransitionSuite` without including it. Include `PrSDKAESupport.h`
-  first. (Adobe's examples get it via their effect header chain.)
-- **Keep the Premiere headers in exactly one TU.** Per-source include dirs +
-  `PRWIN_ENV` for the GPU-module file only; never mix them into AE-SDK files.
-- **GPU frames are BGRA**, and may be 16f — not the ARGB float the AE CPU
-  path uses. Any kernel port must handle channel order *and* half float.
-- **`GetParam(index, time)` shifts by one** in a GPU filter: "GPU filters do
-  not include the input frame."
-- **SDKs are never committed.** Both the AE and Premiere SDKs are
-  non-redistributable; `sdk/` is gitignored. CMake should `FATAL_ERROR` with
-  instructions when the headers are missing, so the other build machine gets
-  a clear message instead of a confusing compile failure.
+with any kernel assets (`CUDA_Assets\`, `DirectX_Assets\`) **next to the .aex**.
+Adobe's sample build files say the same: *"Set it to your After Effects
+plug-ins folder."*
+
+**Not** `Common\Plug-ins\7.0\MediaCore\` — that is the Premiere/MediaCore host
+folder. Keep exactly **one** installed copy; a second copy elsewhere
+double-registers the match name, and deleting from `Program Files` needs an
+elevated shell.
+
+### 2.6 PiPL must equal the runtime flags
+
+`AE_Effect_Global_OutFlags`/`_2` in the `.r` file must match what `GlobalSetup`
+sets, or AE rejects the plugin with a misleading *"global outflags mismatch"*
+(**25::16**). For the recipe above that is:
+
+```
+AE_Effect_Global_OutFlags   { 0x02000400 }
+AE_Effect_Global_OutFlags_2 { 0x2A001400 }
+```
+
+The PiPL declares the **superset** (including the Premiere-only branch's bits);
+AE tolerates that. Mirror your version bump into both files.
 
 ---
 
-## 3a. Ruled out — do not retry these
+## 3. Working with GPU frames
 
-As of 2026-07-29 EdgeRepair reaches **registration but not instantiation**: AE
-writes a `GPUVideoFilter.0` record whose shape is byte-identical to Adobe's own
-`SDK_ProcAmp` sample (same `InterfaceVersion = 2`, same Plugin Factory Guid,
-same MediaCore loader GUID `74697f7d-…`), and then never calls
-`CreateInstance` / `Initialize`. Seven hypotheses were tested against a live
-AE, each costing a restart. **All were negative.** Recorded so the next plugin
-does not pay for them again:
+- `extra->input->gpu_data` is the blob you stored in `GPU_DEVICE_SETUP`.
+  Sanity-check `gpu_data->framework == extra->input->what_gpu`.
+- Get device pointers via `PF_GPUDeviceSuite1::GetGPUWorldData(effect_ref,
+  world, &mem)`. For CUDA this **is** the `CUdeviceptr`.
+- Pixel layout is **BGRA**, 4 × f32 (16 bytes/px) — *not* the ARGB float the AE
+  CPU path uses. Derive pitch from `world->rowbytes`, never from width.
+- Allocate through `PF_GPUDeviceSuite1` only — never raw `cudaMalloc`.
+- **Launch on AE's stream** (`device_info.command_queuePV`) and do **not**
+  synchronize: AE owns synchronization, and that stream also serializes
+  concurrent Multi-Frame Rendering launches, which is what makes the path
+  lock-free.
+- 16f (`_16f`) formats are declared on the Premiere path; a kernel that may see
+  them must handle half floats.
 
-| # | Hypothesis | Result |
+---
+
+## 4. How to tell whether it is actually working
+
+The failure mode is silent. Use these, in this order.
+
+### 4.1 Log inside the GPU entry points
+
+Log `what_gpu` in PreRender and log entry to `SMART_RENDER_GPU`. This is the
+decisive signal:
+
+```
+PRERENDER what_gpu=3 gpu_data=0x… -> GPU_RENDER_POSSIBLE=YES
+SMART_RENDER GPU what_gpu=3 out=3840x2160 src=3840x2160
+```
+
+`what_gpu`: `0 = NONE, 1 = OPENCL, 2 = METAL, 3 = CUDA, 4 = DIRECTX`.
+**`what_gpu=0` at every PreRender ⇒ the gate is shut — go to §2.2 first.**
+
+### 4.2 Make the milestone kernel **visibly destructive**
+
+> A passthrough kernel makes the CUDA-vs-Software A/B **worthless** — output is
+> bit-identical whether or not the GPU ran. We wasted several test rounds on
+> exactly this, twice.
+
+Zero the top eighth of the output world, then check it disappears under
+Mercury → *Software Only*:
+
+```cpp
+cu.MemsetD8Async(dstPtr, 0, rowBytes * (height / 8), stream);
+```
+
+Expect it to read as **transparent**, not black: zeroing BGRA sets alpha to 0.
+That is also a free check that pointer, pitch and channel layout are right.
+
+Keep it behind a compile switch (`ER_GPU_VISIBLE_MARKER`) and delete it when
+real kernels land.
+
+### 4.3 Don't bother with the registry
+
+`GPUVideoFilter.0` under
+`HKCU\Software\Adobe\After Effects\26.2\PluginCache\en_US` is the **Premiere**
+mechanism's record. Its presence or absence says nothing about AE GPU. (An
+earlier revision presented it as the decisive check. It is not.)
+
+Still useful: `%APPDATA%\Adobe\After Effects\26.2\Plugin Loading.log` shows
+which loader picked up each plugin.
+
+---
+
+## 5. Gotchas
+
+- **`PF_Cmd_QUERY_DYNAMIC_FLAGS` — don't declare it unless you need it.**
+  `SUPPORTS_QUERY_DYNAMIC_FLAGS` is not part of the GPU recipe, and getting the
+  handler slightly wrong raises an unsuppressable **25::228** on *every* apply.
+  AE hands you `out_flags` **pre-populated**, so even OR-ing one dynamic bit
+  leaves non-dynamic bits set and counts as changing them. If your flags are
+  static, simply don't advertise the capability.
+- **Never acquire suites with `AEFX_AcquireSuite` in `GLOBAL_SETUP`.** On
+  failure it sets `PF_OutFlag_DISPLAY_ERROR_MESSAGE` (`0x100`) on
+  `out_data->out_flags` and writes `return_msg`
+  (`sdk/Util/AEFX_SuiteHelper.c:51-57`). That silently corrupts your reported
+  outflags and AE refuses to load the plugin (**25::16**, `0x2000500` vs
+  `0x2000400`). Use `in_data->pica_basicP->AcquireSuite` and restore
+  `out_flags`/`out_flags2` on the way out.
+- **The pixel-format suite is Premiere-only.** `kPFPixelFormatSuite` returns
+  `kSPSuiteNotFoundError` (`'S!Fd'`) in AE for *both* versions — correct, not a
+  defect. Guard the call with `appl_id == 'PrMr'`.
+- **FourCC trap** (Premiere path only): build `PrPixelFormat_GPU_*` with
+  `MAKE_ADOBE_PRIVATE_PIXEL_FORMAT_FOURCC`. Never hand-roll — the private
+  prefix is `'@'`, byte order is reversed, and 16f is lowercase `'a'` against
+  32f's `'A'`. Each mistake fails silently.
+- **SDKs are never committed.** `sdk/` is gitignored. Have CMake `FATAL_ERROR`
+  with instructions when headers are missing.
+
+---
+
+## 6. The reference sample — build it when stuck
+
+`SDK_Invert_ProcAmp` in the **AE** SDK is a complete, working AE GPU effect
+(CUDA + OpenCL + DirectX + Metal). It is the ground truth; reading and building
+it settled in minutes what days of black-box probing got wrong.
+
+```
+<AE SDK>\Examples\Effect\SDK_Invert_ProcAmp\      the sample
+<AE SDK>\Examples\GPUUtils\                       PrGPU kernel-support headers
+```
+
+Building it here needed three workarounds, all reusable:
+
+1. **Toolset** — its `.vcxproj` targets `v142`/`v143`. Skip MSBuild; drive
+   `cl`/`link` directly through `vcvarsall.bat`, as our own Ninja build does.
+2. **Boost** — `KernelWrapper.h` (which the `GF_KERNEL_FUNCTION` macro needs)
+   includes Boost.Preprocessor. If you don't have boost, hand-expand the kernel
+   into a plain `__global__` function; the macro only builds the signature and
+   the thread-index preamble.
+3. **nvcc vs VS 2026** — `cudafe++` crashes against the newest STL. Point nvcc
+   at a side-by-side 14.4x toolset with `-ccbin`, plus `--use-local-env`,
+   `-allow-unsupported-compiler`, and a rebuilt `INCLUDE`/`VCToolsInstallDir`.
+   The exact recipe is in this repo's `CMakeLists.txt`.
+
+Instrument its `PreRender` / `SmartRenderGPU` with a file log before testing —
+the effect renders correctly on CPU *and* GPU, so **looking at the frame tells
+you nothing**.
+
+Other samples, and what they are good for:
+
+| Sample | SDK | Use for AE? |
 |---|---|---|
-| 1 | `SUPPORTS_DIRECTX_RENDERING` confuses AE-on-CUDA | removed — no change |
-| 2 | `SUPPORTS_QUERY_DYNAMIC_FLAGS` gates GPU | no change, and caused 25::228 |
-| 3 | Install location (AE Plug-ins vs MediaCore) | MediaCore is required for the *record*, but does not yield instantiation |
-| 4 | Missing GPU pixel-format declaration | **the suite is Premiere-only** — see §2.3; not an AE gate |
-| 5 | `USE_OUTPUT_EXTENT` must be absent | reversed — both samples SET it; restoring it changed nothing |
-| 6 | `SUPPORTS_SMART_RENDER` disqualifies GPU filters | false — `Vignette` declares it, handles SmartFX, and GPU-renders |
-| 7 | Missing classic `PF_Cmd_RENDER` handler | added it; AE never called it (SmartFX effects are driven purely through SmartFX) and no instantiation |
-
-What is *known good*: the module exports `xGPUFilterEntry`, `Startup` runs and
-succeeds (proven by the registry record it writes), the match name binds
-(`AE.<match name>`), and the AE-side flag set matches the working samples on
-every GPU-relevant bit.
-
-**Caution about "reference" samples.** `SDK_ProcAmp` and `SDK_CrossDissolve`
-are **Premiere** samples and are *not* usable as AE references:
-`SDK_ProcAmp`'s CPU `Render` is wrapped in `if (in_data->appl_id == 'PrMr')`
-and its GPU `Initialize` has no CUDA branch (OpenCL/DirectX/Metal only), so on
-AE-on-NVIDIA it declines GPU **and** no-ops on CPU — it renders a **black
-frame in AE by design**. We briefly mistook that black frame for evidence the
-GPU module had run. `SDK_CrossDissolve` is a transition (a Premiere concept)
-and has no AE path at all. **`Vignette` is the only AE-relevant sample** — its
-header states it works in both hosts.
-
-The remaining untested explanation is that AE 2026 may not instantiate
-third-party GPUVideoFilters at all, special-casing its own bundled effects.
-Static comparison has been exhausted; that question needs Adobe developer
-support, not more local probing.
+| `SDK_Invert_ProcAmp` | **AE** | **Yes — the AE GPU reference** |
+| `Vignette` | Premiere | Partly — AE+Premiere hybrid, but GPU side is Premiere's |
+| `SDK_ProcAmp` | Premiere | **No** — CPU render is `'PrMr'`-gated and GPU init has no CUDA branch, so in AE it renders a **black frame by design** |
+| `SDK_CrossDissolve` | Premiere | **No** — transitions are a Premiere concept |
 
 ---
 
-## 4. How to tell whether it's actually working
+## 7. What we got wrong (so you don't repeat it)
 
-The failure mode is silent, so use these three signals — in this order of
-reliability. **Do not trust "it renders correctly" as evidence of anything.**
+Seven hypotheses were tested against live AE, each costing a restart, all
+negative — because the real problem (§2.2) was in none of them:
 
-1. **The registry record** (decisive, checkable without AE running):
-   ```powershell
-   Get-ChildItem "HKCU:\Software\Adobe\After Effects\26.2\PluginCache\en_US" |
-     Where-Object PSChildName -match 'YourPlugin' |
-     ForEach-Object { Get-ChildItem $_.PSPath }
-   ```
-   A `GPUVideoFilter.0` subkey means AE registered the module. Its values
-   should read `MatchName = AE.<Your Match Name>`, `InterfaceVersion = 2`.
-   No subkey ⇒ problem is registration (§2.1/§2.2), not rendering.
+| # | Hypothesis | Verdict |
+|---|---|---|
+| 1 | `SUPPORTS_DIRECTX_RENDERING` confuses AE-on-CUDA | Wrong — Adobe sets it; removing it changed nothing |
+| 2 | `SUPPORTS_QUERY_DYNAMIC_FLAGS` gates GPU | Wrong — and caused 25::228 |
+| 3 | Must install to MediaCore | **Backwards** — that's Premiere's folder |
+| 4 | Must declare GPU pixel formats | Wrong — Premiere-only suite |
+| 5 | `USE_OUTPUT_EXTENT` must be absent | Wrong both ways; irrelevant |
+| 6 | `SUPPORTS_SMART_RENDER` disqualifies GPU | Wrong |
+| 7 | Missing classic `PF_Cmd_RENDER` handler | Wrong — AE never called it |
 
-2. **Your own log from inside the module.** Log in `Initialize` and `Render`.
-   Registration without these lines means the host declined to instantiate
-   (that's what §2.3 fixed). Ours writes to `%TEMP%\EdgeRepair_gpu.log`.
-
-3. **A/B the Mercury renderer — but only with a *deliberately wrong* kernel.**
-   CUDA and Software Only must look **different**. Identical output = the GPU
-   module is not running. Better than timing, because a fast CPU path can mask
-   a modest GPU win.
-
-   **A passthrough kernel makes this test useless** — we ran it for days with
-   a device-to-device copy, where "identical output" was guaranteed whether or
-   not the module ran, and mistook that for evidence. Make the milestone
-   kernel visibly destructive (e.g. `cuMemsetD8Async` zeroing the top eighth
-   of the frame), confirm the difference, *then* write the real kernel.
-
-Also useful: AE's `Plugin Loading.log`
-(`%APPDATA%\Adobe\After Effects\26.2\`) shows which loader picked up each
-plugin — the MediaCore vs AE-effect distinction from §2.2.
+**The single lesson.** Every wrong turn came from inferring host behaviour by
+examining shipping third-party binaries. A shipping `.aex` tells you what *that
+plugin* does — and it usually ships for both AE and Premiere. Only Adobe's
+samples tell you what *the host* requires. When a mechanism question comes up:
+**read the sample, build the sample, instrument the sample.**
 
 ---
 
-## 4a. Read the samples first
+## 8. Realistic payoff
 
-The Premiere SDK's GPUVideoFilter samples settled in minutes several questions
-that days of black-box probing against AE got wrong. **Read them before
-theorising.** On this box:
+For a memory-bandwidth-bound effect at 4K (EdgeRepair's profile):
 
-```
-E:\OFX DEV\AE SDK\Premiere Pro 26.0 C++ SDK Windows\
-    Premiere Pro 26.0 C++ SDK\Examples\Projects\GPUVideoFilter\
-        SDK_ProcAmp\      simplest complete GPU filter
-        Vignette\         AE + Premiere hybrid — closest to what we want
-        SDK_CrossDissolve\  transition variant
-```
-
-Online mirror of the same docs: https://ppro-plugins.docsforadobe.dev/
-
-Each sample carries `.r` (PiPL flags), `_CPU.cpp` (AE side, `GlobalSetup`),
-`_GPU.cpp` (the module), `Win/*.vcxproj` (exact compile/link settings), and a
-`readme.txt` with the DXC shader-compile step.
-
-The lesson worth generalising: **a shipping third-party binary tells you what
-that plugin does; only a sample tells you what the host requires.** Every
-wrong turn recorded in this document came from inferring host behaviour by
-sweeping installed `.aex` files.
-
----
-
-## 5. Tools in this repo
-
-- `tools/pipl_dump.py <file.aex>` — parse a plugin's PiPL straight off disk
-  (PE resource walk): OutFlags, OutFlags_2, spec version, match name, entry
-  point. Works on any `.aex`, including third-party ones.
-- `tools/pipl_sweep.py <dir> [dir…]` — sweep every `.aex` under given roots
-  and report which declare `SUPPORTS_GPU_RENDER_F32`, with named flag bits.
-  This is what found the specimen population.
-
-Ad-hoc but easily rebuilt: a PE export-table dumper (does a plugin export
-`xGPUFilterEntry`?) and a binary suite-name scanner (which host suites does
-it acquire?). Both were decisive; see the session history in
-`docs/EdgeRepair.md` if they're needed again.
-
----
-
-## 6. Realistic payoff
-
-For a memory-bandwidth-bound effect at 4K (EdgeRepair's profile — its box
-blur was measured *2.3× slower* than the exact Gaussian, which is the
-signature of bandwidth-bound, not compute-bound):
-
-- CPU today: ~300 ms/frame at 4K on 8 threads (was ~1150 ms before CPU
-  optimisation).
+- CPU today: ~300 ms/frame at 4K on 8 threads.
 - Expected GPU: **~15–40 ms/frame**, i.e. roughly **8–20×**, mostly from the
   ~10× DRAM bandwidth ratio (≈35–40 GB/s across 8 cores vs ≈350–450 GB/s).
-- Watch the transfer floor: a 4K float RGBA frame is 132 MB, so ~20 ms
-  round-trip over PCIe 3.0 if the frame isn't already GPU-resident. In a
-  Mercury chain with other GPU effects it stays resident and that cost
-  disappears.
-- Second-order win: moving work off the CPU frees all 8 cores for
-  Multi-Frame Rendering, so comp throughput usually improves by more than the
-  single-frame numbers suggest.
+- Frames handed to `SMART_RENDER_GPU` are **already GPU-resident**, so there is
+  no PCIe round-trip per frame on this path.
+- Second-order win: moving work off the CPU frees cores for Multi-Frame
+  Rendering, so comp throughput usually improves by more than the single-frame
+  numbers suggest.
 
-These are estimates until a real kernel runs; the passthrough milestone
-exists to make the first measurement possible.
+Estimates until a real kernel runs; the passthrough milestone exists to make
+the first measurement possible.
+
+---
+
+## 9. Tools in this repo
+
+- `tools/pipl_dump.py <file.aex>` — parse a plugin's PiPL off disk (PE resource
+  walk): OutFlags, OutFlags_2, spec version, match name, entry point.
+- `tools/pipl_sweep.py <dir> …` — sweep `.aex` files and report GPU declarers.
+
+Both are useful for checking *your own* build. Per §7, be careful about drawing
+conclusions from other vendors' binaries.

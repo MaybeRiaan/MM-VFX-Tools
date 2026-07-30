@@ -29,35 +29,34 @@ IS the handoff; it absorbed `docs/HANDOFF_VIEWMODES.md` on 2026-07-22.)
 - **EdgeRepair v1.0.0.32** (committed `ed0200d`). Stages 0–5 are DONE +
   AE-gated. The CPU path is the shipping path: correct, threaded, ~300 ms/frame
   at 4K on 8 threads.
-- **Stage 6 (GPU): PARKED — registration works, instantiation does not.**
-  The mechanism finding stands: AE 2026 routes effect GPU rendering through the
-  MediaCore GPUVideoFilter mechanism (`xGPUFilterEntry` bound by match name),
-  not the AE-SDK `SUPPORTS_GPU_RENDER_F32` path. That module is **implemented
-  and registered** — AE writes a `GPUVideoFilter.0` record for us whose shape
-  is byte-identical to Adobe's own sample (`InterfaceVersion = 2`, same Plugin
-  Factory Guid, same MediaCore loader GUID). But AE **never calls
-  `CreateInstance`/`Initialize`**, so no GPU frame is ever rendered.
+- **Stage 6 (GPU): GATE OPEN — AE renders us on CUDA (2026-07-30).**
+  AE now hands us `what_gpu = CUDA` at PreRender and calls
+  `PF_Cmd_SMART_RENDER_GPU` at 4K. Confirmed both in the log and visually (a
+  deliberate marker zeroes the top eighth of the frame on CUDA and vanishes
+  under Mercury → Software Only).
 
-  **Seven hypotheses were tested against live AE and all failed.** Before
-  theorising, read `docs/AE_GPU_Effects.md` §3a "Ruled out — do not retry
-  these"; it lists each one with its result, including two earlier conclusions
-  in that same document that turned out to be **wrong** (GPU pixel-format
-  declaration is Premiere-only and is *not* an AE gate; `USE_OUTPUT_EXTENT`
-  should be SET, not omitted).
+  **The mechanism is the documented AE-SDK F32 path**, not the MediaCore
+  GPUVideoFilter mechanism an earlier revision of these docs claimed —
+  GPUVideoFilter is *Premiere's* path. The full, corrected route is
+  `docs/AE_GPU_Effects.md`; read it before GPU work on any plugin.
 
-  Also in §3a, and important: `SDK_ProcAmp` and `SDK_CrossDissolve` are
-  **Premiere** samples and cannot serve as AE references — ProcAmp renders a
-  black frame in AE *by design* (its CPU render is `'PrMr'`-gated and its GPU
-  init has no CUDA branch). `Vignette` is the only AE-relevant sample.
+  What actually unblocked it, after seven failed hypotheses: **`GPU_DEVICE_SETUP`
+  must re-affirm `out_data->out_flags2 = PF_OutFlag2_SUPPORTS_GPU_RENDER_F32`**
+  (a plain assignment) for each device. Without it AE completes device setup and
+  then offers `what_gpu = NONE` forever. Three supporting changes: restore
+  `SUPPORTS_DIRECTX_RENDERING`, drop `USE_OUTPUT_EXTENT` (PiPL now
+  `0x02000400 / 0x2A001400`), and install to **AE's** Plug-ins folder rather
+  than MediaCore.
 
-  The remaining untested explanation is that AE 2026 may simply not instantiate
-  third-party GPUVideoFilters, special-casing its own bundled effects. Static
-  comparison is exhausted; that needs Adobe developer support, not more local
-  probing. **Do not spend more AE restarts on flag permutations.**
+  Ground truth came from building Adobe's own AE GPU sample,
+  `<AE SDK>\Examples\Effect\SDK_Invert_ProcAmp`, and instrumenting it — it
+  GPU-renders on this box, which proved the F32 path works for third parties.
 
-  Kept as-is and harmless: the AE-SDK CUDA + DX12 backends build and
-  `GPU_DEVICE_SETUP` succeeds; the GPU module and kernel assets ship. Kernel
-  math port (JFA+2 distance, pull–push, composite) NOT started.
+  **Still to do:** the kernel math port (JFA+2 distance, pull–push, composite).
+  The GPU path currently runs a passthrough plus the temporary visible marker
+  (`ER_GPU_VISIBLE_MARKER` in `EdgeRepair_GPU.cpp` — delete when real kernels
+  land). `src/gpu/ER_GPUFilter.cpp` (the GPUVideoFilter module) is now inert in
+  AE; keep it only if Premiere support is wanted.
 - **This project is built on TWO PCs.** ALWAYS `git fetch origin` and reconcile
   BEFORE touching anything, and `git log --oneline -6` to confirm you're on top
   of the tip above. If you're behind, STOP and reconcile — in-flight edits on
@@ -555,12 +554,11 @@ before continuing. Keep every stage compiling and loadable in AE.
   light edge rim at high Detail — the synthetic-grain Detail fixed it (grain
   never touches orig's edge RGB), confirmed in AE on premultiplied footage
   2026-07-22.
-- **Stage 6 — GPU path.** PARKED 2026-07-29 (started 2026-07-23) — see
-  "Current status" at the top of this file and `docs/AE_GPU_Effects.md` §3a
-  before resuming. The GPUVideoFilter module is implemented and registers with
-  AE, but AE never instantiates it; seven hypotheses tested negative. The
-  design decisions below still stand and the code is committed — the blocker is
-  the host, not the architecture. Decisions settled with the user 2026-07-23,
+- **Stage 6 — GPU path.** GATE OPEN 2026-07-30 (started 2026-07-23): AE drives
+  us on CUDA via the AE-SDK F32 path; kernel math port is what remains. See
+  "Current status" at the top of this file and `docs/AE_GPU_Effects.md` before
+  resuming. The design decisions below still stand. Settled with the user
+  2026-07-23,
   grounded in the actual SDK headers (AE 2026 exposes FOUR frameworks —
   OpenCL/Metal/CUDA/DirectX — via `PF_GPU_Framework`):
   - **Shared-kernel layout** (the SDK samples' pattern): all per-pixel math
