@@ -133,33 +133,60 @@ set(MM_COMMON_SOURCES
 # from AE's Plug-ins folder and GPU-renders on CUDA. Adobe's sample build files
 # say the same: "Set it to your After Effects plug-ins folder".
 # set(MEB_INSTALL_DIR_EdgeRepair "${MEDIACORE_PLUGINS_DIR}")   # Premiere path
+# ---------------------------------------------------------------------------
+# OPTIONAL: Premiere Pro GPU module (src/gpu/ER_GPUFilter.cpp, exports
+# xGPUFilterEntry — a MediaCore GPUVideoFilter).
+#
+# NOT needed for After Effects. AE GPU-renders through the AE-SDK F32 path
+# (EdgeRepair_GPU.cpp); GPUVideoFilter is PREMIERE's GPU mechanism, and this
+# module is inert when the plugin is installed in AE's Plug-ins folder.
+# See docs/AE_GPU_Effects.md.
+#
+# Kept because it is written and working-ish, for if Premiere support is ever
+# wanted. It compiles against the PREMIERE PRO SDK headers, which are NOT
+# redistributable: drop Examples/Headers into sdk/Premiere/Headers and
+# Examples/Projects/GPUVideoFilter/Utils/PrGPUFilterModule.h into
+# sdk/Premiere/Utils (both covered by the sdk/ gitignore). Only this one source
+# file may see those headers — never mix them into AE-SDK TUs.
+#
+# Auto-detected, and deliberately NOT fatal when absent: a missing Premiere SDK
+# must not block an AE-only build on the other build PC. Force with
+# -DEDGEREPAIR_PREMIERE_GPU=ON/OFF.
+# ---------------------------------------------------------------------------
+# Default OFF: Premiere is not a target for now (decision 2026-07-30) and AE
+# does not use this module, so an AE-only build should not need the Premiere
+# SDK at all. Re-enable with -DEDGEREPAIR_PREMIERE_GPU=ON.
+option(EDGEREPAIR_PREMIERE_GPU
+    "Build the Premiere GPUVideoFilter module (not needed for After Effects)"
+    OFF)
+
+set(ER_GPU_SOURCES "")
+if(EDGEREPAIR_PREMIERE_GPU)
+    if(NOT EXISTS "${SDK_ROOT}/Premiere/Headers/PrSDKGPUFilter.h" OR
+       NOT EXISTS "${SDK_ROOT}/Premiere/Utils/PrGPUFilterModule.h")
+        message(FATAL_ERROR "EDGEREPAIR_PREMIERE_GPU=ON but the Premiere Pro SDK "
+            "headers are missing under sdk/Premiere/ (need Headers/* and "
+            "Utils/PrGPUFilterModule.h) — see docs/AE_GPU_Effects.md §6")
+    endif()
+    list(APPEND ER_GPU_SOURCES "${SRC_DIR}/gpu/ER_GPUFilter.cpp")
+    message(STATUS "EdgeRepair: building Premiere GPUVideoFilter module (AE does not use it)")
+else()
+    message(STATUS "EdgeRepair: Premiere GPUVideoFilter module SKIPPED (AE-only build)")
+endif()
+
 add_meb_plugin(EdgeRepair "${RESOURCES_DIR}/EdgeRepairPiPL.r"
     "${SRC_DIR}/EdgeRepair.cpp"
     "${SRC_DIR}/EdgeRepair_Strings.cpp"
     "${SRC_DIR}/EdgeRepair_GPU.cpp"
-    "${SRC_DIR}/gpu/ER_GPUFilter.cpp"
+    ${ER_GPU_SOURCES}
     "${SDK_ROOT}/Util/DirectXUtils.cpp"
     ${MM_COMMON_SOURCES})
 
-# ---------------------------------------------------------------------------
-# EdgeRepair Stage 6 — MediaCore GPUVideoFilter module (ER_GPUFilter.cpp,
-# exports xGPUFilterEntry): the mechanism AE 2026 actually GPU-renders
-# effects through (docs/EdgeRepair.md "Stage 6 investigation state",
-# 2026-07-29). Compiles against the PREMIERE PRO SDK headers, which are NOT
-# redistributable: drop Examples/Headers into sdk/Premiere/Headers and
-# Examples/Projects/GPUVideoFilter/Utils/PrGPUFilterModule.h into
-# sdk/Premiere/Utils (both covered by the sdk/ gitignore). Only this one
-# source file sees these headers — never mix them into AE-SDK TUs.
-# ---------------------------------------------------------------------------
-if(NOT EXISTS "${SDK_ROOT}/Premiere/Headers/PrSDKGPUFilter.h" OR
-   NOT EXISTS "${SDK_ROOT}/Premiere/Utils/PrGPUFilterModule.h")
-    message(FATAL_ERROR "Premiere Pro SDK headers missing under sdk/Premiere/ "
-        "(need Headers/* and Utils/PrGPUFilterModule.h) — see the Stage 6 "
-        "section of docs/EdgeRepair.md")
+if(EDGEREPAIR_PREMIERE_GPU)
+    set_source_files_properties("${SRC_DIR}/gpu/ER_GPUFilter.cpp" PROPERTIES
+        INCLUDE_DIRECTORIES "${SDK_ROOT}/Premiere/Headers;${SDK_ROOT}/Premiere/Utils"
+        COMPILE_DEFINITIONS "PRWIN_ENV")
 endif()
-set_source_files_properties("${SRC_DIR}/gpu/ER_GPUFilter.cpp" PROPERTIES
-    INCLUDE_DIRECTORIES "${SDK_ROOT}/Premiere/Headers;${SDK_ROOT}/Premiere/Utils"
-    COMPILE_DEFINITIONS "PRWIN_ENV")
 
 # ---------------------------------------------------------------------------
 # EdgeRepair Stage 6 — GPU (DirectX 12 backend).
