@@ -220,13 +220,21 @@ Known gap, accepted deliberately: 5.2 is a *development-time* check, not a
 regression gate — GPU rendering needs a live AE-hosted device. 5.1 is the
 regression gate, and it covers everything except the D3D12 API layer itself.
 
-**Blocked, as of 2026-08-02:** step 5.2 cannot be run in After Effects for
+**Parked, as of 2026-08-02:** step 5.2 cannot be run in After Effects for
 either DX12 plugin. AE offers `what_gpu = CUDA` on the test box and these hosts
 accept DIRECTX only, so they decline the device and AE renders them on the CPU
-— silently and correctly. See `AE_GPU_Effects.md` §1.1. 5.1 is unaffected and
-remains the regression gate; what is missing is real-silicon confirmation.
+— silently and correctly. Per the decision in `AE_GPU_Effects.md` §1.2, CUDA is
+the backend this suite maintains and these two plugins are re-examined after
+unification. 5.1 is unaffected and remains the regression gate; what is missing
+is real-silicon confirmation, and it will come via a CUDA host.
 
-## 6. DX12 host decisions
+## 6. DX12 host decisions (parked — see §5.2)
+
+Kept in full. These decisions were sound engineering against the wrong target,
+and most of them are backend-independent: the budget gate, the tile planner,
+the scratch-plane scheduling and the MFR-safety argument all carry over to a
+CUDA host unchanged. Read this section as "how the host side was reasoned
+about", not as "what to build next".
 
 - **Shaders compile at BUILD time** (dxc from the Windows SDK, one `-E` per
   entry point) into DXIL embedded as C headers. No runtime compiler DLL, no

@@ -82,18 +82,39 @@ plugins in this suite are in that position today:
 Both DX12 hosts are validated bit-exact against their CPU references in their
 AE-free harnesses, so **the kernels are not in question — the backend choice
 is.** Their remaining "first in-AE GPU validation" step cannot pass on this
-hardware as built. Three ways out, in increasing order of effort: run AE with
-Mercury set to a renderer that offers DirectX (unverified that AE offers one at
-all on Windows/NVIDIA — test before assuming); treat DX12 as the Premiere-host
-path and add a CUDA backend for AE, as EdgeRepair did; or accept CPU-only in AE
-for now and say so in the plugin's doc. **What is not acceptable is leaving it
-undecided** — the failure is invisible, so nobody will notice it has been made
-by default.
+hardware as built.
 
-Scope honestly: this is one box, one GPU vendor, one Mercury setting. It has
-not been tested on AMD/Intel (where OpenCL is the plausible offer) or on macOS
-(Metal). Treat "AE offers CUDA on Windows/NVIDIA" as measured, and "AE never
-offers DirectX anywhere" as an untested inference.
+### 1.2 DECISION (2026-08-02): CUDA is the backend this suite maintains
+
+**EdgeRepair is the ground truth for GPU work across the suite, past and
+future.** It is the only plugin here whose GPU path was written *after* the
+host mechanism was measured rather than inferred, and it is the only one AE has
+ever actually GPU-rendered. Every other GPU effort in this repo was built under
+the assumption this document's own earlier revision got wrong (§8), and
+inherited it.
+
+Consequences, and they are deliberate:
+
+- **CUDA is the only GPU backend under active maintenance.** New GPU work
+  targets CUDA, structured the way EdgeRepair structures it.
+- **The DX12 hosts in MM_FreqSep and MM_Qualify are parked, not deleted.** They
+  are correct code solving a problem AE does not pose on this platform. Nothing
+  about them is thrown away, and their bit-exact kernel validation remains
+  valuable — the kernels are the asset, the host is the part aimed at the wrong
+  target.
+- **All four non-EdgeRepair plugins get re-examined through this lens once the
+  suite unification is finished** — not before, so the re-examination happens
+  against a settled structure.
+- Until then, treat "GPU" in those plugins' docs as meaning "validated
+  AE-free, not reached by AE."
+
+Scope honestly, because this decision rests on one measurement: one box, one
+GPU vendor, one Mercury setting. It has not been tested on AMD/Intel (where
+OpenCL is the plausible offer) or on macOS (Metal). "AE offers CUDA on
+Windows/NVIDIA" is measured; "AE never offers DirectX anywhere" is an untested
+inference. The decision above is the right call for the hardware this suite is
+developed and shipped on today — revisit it if that changes, and re-measure
+rather than re-infer.
 
 ---
 
