@@ -8,6 +8,10 @@ project(MM_Qualify LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Suite helpers (version cross-check + shared AE deploy dir). OPTIONAL so this
+# project still configures if the folder is lifted out of the suite.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/MMSuite.cmake" OPTIONAL)
+
 # ---------------------------------------------------------------------------
 # Paths. The AE SDK lives OUTSIDE this repo and is never committed — one
 # shared install serves the whole suite (same convention as GrainTransfer).
@@ -54,6 +58,14 @@ set(QK_SOURCES
 set(QK_PIPL_R "${RESOURCES_DIR}/MM_QualifyPiPL.r")
 set(TARGET    MM_Qualify)
 
+# Header and PiPL each carry their own copy of the version defines; AE rejects
+# the plugin at load if they disagree. Catch it here instead.
+if(COMMAND mm_check_plugin_version)
+    mm_check_plugin_version(NAME MM_Qualify
+        HEADER "${SRC_DIR}/params.h"
+        PIPL   "${QK_PIPL_R}")
+endif()
+
 # ===========================================================================
 # Windows — PiPLTool.exe pipeline (preprocess .r with cl, run PiPLTool to an
 # .rc, compile that into the plugin resources). Mirrors MM FreqSep.
@@ -64,8 +76,12 @@ if(WIN32)
         message(FATAL_ERROR "PiPLtool.exe not found at: ${PIPLTOOL}")
     endif()
 
-    set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins"
-        CACHE PATH "After Effects Plug-ins folder to deploy the .aex into")
+    if(COMMAND mm_ae_plugins_dir)
+        mm_ae_plugins_dir()
+    else()
+        set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins"
+            CACHE PATH "After Effects Plug-ins folder to deploy the .aex into")
+    endif()
 
     set(PIPL_RR "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}PiPL.rr")
     set(PIPL_RC "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}PiPL.rc")

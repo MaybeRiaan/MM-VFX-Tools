@@ -5,6 +5,10 @@ project(GrainTransfer)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Suite helpers (version cross-check + shared AE deploy dir). OPTIONAL so this
+# project still configures if the folder is lifted out of the suite.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/MMSuite.cmake" OPTIONAL)
+
 # The AE SDK lives OUTSIDE this repo and is never committed (see .gitignore).
 # Override with -DAE_SDK_ROOT=... if the SDK moves.
 set(AE_SDK_ROOT "E:/OFX DEV/AE SDK/AfterEffectsSDK_25.6_61_win/ae25.6_61.64bit.AfterEffectsSDK/Examples"
@@ -42,9 +46,22 @@ if(NOT EXISTS ${PIPLTOOL})
     message(FATAL_ERROR "PiPLtool.exe not found at: ${PIPLTOOL}")
 endif()
 
-set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins")
+if(COMMAND mm_ae_plugins_dir)
+    mm_ae_plugins_dir()
+else()
+    set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins")
+endif()
 
 set(PIPL_R   "${RESOURCES_DIR}/GrainTransferPiPL.r")
+
+# Header and PiPL each carry their own copy of the version defines; AE rejects
+# the plugin at load if they disagree. Catch it here instead.
+if(COMMAND mm_check_plugin_version)
+    mm_check_plugin_version(NAME GrainTransfer
+        HEADER "${SRC_DIR}/GrainTransfer.h"
+        PIPL   "${PIPL_R}")
+endif()
+
 set(PIPL_RR  "${CMAKE_CURRENT_BINARY_DIR}/GrainTransferPiPL.rr")
 set(PIPL_RC  "${CMAKE_CURRENT_BINARY_DIR}/GrainTransferPiPL.rc")
 

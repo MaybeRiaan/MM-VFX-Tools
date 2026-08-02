@@ -1,0 +1,6 @@
+# Suite-level build tree (the root CMakeLists / build.ps1 configure into here).
+# Per-project build/ dirs are ignored by each project's own .gitignore.
+/build/
+
+# VS Code workspace file encodes local paths.
+*.code-workspace

@@ -5,6 +5,10 @@ project(ModernEdgeBlur)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Suite helpers (version cross-check + shared AE deploy dir). OPTIONAL so this
+# project still configures if the folder is lifted out of the suite.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/MMSuite.cmake" OPTIONAL)
+
 # Local SDK paths
 set(SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sdk")
 set(RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
@@ -31,7 +35,22 @@ if(NOT EXISTS ${PIPLTOOL})
     message(FATAL_ERROR "PiPLTool.exe not found at: ${PIPLTOOL}")
 endif()
 
-set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins")
+if(COMMAND mm_ae_plugins_dir)
+    mm_ae_plugins_dir()
+else()
+    set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins")
+endif()
+
+# Two plugins, two independent version pairs. Header and PiPL each carry their
+# own copy of the defines; AE rejects the plugin at load if they disagree.
+if(COMMAND mm_check_plugin_version)
+    mm_check_plugin_version(NAME ModernEdgeBlur
+        HEADER "${SRC_DIR}/ModernEdgeBlur.h"
+        PIPL   "${RESOURCES_DIR}/ModernEdgeBlurPiPL.r")
+    mm_check_plugin_version(NAME EdgeRepair
+        HEADER "${SRC_DIR}/EdgeRepair.h"
+        PIPL   "${RESOURCES_DIR}/EdgeRepairPiPL.r")
+endif()
 
 # MediaCore common plug-ins folder. EdgeRepair installs HERE (not the AE
 # folder) because its GPU path is a MediaCore GPUVideoFilter module: AE only
