@@ -1,6 +1,10 @@
-# Modern Edge Blur (MM plugin suite)
+# Modern Edge Blur
 
-This repo builds a small suite of After Effects "MM" category plugins from one CMake project: **Modern Edge Blur** (documented below, shipped/working) and **Edge Repair** (in progress — edge extension/decontamination; see [docs/EdgeRepair.md](docs/EdgeRepair.md) for its full spec and staged-build status). The two are independent plugins that happen to share a build system and a small common helper lib (`src/common/`) — Modern Edge Blur's own plugin code is never modified for Edge Repair's sake.
+One plugin, one CMake project. Until 2026-08-02 this project also built **Edge
+Repair**; the two now live apart, in [../EdgeRepair](../EdgeRepair). They shared
+a build system but never shared code — Modern Edge Blur's sources include
+nothing but their own header and the STL, which is what made the split
+mechanical.
 
 ## Modern Edge Blur
 
@@ -61,4 +65,6 @@ AE must be closed during install (file lock).
 
 `MAJOR/MINOR/BUG/STAGE/BUILD_VERSION` must match between `src/ModernEdgeBlur.h` and `resources/ModernEdgeBlurPiPL.r`. Mismatch → AE error 8800b at load. `PF_Stage_DEVELOP = 0` (not 1).
 
-See [Architecture.md](Architecture.md) for full technical details.
+See [docs/Architecture.md](docs/Architecture.md) for full technical details, and
+[docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) for the working log — note that its
+"next session" list dates from 2026-07-06 and predates later work.

@@ -60,18 +60,28 @@ Notes captured at migration time:
 
 ## Repo layout
 
+As of 2026-08-02, after the suite build layer and the ModernEdgeBlur/EdgeRepair
+split:
+
 ```
 MM VFX TOOLS/
 ├── README.md            suite overview + status
-├── docs/MIGRATION.md    this document
+├── CMakeLists.txt       suite build: every project via add_subdirectory
+├── build.ps1            suite build/publish/version entry point
+├── cmake/MMSuite.cmake  shared helpers (version cross-check, AE deploy dir)
+├── docs/                suite-wide docs (this file + the two GPU references)
+├── tools/               suite-wide tooling (pipl_dump/sweep, gpu_status)
 ├── GrainTransfer/       self-contained project (was GrainMatch/)
 ├── MM_Qualify/          self-contained project
 ├── MM_FreqSep/          self-contained project
-└── ModernEdgeBlur/      (arrives with the deferred migration)
+├── ModernEdgeBlur/      self-contained project
+└── EdgeRepair/          self-contained project (split out of ModernEdgeBlur/)
 ```
 
-Each project folder is byte-identical to its old repo's tree, including its
-own `.gitignore` (still valid — gitignore patterns are directory-scoped).
+At migration time each project folder was byte-identical to its old repo's
+tree, including its own `.gitignore` (still valid — gitignore patterns are
+directory-scoped). Every project still configures standalone; the suite
+`cmake/MMSuite.cmake` is included `OPTIONAL` precisely to keep that true.
 
 ## Procedure used (repeatable — this is also the deferred-migration recipe)
 
@@ -191,12 +201,20 @@ Notes specific to this repo:
 - `dist/` (including `EdgeRepair.aex`) **is tracked** there — it migrated with
   history; no hand-copy needed.
 - Two plugins, one CMake project — migrated as a single `ModernEdgeBlur/`
-  folder, as planned. The eventual split is now a *post*-migration option, not
-  a migration concern: `src/common/` turns out to be included **only** by
-  `EdgeRepair.cpp` (`ModernEdgeBlur.cpp` pulls in nothing but its own header
-  and the STL), so the two plugins share the CMake helper and the SDK glue —
-  not code. Splitting is therefore mechanical; its real cost is duplicating
-  `add_meb_plugin()`. Do it as its own change, after the rename.
+  folder, as planned, then **split on 2026-08-02** into `ModernEdgeBlur/` and
+  `EdgeRepair/`. The split was mechanical because the two shared no code:
+  `src/common/` was included **only** by `EdgeRepair.cpp`, and
+  `ModernEdgeBlur.cpp` pulls in nothing but its own header and the STL. The
+  anticipated cost — duplicating `add_meb_plugin()` — did not materialise:
+  that function existed only to serve two targets from one file, and with one
+  target each both CMakeLists inline it instead.
+- **How the split was proved safe.** PiPL resources were dumped from both
+  deployed `.aex` files *before* any change (`tools/pipl_dump.py`) and compared
+  after: match name, version, outflags, entry point and category all identical
+  for both plugins. That is the property that matters — AE identifies effects
+  in existing projects by **match name**, so `MM Modern Edge Blur` and
+  `MM Edge Repair` surviving byte-identical is what guarantees no user project
+  breaks. Same check caught nothing, which is the point of running it.
 - A `pre-dilation` tag came across with the history and now points into the
   rewritten commits.
 
@@ -248,4 +266,4 @@ Notes specific to this repo:
 - Progress logs and design docs live inside each project's `docs/` (and
   README/Architecture/NEXT_STEPS files) and migrated with the history —
   e.g. the canonical FreqSep plan is `MM_FreqSep/docs/`, EdgeRepair's staged
-  build log is `ModernEdgeBlur/docs/EdgeRepair.md` (after deferred migration).
+  build log is `EdgeRepair/docs/EdgeRepair.md`.

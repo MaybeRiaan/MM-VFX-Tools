@@ -1,8 +1,12 @@
 ﻿# Edge Repair - Automated Build Script
-# Auto-increments EdgeRepair's build version (never ModernEdgeBlur's),
-# compiles ONLY the EdgeRepair target, and deploys to the AE plugins folder
-# via the target's POST_BUILD step. No git auto-commit - stage commits
-# capture version state.
+# Auto-increments EdgeRepair's build version, compiles, and deploys to the AE
+# plugins folder via the target's POST_BUILD step (kernel assets ride along).
+# No git auto-commit - stage commits capture version state.
+#
+# Was ../ModernEdgeBlur/build_edgerepair.ps1 until the 2026-08-02 split, when
+# the two plugins became separate projects. Its paths were already
+# $PSScriptRoot-relative, so the move needed no changes: "only the EdgeRepair
+# target" is now simply the only target there is.
 
 param(
     [switch]$Clean,

@@ -9,13 +9,13 @@ no bloated feature sets. Windows / MSVC / CMake.
 | HSL Key (MM Qualify) | `MM_Qualify/` | Built + tested (105 headless tests); in-AE validation pending; DX12 GPU host parked (see note below) |
 | MM FreqSep | `MM_FreqSep/` | Phases 1–5 done, kernels bit-exact (48/48 AE-free); DX12 GPU host parked pending CUDA re-examination (see note below) |
 | Modern Edge Blur | `ModernEdgeBlur/` | Shipped/working; rename planned |
-| Edge Repair | `ModernEdgeBlur/` | All six stages done incl. CUDA GPU render; rename planned |
+| Edge Repair | `EdgeRepair/` | All six stages done incl. CUDA GPU render; **the suite's GPU reference**; rename planned |
 
-All five plugins now live here. Modern Edge Blur and Edge Repair share one
-folder and one CMake project (two independent `.aex` targets); splitting them
-is an open option, not a commitment — see
-[docs/MIGRATION.md](docs/MIGRATION.md) for that reasoning and the full history
-of how this repo was assembled.
+All five plugins live here, one folder each. Modern Edge Blur and Edge Repair
+shared a folder until 2026-08-02 — they were separated once it was established
+they shared a build system but no code. See
+[docs/MIGRATION.md](docs/MIGRATION.md) for the full history of how this repo
+was assembled.
 
 ## Building
 
@@ -79,6 +79,9 @@ belongs here, not in that plugin's folder.
 | [docs/AE_GPU_Effects.md](docs/AE_GPU_Effects.md) | **Host contract** — how to make AE dispatch to your GPU code, which framework it actually offers, and how to tell whether it really ran. Read before any GPU work. |
 | [docs/gpu-kernel-rules.md](docs/gpu-kernel-rules.md) | **Kernel contract** — how to write shader bodies so one math source serves DX12 / CUDA / Metal / host C++, and how to prove it against the CPU reference. |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | How this repo was assembled from four independent repos, and the recipe if it ever needs repeating. |
+
+`tools/` holds suite-wide tooling: `pipl_dump.py` (read a built `.aex`'s PiPL —
+match name, version, outflags), `pipl_sweep.py`, and `gpu_status.ps1`.
 
 > **GPU direction (decided 2026-08-02): CUDA only, EdgeRepair is the reference.**
 > EdgeRepair's GPU path is the one written after the AE host mechanism was

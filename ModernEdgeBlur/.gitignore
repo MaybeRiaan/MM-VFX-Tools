@@ -34,9 +34,9 @@ cmake_install.cmake
 .DS_Store
 Thumbs.db
 
-# SDKs are never committed (license prohibits redistribution). The AE SDK now
-# comes from the shared AE_SDK_ROOT install; only the optional Premiere SDK
-# subset is still vendored here, under sdk/Premiere/.
+# No vendored SDK here: the AE SDK comes from the shared AE_SDK_ROOT install
+# (see README). Nothing needs restoring by hand for this project. The kept
+# sdk/ rule is a guard only - an SDK must never be committed.
 sdk/
 
 # Distributable builds — committed for remote testing.

@@ -64,8 +64,8 @@ you also want to ship into Premiere.
 Mercury GPU = CUDA): After Effects hands effects `what_gpu = CUDA` and never
 probes DIRECTX** — even with `SUPPORTS_DIRECTX_RENDERING` declared. That flag
 serves AE-SDK effects hosted in **Premiere Pro**, whose Windows GPU renderer is
-DX12. See `ModernEdgeBlur/src/EdgeRepair_GPU.cpp` (file header) and
-`docs/EdgeRepair.md` Stage 6 for the measurement.
+DX12. See `EdgeRepair/src/EdgeRepair_GPU.cpp` (file header) and
+`EdgeRepair/docs/EdgeRepair.md` Stage 6 for the measurement.
 
 **Consequence, and it is not hypothetical.** A GPU host that accepts only
 `PF_GPU_Framework_DIRECTX` declines the device in `GPU_DEVICE_SETUP`, and AE
@@ -75,9 +75,9 @@ plugins in this suite are in that position today:
 
 | Plugin | GPU host accepts | Exercised by AE on the test box? |
 |---|---|---|
-| EdgeRepair | CUDA **or** DIRECTX (`EdgeRepair_GPU.cpp:264`) | ✅ yes, via CUDA |
-| MM_FreqSep | DIRECTX only (`src/gpu/mm_gpu_dx.cpp:179`) | ❌ no — declines, falls back to CPU |
-| MM_Qualify | DIRECTX only (`src/gpu/mm_gpu_dx.cpp:159`) | ❌ no — declines, falls back to CPU |
+| EdgeRepair | CUDA **or** DIRECTX (`EdgeRepair/src/EdgeRepair_GPU.cpp:264`) | ✅ yes, via CUDA |
+| MM_FreqSep | DIRECTX only (`MM_FreqSep/src/gpu/mm_gpu_dx.cpp:179`) | ❌ no — declines, falls back to CPU |
+| MM_Qualify | DIRECTX only (`MM_Qualify/src/gpu/mm_gpu_dx.cpp:159`) | ❌ no — declines, falls back to CPU |
 
 Both DX12 hosts are validated bit-exact against their CPU references in their
 AE-free harnesses, so **the kernels are not in question — the backend choice
@@ -247,8 +247,8 @@ two implementations of the same formulas, and the GPU one is the one you cannot
 step through. Drift between them is silent, arrives months later as "the GPU
 looks slightly different", and is miserable to bisect.
 
-EdgeRepair's Stage 6 port (`ModernEdgeBlur/src/gpu/`,
-`ModernEdgeBlur/tests/test_gpuparity.cpp`) is the worked example; the rules
+EdgeRepair's Stage 6 port (`EdgeRepair/src/gpu/`,
+`EdgeRepair/tests/test_gpuparity.cpp`) is the worked example; the rules
 below are not specific to it. MM_FreqSep and MM_Qualify solve the same problem
 with a stricter file layout — see §4.6.
 
@@ -459,7 +459,7 @@ Building it here needed three workarounds, all reusable:
 3. **nvcc vs VS 2026** — `cudafe++` crashes against the newest STL. Point nvcc
    at a side-by-side 14.4x toolset with `-ccbin`, plus `--use-local-env`,
    `-allow-unsupported-compiler`, and a rebuilt `INCLUDE`/`VCToolsInstallDir`.
-   The exact recipe is in `ModernEdgeBlur/CMakeLists.txt`.
+   The exact recipe is in `EdgeRepair/CMakeLists.txt`.
 
 Instrument its `PreRender` / `SmartRenderGPU` with a file log before testing —
 the effect renders correctly on CPU *and* GPU, so **looking at the frame tells
@@ -519,12 +519,12 @@ the first measurement possible.
 
 ## 10. Tools in this repo
 
-- `ModernEdgeBlur/tools/pipl_dump.py <file.aex>` — parse a plugin's PiPL off
+- `tools/pipl_dump.py <file.aex>` — parse a plugin's PiPL off
   disk (PE resource walk): OutFlags, OutFlags_2, spec version, match name,
   entry point.
-- `ModernEdgeBlur/tools/pipl_sweep.py <dir> …` — sweep `.aex` files and report
+- `tools/pipl_sweep.py <dir> …` — sweep `.aex` files and report
   GPU declarers.
-- `ModernEdgeBlur/tools/gpu_status.ps1` — read the three GPU signals off a
+- `tools/gpu_status.ps1` — read the three GPU signals off a
   build (§5).
 
 Both are useful for checking *your own* build. Per §8, be careful about drawing

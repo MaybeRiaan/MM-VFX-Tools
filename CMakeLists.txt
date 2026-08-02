@@ -35,7 +35,8 @@ mm_ae_plugins_dir()
 option(MM_BUILD_GRAINTRANSFER  "Build Grain Transfer"                      ON)
 option(MM_BUILD_MM_QUALIFY     "Build MM Qualify (HSL Key)"                ON)
 option(MM_BUILD_MM_FREQSEP     "Build MM FreqSep"                          ON)
-option(MM_BUILD_MODERNEDGEBLUR "Build Modern Edge Blur + Edge Repair"      ON)
+option(MM_BUILD_MODERNEDGEBLUR "Build Modern Edge Blur"                    ON)
+option(MM_BUILD_EDGEREPAIR     "Build Edge Repair"                         ON)
 
 set(MM_ENABLED_PROJECTS "")
 
@@ -54,11 +55,14 @@ if(MM_BUILD_MM_FREQSEP)
     list(APPEND MM_ENABLED_PROJECTS MM_FreqSep)
 endif()
 
-# ModernEdgeBlur holds TWO plugin targets (ModernEdgeBlur + EdgeRepair) in one
-# project — see docs/MIGRATION.md for why they share a folder.
 if(MM_BUILD_MODERNEDGEBLUR)
     add_subdirectory(ModernEdgeBlur)
     list(APPEND MM_ENABLED_PROJECTS ModernEdgeBlur)
+endif()
+
+if(MM_BUILD_EDGEREPAIR)
+    add_subdirectory(EdgeRepair)
+    list(APPEND MM_ENABLED_PROJECTS EdgeRepair)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -72,14 +76,8 @@ endif()
 #
 #     cmake --build build --target mm_publish
 # ---------------------------------------------------------------------------
-set(MM_PUBLISH_TARGETS "")
-foreach(t ${MM_ENABLED_PROJECTS})
-    if(t STREQUAL "ModernEdgeBlur")
-        list(APPEND MM_PUBLISH_TARGETS ModernEdgeBlur EdgeRepair)
-    else()
-        list(APPEND MM_PUBLISH_TARGETS ${t})
-    endif()
-endforeach()
+# One target per project since the 2026-08-02 ModernEdgeBlur/EdgeRepair split.
+set(MM_PUBLISH_TARGETS ${MM_ENABLED_PROJECTS})
 
 set(MM_PUBLISH_COMMANDS "")
 foreach(t ${MM_PUBLISH_TARGETS})

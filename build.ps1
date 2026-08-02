@@ -38,6 +38,7 @@ $Projects = [ordered]@{
     "MM_Qualify"     = "MM_BUILD_MM_QUALIFY"
     "MM_FreqSep"     = "MM_BUILD_MM_FREQSEP"
     "ModernEdgeBlur" = "MM_BUILD_MODERNEDGEBLUR"
+    "EdgeRepair"     = "MM_BUILD_EDGEREPAIR"
 }
 
 Write-Host "=== MM VFX Tools - suite build ===" -ForegroundColor Cyan
@@ -49,7 +50,7 @@ if ($Versions) {
         @{ Name = "MM_Qualify";     Header = "MM_Qualify\src\params.h";             Pipl = "MM_Qualify\resources\MM_QualifyPiPL.r" },
         @{ Name = "MM_FreqSep";     Header = "MM_FreqSep\src\params.h";             Pipl = "MM_FreqSep\resources\MM_FreqSepPiPL.r" },
         @{ Name = "ModernEdgeBlur"; Header = "ModernEdgeBlur\src\ModernEdgeBlur.h"; Pipl = "ModernEdgeBlur\resources\ModernEdgeBlurPiPL.r" },
-        @{ Name = "EdgeRepair";     Header = "ModernEdgeBlur\src\EdgeRepair.h";     Pipl = "ModernEdgeBlur\resources\EdgeRepairPiPL.r" }
+        @{ Name = "EdgeRepair";     Header = "EdgeRepair\src\EdgeRepair.h";         Pipl = "EdgeRepair\resources\EdgeRepairPiPL.r" }
     )
 
     function Get-VersionQuad([string]$path) {
