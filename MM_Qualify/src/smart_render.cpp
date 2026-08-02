@@ -38,7 +38,7 @@
 #include "params.h"
 #include "blur.h"
 #include "garbage.h"
-#include "common/MM_Common.h"
+#include "qk_common.h"
 #include "gpu/qk_gpu_host.h"
 
 #include <cmath>
@@ -342,7 +342,7 @@ QK_UnpackRow(void *refconPV, A_long, A_long y, A_long)
 	const QK_UnpackRefcon *rc = static_cast<const QK_UnpackRefcon*>(refconPV);
 	const void *srcRow = reinterpret_cast<const char*>(rc->world->data)
 		+ (size_t)y * rc->world->rowbytes;
-	mm::UnpackRow(srcRow, rc->dst + (size_t)y * rc->W * 4, rc->W, rc->fmt);
+	qk::UnpackRow(srcRow, rc->dst + (size_t)y * rc->W * 4, rc->W, rc->fmt);
 	return PF_Err_NONE;
 }
 
@@ -424,7 +424,7 @@ QK_ComposeRow(void *refconPV, A_long, A_long oy, A_long)
 
 	void *outRow = reinterpret_cast<char*>(rc->out_world->data)
 		+ (size_t)oy * rc->out_world->rowbytes;
-	mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+	qk::PackRow(rowv.data(), outRow, W, rc->fmt);
 	return PF_Err_NONE;
 }
 
@@ -453,7 +453,7 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 		PF_PixelFormat fmt = PF_PixelFormat_INVALID;
 		ERR(wsP->PF_GetPixelFormat(out_world, &fmt));
 		if (err) goto cleanup;
-		if (mm::PixelBytes(fmt) == 0) { err = PF_Err_BAD_CALLBACK_PARAM; goto cleanup; }
+		if (qk::PixelBytes(fmt) == 0) { err = PF_Err_BAD_CALLBACK_PARAM; goto cleanup; }
 
 		QK_Params p; AEFX_CLR_STRUCT(p);
 		ERR(QK_ReadParams(in_data, &p));
@@ -505,7 +505,7 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 
 		{
 			QK_UnpackRefcon urc{ src_world, fmt, srcBuf.data(), srcW };
-			mm::ForEachRow(in_data, srcH, &urc, QK_UnpackRow);
+			qk::ForEachRow(in_data, srcH, &urc, QK_UnpackRow);
 		}
 
 		// Denoise the QUALIFICATION copy (image untouched).
@@ -527,14 +527,14 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 				garb_world->width > 0 && garb_world->height > 0) {
 				PF_PixelFormat gfmt = PF_PixelFormat_INVALID;
 				gerr = wsP->PF_GetPixelFormat(garb_world, &gfmt);
-				if (gerr == PF_Err_NONE && mm::PixelBytes(gfmt) != 0) {
+				if (gerr == PF_Err_NONE && qk::PixelBytes(gfmt) != 0) {
 					const A_long gW = garb_world->width;
 					const A_long gH = garb_world->height;
 					try {
 						garbBuf.resize((size_t)gW * gH * 4);
 						gBuf.resize(srcN1);
 						QK_UnpackRefcon grc{ garb_world, gfmt, garbBuf.data(), gW };
-						mm::ForEachRow(in_data, gH, &grc, QK_UnpackRow);
+						qk::ForEachRow(in_data, gH, &grc, QK_UnpackRow);
 
 						const double dsx = (in_data->downsample_x.den != 0)
 							? (double)in_data->downsample_x.num / (double)in_data->downsample_x.den : 1.0;
@@ -556,7 +556,7 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 						garb.active = true;
 
 						QK_GarbageRefcon grefc{ &garb, gBuf.data(), srcW, srcOX, srcOY };
-						mm::ForEachRow(in_data, srcH, &grefc, QK_GarbageRow);
+						qk::ForEachRow(in_data, srcH, &grefc, QK_GarbageRow);
 					} catch (const std::bad_alloc &) {
 						garbBuf.clear(); gBuf.clear();
 						garb.active = false;   // degrade: garbage = 1.0
@@ -570,7 +570,7 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 		{
 			QK_MatteRefcon mrc{ qual, gPlane, mBuf.data(), srcW,
 			                    gates, clipB, clipW };
-			mm::ForEachRow(in_data, srcH, &mrc, QK_MatteRow);
+			qk::ForEachRow(in_data, srcH, &mrc, QK_MatteRow);
 		}
 
 		// TEMPORAL STABILIZE: warm-started asymmetric IIR, oldest -> current.
@@ -593,26 +593,26 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 
 				PF_PixelFormat hfmt = PF_PixelFormat_INVALID;
 				if (wsP->PF_GetPixelFormat(hw, &hfmt) != PF_Err_NONE ||
-					mm::PixelBytes(hfmt) == 0) continue;
+					qk::PixelBytes(hfmt) == 0) continue;
 
 				QK_UnpackRefcon hrc{ hw, hfmt, histBuf.data(), srcW };
-				mm::ForEachRow(in_data, srcH, &hrc, QK_UnpackRow);
+				qk::ForEachRow(in_data, srcH, &hrc, QK_UnpackRow);
 				if (denoise) {
 					qk::GaussianBlurARGB(in_data, histBuf.data(), tBuf.data(),
 										 histBuf.data(), srcW, srcH, dnX, dnY);
 				}
 				QK_MatteRefcon hmrc{ histBuf.data(), gPlane, mhBuf.data(), srcW,
 				                     gates, clipB, clipW };
-				mm::ForEachRow(in_data, srcH, &hmrc, QK_MatteRow);
+				qk::ForEachRow(in_data, srcH, &hmrc, QK_MatteRow);
 
 				QK_IIRRefcon irc{ ssBuf.data(), mhBuf.data(), srcW, kA, kR,
 				                  haveState ? 0 : 1 };
-				mm::ForEachRow(in_data, srcH, &irc, QK_IIRRow);
+				qk::ForEachRow(in_data, srcH, &irc, QK_IIRRow);
 				haveState = true;
 			}
 			if (haveState) {
 				QK_IIRRefcon irc{ ssBuf.data(), mBuf.data(), srcW, kA, kR, 0 };
-				mm::ForEachRow(in_data, srcH, &irc, QK_IIRRow);
+				qk::ForEachRow(in_data, srcH, &irc, QK_IIRRow);
 				finalMatte = ssBuf.data();
 			}
 		}
@@ -636,7 +636,7 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 			rc.ratio = (float)(p.ratioF / 100.0);
 			rc.gates = gates;
 			rc.out_world = out_world; rc.fmt = fmt;
-			mm::ForEachRow(in_data, outH, &rc, QK_ComposeRow);
+			qk::ForEachRow(in_data, outH, &rc, QK_ComposeRow);
 		}
 	}
 

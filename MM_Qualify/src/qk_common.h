@@ -1,16 +1,15 @@
-/*  MM_Common.h — AE-facing helpers. MM_QUALIFY'S OWN COPY.
+/*  qk_common.h — MM Qualify's AE-facing helpers. Private to this plugin.
 
-    ── NOT shared code, despite the name and the folder ──────────────────────
-    "common" here means common across THIS plugin's translation units, not
-    across plugins. MM_FreqSep and EdgeRepair each carry a file of this name
-    too. MM_FreqSep's is currently byte-identical to this one; EdgeRepair's has
-    diverged (it grew past what these two need). Editing this file changes
-    MM_Qualify and nothing else — in particular, a fix made here does NOT
-    reach MM_FreqSep, even while the two files look the same.
+    Was src/common/MM_Common.h until 2026-08-02, in the `qk::` namespace since
+    the same change. MM_FreqSep and EdgeRepair have their own equivalents
+    (fs_common.h, ER_Common.h) which have drifted apart from this one and from
+    each other; the rename exists so that is obvious from an include line, and
+    so the compiler rejects code moved between plugins instead of silently
+    binding it to a diverged twin.
 
-    The suite deliberately has no shared plugin code yet. If that ever changes
-    it will be a designed step with a real home for the shared parts — not
-    something to infer from a matching filename.
+    "common" here means common across THIS plugin's translation units. The
+    suite deliberately has no shared plugin code yet; if that changes it will
+    be a designed step with a real home, not an inference from a filename.
 
     Contents are AE-facing (PF types) but algorithm-free: row pack/unpack
     between AE worlds and float ARGB, the iterate_generic row-fanout wrapper,
@@ -32,7 +31,7 @@
 #include "AE_EffectCB.h"
 #include "AE_EffectPixelFormat.h"   // PF_PixelFormat_* for the 8/16/32bpc dispatch
 
-namespace mm {
+namespace qk {
 
 inline A_long ClampL(A_long v, A_long lo, A_long hi)
 {
@@ -66,4 +65,4 @@ void PackRow(const float *src, void *dstRow, A_long W, PF_PixelFormat fmt);
 void ForEachRow(PF_InData *in_data, A_long rows, void *refcon,
                 PF_Err (*cb)(void *, A_long, A_long, A_long));
 
-} // namespace mm
+} // namespace qk

@@ -25,7 +25,7 @@
 namespace qk {
 
 struct QK_GarbageField {
-	const float *data     = nullptr;   // W*H*4 premult ARGB (mm::UnpackRow layout)
+	const float *data     = nullptr;   // W*H*4 premult ARGB (qk::UnpackRow layout)
 	int          W        = 0;
 	int          H        = 0;
 	int          mOriginX = 0;         // garbage world top-left, garbage-layer coords

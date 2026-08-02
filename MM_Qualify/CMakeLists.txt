@@ -52,7 +52,7 @@ set(QK_SOURCES
     ${SRC_DIR}/picker.cpp
     ${SRC_DIR}/blur.cpp
     ${SRC_DIR}/garbage.cpp
-    ${SRC_DIR}/common/MM_Common.cpp
+    ${SRC_DIR}/qk_common.cpp
 )
 
 set(QK_PIPL_R "${RESOURCES_DIR}/MM_QualifyPiPL.r")

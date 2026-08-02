@@ -1,4 +1,4 @@
-# MM Qualify - run the AE-free core + pipeline-parity tests.
+﻿# MM Qualify - run the AE-free core + pipeline-parity tests.
 # Compiles the two test TUs against the shared AE SDK headers (for A_long /
 # PF types only) with cl, then runs them. Exit code mirrors the tests
 # (0 = all pass). No AE host, no GPU device required.
@@ -35,7 +35,7 @@ cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
 if errorlevel 1 exit /b 1
 cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
    /I "$SdkRoot\Headers" /I "$SdkRoot\Headers\SP" /I "$SdkRoot\Util" /I "$Root\src" ^
-   "$PSScriptRoot\pipeline_test.cpp" "$Root\src\blur.cpp" "$Root\src\garbage.cpp" "$Root\src\common\MM_Common.cpp" ^
+   "$PSScriptRoot\pipeline_test.cpp" "$Root\src\blur.cpp" "$Root\src\garbage.cpp" "$Root\src\qk_common.cpp" ^
    /Fe:"$pipeExe"
 if errorlevel 1 exit /b 1
 "@

@@ -67,7 +67,7 @@
    guard also keeps bodies correct under Metal's dispatchThreads:. */
 #define QK_GUARD(W, H) if (GID_X >= (W) || GID_Y >= (H)) return;
 
-/* Premultiplied ARGB indexing, channel order A,R,G,B (mm::UnpackRow). */
+/* Premultiplied ARGB indexing, channel order A,R,G,B (qk::UnpackRow). */
 #define QK_IDX(x, y, W) (((y) * (W) + (x)) * 4)
 
 #endif /* QK_PROLOGUE_HLSL_H */

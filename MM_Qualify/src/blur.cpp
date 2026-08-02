@@ -6,7 +6,7 @@
 
 #define NOMINMAX
 #include "blur.h"
-#include "common/MM_Common.h"
+#include "qk_common.h"
 
 #include <cmath>
 #include <cstring>
@@ -109,17 +109,17 @@ void GaussianBlurARGB(PF_InData *in_data,
 	if (Rx > 0 && Ry > 0) {
 		BuildGaussianKernel(sigmaX, Rx, kx);
 		PassRefconARGB h{ src, tmp, W, H, kx.data(), Rx, true };
-		mm::ForEachRow(in_data, H, &h, QK_BlurPassRowARGB);
+		qk::ForEachRow(in_data, H, &h, QK_BlurPassRowARGB);
 
 		BuildGaussianKernel(sigmaY, Ry, ky);
 		PassRefconARGB v{ tmp, dst, W, H, ky.data(), Ry, false };
-		mm::ForEachRow(in_data, H, &v, QK_BlurPassRowARGB);
+		qk::ForEachRow(in_data, H, &v, QK_BlurPassRowARGB);
 	} else {
 		// Single pass via tmp so dst == src stays safe.
 		const bool horiz = (Rx > 0);
 		BuildGaussianKernel(horiz ? sigmaX : sigmaY, horiz ? Rx : Ry, kx);
 		PassRefconARGB rc{ src, tmp, W, H, kx.data(), horiz ? Rx : Ry, horiz };
-		mm::ForEachRow(in_data, H, &rc, QK_BlurPassRowARGB);
+		qk::ForEachRow(in_data, H, &rc, QK_BlurPassRowARGB);
 		std::memcpy(dst, tmp, bytes);
 	}
 }
@@ -195,16 +195,16 @@ void GaussianBlurF1(PF_InData *in_data,
 	if (Rx > 0 && Ry > 0) {
 		BuildGaussianKernel(sigmaX, Rx, kx);
 		PassRefconF1 h{ src, tmp, W, H, kx.data(), Rx, true };
-		mm::ForEachRow(in_data, H, &h, QK_BlurPassRowF1);
+		qk::ForEachRow(in_data, H, &h, QK_BlurPassRowF1);
 
 		BuildGaussianKernel(sigmaY, Ry, ky);
 		PassRefconF1 v{ tmp, dst, W, H, ky.data(), Ry, false };
-		mm::ForEachRow(in_data, H, &v, QK_BlurPassRowF1);
+		qk::ForEachRow(in_data, H, &v, QK_BlurPassRowF1);
 	} else {
 		const bool horiz = (Rx > 0);
 		BuildGaussianKernel(horiz ? sigmaX : sigmaY, horiz ? Rx : Ry, kx);
 		PassRefconF1 rc{ src, tmp, W, H, kx.data(), horiz ? Rx : Ry, horiz };
-		mm::ForEachRow(in_data, H, &rc, QK_BlurPassRowF1);
+		qk::ForEachRow(in_data, H, &rc, QK_BlurPassRowF1);
 		std::memcpy(dst, tmp, bytes);
 	}
 }

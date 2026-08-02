@@ -62,7 +62,7 @@ MM_Qualify/
               qk_cpu_prologue.h C++ spellings of the qk_core vocabulary
               blur.{h,cpp}      separable Gaussian (ARGB premult + f1 matte)
               garbage.{h,cpp}   garbage-matte layer sampling (Fit-to-Layer)
-              common/           MM_Common.* (row pack/unpack, ForEachRow)
+              qk_common.*      row pack/unpack, ForEachRow (this plugin only)
               gpu/
                 qk_gpu_host.h   platform-free tile planner + QK_GPUJob
                 mm_gpu_dx.cpp   DX12 host (root sig, PSOs, dispatch, fence)

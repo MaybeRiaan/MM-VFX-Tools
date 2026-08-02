@@ -1,7 +1,7 @@
 /*  blur.h — separable Gaussian blurs for MM Qualify.
 
     Two variants over contiguous float buffers, both threaded across AE's
-    workers via mm::ForEachRow (serial fallback when in_data is null — which
+    workers via qk::ForEachRow (serial fallback when in_data is null — which
     is how the AE-free tests drive them):
 
     GaussianBlurARGB — premultiplied ARGB (A,R,G,B per pixel). Out-of-range
