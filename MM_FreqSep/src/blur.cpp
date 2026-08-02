@@ -7,7 +7,7 @@
 
 #define NOMINMAX
 #include "blur.h"
-#include "common/MM_Common.h"
+#include "fs_common.h"
 
 #include <cmath>
 #include <cstring>
@@ -119,11 +119,11 @@ void GaussianBlurARGB(PF_InData *in_data,
 		// only reads tmp, so src is no longer needed once it runs.
 		BuildGaussianKernel(sigmaX, Rx, kx);
 		PassRefcon h{ src, tmp, W, H, kx.data(), Rx, true };
-		mm::ForEachRow(in_data, H, &h, FS_BlurPassRow);
+		fs::ForEachRow(in_data, H, &h, FS_BlurPassRow);
 
 		BuildGaussianKernel(sigmaY, Ry, ky);
 		PassRefcon v{ tmp, dst, W, H, ky.data(), Ry, false };
-		mm::ForEachRow(in_data, H, &v, FS_BlurPassRow);
+		fs::ForEachRow(in_data, H, &v, FS_BlurPassRow);
 	} else {
 		// Single pass: still route src → tmp, then copy tmp → dst, so that
 		// dst == src stays safe (an in-place convolution would read
@@ -131,7 +131,7 @@ void GaussianBlurARGB(PF_InData *in_data,
 		const bool horiz = (Rx > 0);
 		BuildGaussianKernel(horiz ? sigmaX : sigmaY, horiz ? Rx : Ry, kx);
 		PassRefcon rc{ src, tmp, W, H, kx.data(), horiz ? Rx : Ry, horiz };
-		mm::ForEachRow(in_data, H, &rc, FS_BlurPassRow);
+		fs::ForEachRow(in_data, H, &rc, FS_BlurPassRow);
 		std::memcpy(dst, tmp, bytes);
 	}
 }

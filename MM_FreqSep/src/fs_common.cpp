@@ -1,14 +1,13 @@
-/*  MM_Common.cpp — see MM_Common.h, which explains why this is MM_FreqSep's
-    OWN copy and not shared code, despite the name.
+/*  fs_common.cpp — see fs_common.h.
 
     Semantics follow the row pack/unpack pattern Modern Edge Blur established
     privately, with one deliberate difference: PackRow leaves float32
     unclamped so HDR values survive a round trip.
 */
 
-#include "MM_Common.h"
+#include "fs_common.h"
 
-namespace mm {
+namespace fs {
 
 size_t PixelBytes(PF_PixelFormat fmt)
 {
@@ -93,4 +92,4 @@ void ForEachRow(PF_InData *in_data, A_long rows, void *refcon,
     for (A_long y = 0; y < rows; ++y) cb(refcon, 0, y, rows);
 }
 
-} // namespace mm
+} // namespace fs

@@ -1,6 +1,6 @@
 /*  blur.h — separable Gaussian over interleaved ARGB float planes.
 
-    The buffers are the mm::UnpackRow layout: W*H*4 floats, per pixel
+    The buffers are the fs::UnpackRow layout: W*H*4 floats, per pixel
     [A, R, G, B], with RGB PREMULTIPLIED by A (AE's native delivery). Blurring
     the premultiplied planes and later renormalizing by the blurred alpha
     (done by the caller in smart_render.cpp) IS the alpha-weighted blur the
@@ -40,7 +40,7 @@ void BuildGaussianKernel(double sigma, A_long R, std::vector<float> &k);
 // (they differ under non-square downsample). src → dst, tmp is caller-owned
 // scratch; all are W*H*4 floats. dst MAY alias src (cascaded blurs rely on
 // it); tmp must be distinct from both. A no-op sigma pair degenerates to a
-// copy. Row passes are threaded via mm::ForEachRow.
+// copy. Row passes are threaded via fs::ForEachRow.
 void GaussianBlurARGB(PF_InData *in_data,
 					  const float *src, float *tmp, float *dst,
 					  A_long W, A_long H,

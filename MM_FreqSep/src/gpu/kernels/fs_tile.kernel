@@ -5,7 +5,7 @@
 
     1. AE GPU worlds are PF_PixelFormat_GPU_BGRA128: interleaved float, channel
        order B,G,R,A, with a row pitch that need not equal width*16 bytes.
-       All kernel/CPU math is ARGB (mm::UnpackRow order). BGRA reversed IS
+       All kernel/CPU math is ARGB (fs::UnpackRow order). BGRA reversed IS
        ARGB, so the swizzle is a pure index reversal (3 - c) both ways.
        This holds on DX12 and Metal alike — worlds are BGRA128 on both — which
        is why this lives in a shared kernel and not in the DX host.

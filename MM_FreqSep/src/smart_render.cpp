@@ -44,7 +44,7 @@
 #include "matte.h"
 #include "curve.h"
 #include "fs_core.h"
-#include "common/MM_Common.h"
+#include "fs_common.h"
 #include "gpu/mm_gpu_host.h"
 
 #include <cmath>
@@ -332,7 +332,7 @@ FS_UnpackRow(void *refconPV, A_long /*thread_indexL*/, A_long y, A_long /*iterat
 	const FS_UnpackRefcon *rc = static_cast<const FS_UnpackRefcon*>(refconPV);
 	const void *srcRow = reinterpret_cast<const char*>(rc->world->data)
 		+ (size_t)y * rc->world->rowbytes;
-	mm::UnpackRow(srcRow, rc->dst + (size_t)y * rc->srcW * 4, rc->srcW, rc->fmt);
+	fs::UnpackRow(srcRow, rc->dst + (size_t)y * rc->srcW * 4, rc->srcW, rc->fmt);
 	return PF_Err_NONE;
 }
 
@@ -341,7 +341,7 @@ FS_UnpackRow(void *refconPV, A_long /*thread_indexL*/, A_long y, A_long /*iterat
 // ---------------------------------------------------------------------------
 // Compose: one threaded pass over OUTPUT rows. Reads the inflated src/lo
 // buffers through the srcOX/srcOY origin offset, writes the output world.
-// All intermediates unclamped; mm::PackRow clamps 8/16bpc on write only.
+// All intermediates unclamped; fs::PackRow clamps 8/16bpc on write only.
 // ---------------------------------------------------------------------------
 struct FS_ComposeRefcon {
 	const float         *src;     // inflated premult ARGB float
@@ -456,7 +456,7 @@ FS_ComposeRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iter
 
 	void *outRow = reinterpret_cast<char*>(rc->out_world->data)
 		+ (size_t)oy * rc->out_world->rowbytes;
-	mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+	fs::PackRow(rowv.data(), outRow, W, rc->fmt);
 	return PF_Err_NONE;
 }
 
@@ -485,7 +485,7 @@ FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 		PF_PixelFormat fmt = PF_PixelFormat_INVALID;
 		ERR(wsP->PF_GetPixelFormat(out_world, &fmt));
 		if (err) goto cleanup;
-		if (mm::PixelBytes(fmt) == 0) { err = PF_Err_BAD_CALLBACK_PARAM; goto cleanup; }
+		if (fs::PixelBytes(fmt) == 0) { err = PF_Err_BAD_CALLBACK_PARAM; goto cleanup; }
 
 		FS_Params p; AEFX_CLR_STRUCT(p);
 		ERR(ReadParams(in_data, &p));
@@ -528,7 +528,7 @@ FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 
 		{
 			FS_UnpackRefcon urc{ src_world, fmt, srcBuf.data(), srcW };
-			mm::ForEachRow(in_data, srcH, &urc, FS_UnpackRow);
+			fs::ForEachRow(in_data, srcH, &urc, FS_UnpackRow);
 		}
 
 		// Frequency split on the FULL inflated buffer so lo is correct right
@@ -574,13 +574,13 @@ FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 				matte_world->width > 0 && matte_world->height > 0) {
 				PF_PixelFormat mfmt = PF_PixelFormat_INVALID;
 				merr = wsP->PF_GetPixelFormat(matte_world, &mfmt);
-				if (merr == PF_Err_NONE && mm::PixelBytes(mfmt) != 0) {
+				if (merr == PF_Err_NONE && fs::PixelBytes(mfmt) != 0) {
 					const A_long mW = matte_world->width;
 					const A_long mH = matte_world->height;
 					try {
 						matteBuf.resize((size_t)mW * mH * 4);
 						FS_UnpackRefcon murc{ matte_world, mfmt, matteBuf.data(), mW };
-						mm::ForEachRow(in_data, mH, &murc, FS_UnpackRow);
+						fs::ForEachRow(in_data, mH, &murc, FS_UnpackRow);
 
 						// Downsample ratio (num/den ≤ 1). Buffer coords below are
 						// downsampled; ref frames are full-res — dsx/dsy reconcile
@@ -631,7 +631,7 @@ FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 			rc.curveL  = p.curveL;
 			rc.matte   = &matte;
 			rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
-			mm::ForEachRow(in_data, outH, &rc, FS_ComposeRow);
+			fs::ForEachRow(in_data, outH, &rc, FS_ComposeRow);
 		}
 	}
 

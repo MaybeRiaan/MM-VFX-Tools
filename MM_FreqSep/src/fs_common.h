@@ -1,16 +1,16 @@
-/*  MM_Common.h — AE-facing helpers. MM_FREQSEP'S OWN COPY.
+/*  fs_common.h — MM FreqSep's AE-facing helpers. Private to this plugin.
 
-    ── NOT shared code, despite the name and the folder ──────────────────────
-    "common" here means common across THIS plugin's translation units, not
-    across plugins. MM_Qualify and EdgeRepair each carry a file of this name
-    too. MM_Qualify's is currently byte-identical to this one; EdgeRepair's has
-    diverged (it grew past what these two need). Editing this file changes
-    MM_FreqSep and nothing else — in particular, a fix made here does NOT
-    reach MM_Qualify, even while the two files look the same.
+    Was src/common/MM_Common.h until 2026-08-02, in the `fs::` namespace since
+    the same change. MM_Qualify and EdgeRepair have their own equivalents
+    (qk_common.h, ER_Common.h). MM_Qualify's was byte-identical to this file at
+    the time of the rename — which was exactly the hazard: two files that look
+    shared, are not, and would drift silently. The rename makes ownership
+    visible in an include line and makes the compiler reject code moved
+    between plugins instead of binding it to a diverged twin.
 
-    The suite deliberately has no shared plugin code yet. If that ever changes
-    it will be a designed step with a real home for the shared parts — not
-    something to infer from a matching filename.
+    "common" here means common across THIS plugin's translation units. The
+    suite deliberately has no shared plugin code yet; if that changes it will
+    be a designed step with a real home, not an inference from a filename.
 
     Contents are AE-facing (PF types) but algorithm-free: row pack/unpack
     between AE worlds and float ARGB, the iterate_generic row-fanout wrapper,
@@ -32,7 +32,7 @@
 #include "AE_EffectCB.h"
 #include "AE_EffectPixelFormat.h"   // PF_PixelFormat_* for the 8/16/32bpc dispatch
 
-namespace mm {
+namespace fs {
 
 inline A_long ClampL(A_long v, A_long lo, A_long hi)
 {
@@ -66,4 +66,4 @@ void PackRow(const float *src, void *dstRow, A_long W, PF_PixelFormat fmt);
 void ForEachRow(PF_InData *in_data, A_long rows, void *refcon,
                 PF_Err (*cb)(void *, A_long, A_long, A_long));
 
-} // namespace mm
+} // namespace fs

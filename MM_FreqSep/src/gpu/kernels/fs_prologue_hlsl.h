@@ -104,7 +104,7 @@
 #define ACC_SUB(a, v)  ((a) - (double)(v))
 #define ACC_GET(a)     ((float)(a))
 
-// Premultiplied ARGB indexing. Channel order matches mm::UnpackRow:
+// Premultiplied ARGB indexing. Channel order matches fs::UnpackRow:
 // 0=A 1=R 2=G 3=B (rules §3.4).
 #define FS_IDX(x, y, W) (((y) * (W) + (x)) * 4)
 

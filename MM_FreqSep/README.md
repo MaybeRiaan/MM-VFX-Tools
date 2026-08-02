@@ -40,7 +40,7 @@ MM_FreqSep/
               fs_core.h         AE-free band math (shared with tests)
               matte.cpp/.h      matte layer sampling: channel + Fit + bilinear
               curve.cpp/.h      Working Curve stub (identity)
-              common/           MM_Common.* (row pack/unpack, ForEachRow)
+              fs_common.*      row pack/unpack, ForEachRow (this plugin only)
   resources/  MM_FreqSepPiPL.r, Info.plist (mac)
   tests/      identity_test.cpp, run_tests.ps1
   build.ps1   Windows build + deploy

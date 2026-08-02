@@ -8,7 +8,7 @@
 
 #define NOMINMAX
 #include "guided.h"
-#include "common/MM_Common.h"
+#include "fs_common.h"
 
 #include <cstring>
 #include <new>
@@ -90,9 +90,9 @@ BoxSumARGB(PF_InData *in_data, const float *src, float *tmp, float *dst,
 		   A_long W, A_long H, A_long rx, A_long ry)
 {
 	BoxRefcon h{ src, tmp, W, H, rx, true };
-	mm::ForEachRow(in_data, H, &h, FS_BoxSumPass);
+	fs::ForEachRow(in_data, H, &h, FS_BoxSumPass);
 	BoxRefcon v{ tmp, dst, W, H, ry, false };
-	mm::ForEachRow(in_data, W, &v, FS_BoxSumPass);
+	fs::ForEachRow(in_data, W, &v, FS_BoxSumPass);
 }
 
 // ---------------------------------------------------------------------------
@@ -237,12 +237,12 @@ PF_Err GuidedFilterARGB(PF_InData *in_data,
 	rc.invCount = 1.f / (float)((2 * rx + 1) * (2 * ry + 1));
 
 	BoxSumARGB(in_data, src, tmp.data(), rc.s1, W, H, rx, ry);   // box(a), box(a*p)
-	mm::ForEachRow(in_data, H, &rc, FS_GuidedSquaresRow);        // s2 = [a, a*p^2]
+	fs::ForEachRow(in_data, H, &rc, FS_GuidedSquaresRow);        // s2 = [a, a*p^2]
 	BoxSumARGB(in_data, rc.s2, tmp.data(), rc.s2, W, H, rx, ry); // box(a*p^2)
-	mm::ForEachRow(in_data, H, &rc, FS_GuidedABRow);             // sa/sb = [a, a*A/B]
+	fs::ForEachRow(in_data, H, &rc, FS_GuidedABRow);             // sa/sb = [a, a*A/B]
 	BoxSumARGB(in_data, rc.sa, tmp.data(), rc.sa, W, H, rx, ry); // aggregate A
 	BoxSumARGB(in_data, rc.sb, tmp.data(), rc.sb, W, H, rx, ry); // aggregate B
-	mm::ForEachRow(in_data, H, &rc, FS_GuidedFinalRow);          // q → dst
+	fs::ForEachRow(in_data, H, &rc, FS_GuidedFinalRow);          // q → dst
 
 	return PF_Err_NONE;
 }

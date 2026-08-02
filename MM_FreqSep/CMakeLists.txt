@@ -53,7 +53,7 @@ set(FS_SOURCES
     ${SRC_DIR}/guided.cpp
     ${SRC_DIR}/matte.cpp
     ${SRC_DIR}/curve.cpp
-    ${SRC_DIR}/common/MM_Common.cpp
+    ${SRC_DIR}/fs_common.cpp
 )
 
 set(FS_PIPL_R "${RESOURCES_DIR}/MM_FreqSepPiPL.r")

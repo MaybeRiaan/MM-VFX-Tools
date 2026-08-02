@@ -14,7 +14,7 @@
          premultiplied planes and renormalized by the blurred alpha yields the
          opaque region's straight color at the edge (no fringe toward black),
          which is the anti-fringing invariant of the render path. This drives
-         the REAL blur (src/blur.cpp) via a minimal mm::ForEachRow shim so the
+         the REAL blur (src/blur.cpp) via a minimal fs::ForEachRow shim so the
          separable Gaussian under test is the shipped kernel.
 
     Build/run: tests/run_tests.ps1 (compiles this + blur.cpp with cl, runs it).
@@ -32,7 +32,7 @@
 #include <vector>
 
 // ---- Minimal AE shims so blur.cpp links without the SDK ------------------
-// blur.cpp calls mm::ForEachRow and mm::GaussianSupport lives in blur.cpp
+// blur.cpp calls fs::ForEachRow and fs::GaussianSupport lives in blur.cpp
 // itself. ForEachRow just needs to run the row callback over [0,rows). The
 // AE type A_long is a long; PF_InData is opaque to blur.cpp's row loop, so a
 // null in_data with a serial fallback is exactly what the shipped serial path
@@ -45,13 +45,13 @@
 	#include <Windows.h>
 #endif
 #include "AE_Effect.h"   // PF_Err, PF_InData, A_long (header-only types)
-namespace mm {
+namespace fs {
 void ForEachRow(PF_InData * /*in_data*/, A_long rows, void *refcon,
 				PF_Err (*cb)(void *, A_long, A_long, A_long))
 {
 	for (A_long y = 0; y < rows; ++y) cb(refcon, 0, y, rows);
 }
-} // namespace mm
+} // namespace fs
 
 // ---- Test harness --------------------------------------------------------
 static int g_failures = 0;

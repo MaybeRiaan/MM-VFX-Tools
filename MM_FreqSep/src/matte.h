@@ -40,7 +40,7 @@ enum {
 // the checkout's ref_width/ref_height), so a preview at any resolution places
 // the matte identically and mismatched-size layers line up by their frames.
 //
-//   data       : W*H*4 premult ARGB float (mm::UnpackRow layout: A,R,G,B).
+//   data       : W*H*4 premult ARGB float (fs::UnpackRow layout: A,R,G,B).
 //   W,H        : matte WORLD (buffer) dimensions.
 //   mOriginX/Y : matte world's top-left in matte-LAYER coords (origin_x/y).
 //   mRefW/H    : matte LAYER frame size (ref_width/ref_height, FULL-res).

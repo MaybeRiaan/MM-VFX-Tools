@@ -1,7 +1,7 @@
 /*  guided.h — self-guided (guide == input) edge-aware filter over interleaved
     ARGB float planes, O(1) per pixel via box sums (He et al. guided filter).
 
-    Same buffer contract as blur.h: mm::UnpackRow layout, W*H*4 floats, per
+    Same buffer contract as blur.h: fs::UnpackRow layout, W*H*4 floats, per
     pixel [A, R, G, B] with RGB PREMULTIPLIED by A. Every box mean inside the
     filter is weighted by alpha (mean = box(a*p) / box(a)), which is the same
     anti-fringing invariant the Gaussian path gets from blurring premultiplied
@@ -30,7 +30,7 @@
     No clamping — intermediates stay unbounded (HDR-safe); q is a convex-ish
     combination of local values plus an identity term, never a hard clamp.
 
-    Keep AE usage to what blur.h uses: PF types + mm::ForEachRow only, so
+    Keep AE usage to what blur.h uses: PF types + fs::ForEachRow only, so
     tests/identity_test.cpp drives this exact code through the same shim.
 */
 

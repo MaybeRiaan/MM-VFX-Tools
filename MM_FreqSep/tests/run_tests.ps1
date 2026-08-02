@@ -1,4 +1,4 @@
-# MM FreqSep - run the AE-free Phase 2 core tests.
+﻿# MM FreqSep - run the AE-free Phase 2 core tests.
 # Compiles tests/identity_test.cpp + src/blur.cpp against the shared AE SDK
 # headers (for A_long / PF types only) with cl, then runs the executable.
 # Exit code mirrors the test binary (0 = all pass).
@@ -38,7 +38,7 @@ cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
 if errorlevel 1 exit /b 1
 cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
    /I "$SdkRoot\Headers" /I "$SdkRoot\Headers\SP" /I "$SdkRoot\Util" /I "$Root\src" ^
-   "$PSScriptRoot\gpu_parity_test.cpp" "$Root\src\blur.cpp" "$Root\src\guided.cpp" "$Root\src\matte.cpp" "$Root\src\common\MM_Common.cpp" ^
+   "$PSScriptRoot\gpu_parity_test.cpp" "$Root\src\blur.cpp" "$Root\src\guided.cpp" "$Root\src\matte.cpp" "$Root\src\fs_common.cpp" ^
    /Fe:"$gpuExe"
 if errorlevel 1 exit /b 1
 "@
