@@ -1,7 +1,9 @@
-/*  MM_Common.cpp — see MM_Common.h. Semantics match ModernEdgeBlur's
-    private UnpackRow/PackRow/MEB_ForEachRow (the suite's proven pattern),
-    with one deliberate difference: PackRow leaves float32 unclamped so HDR
-    values survive a round trip.
+/*  MM_Common.cpp — see MM_Common.h, which explains why this is MM_FreqSep's
+    OWN copy and not shared code, despite the name.
+
+    Semantics follow the row pack/unpack pattern Modern Edge Blur established
+    privately, with one deliberate difference: PackRow leaves float32
+    unclamped so HDR values survive a round trip.
 */
 
 #include "MM_Common.h"

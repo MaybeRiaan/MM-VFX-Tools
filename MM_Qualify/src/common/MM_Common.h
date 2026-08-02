@@ -1,10 +1,16 @@
-/*  MM_Common.h — shared AE-facing helpers for the MM plugin suite.
+/*  MM_Common.h — AE-facing helpers. MM_QUALIFY'S OWN COPY.
 
-    Compiled into each plugin target that lists MM_COMMON_SOURCES in its
-    add_meb_plugin() call (same pattern as SDK_SOURCES — no separate lib
-    target). ModernEdgeBlur predates this file and keeps its own private
-    copies of these helpers; it can migrate onto this header later, but is
-    deliberately NOT being touched now.
+    ── NOT shared code, despite the name and the folder ──────────────────────
+    "common" here means common across THIS plugin's translation units, not
+    across plugins. MM_FreqSep and EdgeRepair each carry a file of this name
+    too. MM_FreqSep's is currently byte-identical to this one; EdgeRepair's has
+    diverged (it grew past what these two need). Editing this file changes
+    MM_Qualify and nothing else — in particular, a fix made here does NOT
+    reach MM_FreqSep, even while the two files look the same.
+
+    The suite deliberately has no shared plugin code yet. If that ever changes
+    it will be a designed step with a real home for the shared parts — not
+    something to infer from a matching filename.
 
     Contents are AE-facing (PF types) but algorithm-free: row pack/unpack
     between AE worlds and float ARGB, the iterate_generic row-fanout wrapper,
