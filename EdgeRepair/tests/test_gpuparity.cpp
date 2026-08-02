@@ -6,7 +6,7 @@
     WHY THIS EXISTS: src/gpu/ER_KernelMath.h is written in the common subset of
     HLSL/CUDA/Metal/C++ precisely so the headless tests can call THE EXACT
     FUNCTIONS THE GPU RUNS. Everything here compares those functions against
-    their src/common/MM_*.h twins — the CPU path being the always-correct
+    their src/core/ER_*.h twins — the CPU path being the always-correct
     reference. If a formula ever drifts on one side only, this test fails
     before AE ever sees it.
 
@@ -25,11 +25,11 @@
        "sub-pixel" claim is a measured number rather than an assertion.
 */
 
-#include "MM_Composite.h"
-#include "MM_Grain.h"
-#include "MM_CoreMatte.h"
-#include "MM_DistanceField.h"
-#include "MM_PullPush.h"
+#include "ER_Composite.h"
+#include "ER_Grain.h"
+#include "ER_CoreMatte.h"
+#include "ER_DistanceField.h"
+#include "ER_PullPush.h"
 
 #include "ER_KernelMath.h"      // the GPU's own math, compiled as host C++
 
@@ -127,7 +127,7 @@ int main()
             const float d      = r.range(-5.f, 520.f);
             const float extend = r.range(0.f, 500.f);
             const float inner  = r.range(0.f, 250.f);
-            if (mm::BlendWeight(d, extend, inner) !=
+            if (er::BlendWeight(d, extend, inner) !=
                 ER_BlendWeight(d, extend, inner)) { ok = false; break; }
         }
         // Endpoints the Stage 4 gate leans on.
@@ -145,7 +145,7 @@ int main()
         Rng r(12);
         for (int i = 0; i < 20000; ++i) {
             const float t = r.range(-1.f, 2.f);
-            if (mm::ER_Smooth01(t) != ER_Smooth01(t)) { ok = false; break; }
+            if (er::ER_Smooth01(t) != ER_Smooth01(t)) { ok = false; break; }
         }
         Check(ok, "smooth01", "");
     }
@@ -163,7 +163,7 @@ int main()
             const float w       = r.unit();
             const float det     = r.unit();
             float cpu[3];
-            mm::ComposeBandRGB(orig, ext, grain, w, det, cpu);
+            er::ComposeBandRGB(orig, ext, grain, w, det, cpu);
             const ER_RGB gpu = ER_ComposeBandRGB(
                 ER_MakeRGB(orig[0], orig[1], orig[2]),
                 ER_MakeRGB(ext[0],  ext[1],  ext[2]), grain, w, det);
@@ -184,11 +184,11 @@ int main()
             const float a  = r.unit();
             const float d  = r.range(0.f, 60.f);
             const float c  = r.range(0.f, 50.f);
-            if (mm::ChokeInAlpha(a, d, c) != ER_ChokeInAlpha(a, d, c)) { ok = false; break; }
-            if (mm::GrowAlpha(a, d, c)    != ER_GrowAlpha(a, d, c))    { ok = false; break; }
+            if (er::ChokeInAlpha(a, d, c) != ER_ChokeInAlpha(a, d, c)) { ok = false; break; }
+            if (er::GrowAlpha(a, d, c)    != ER_GrowAlpha(a, d, c))    { ok = false; break; }
             // ...and through the dispatcher the kernels actually call.
-            if (ER_ApplyChoke(a, d,  c, ER_CHOKE_MODE_IN)   != mm::ChokeInAlpha(a, d, c)) { ok = false; break; }
-            if (ER_ApplyChoke(a, d, -c, ER_CHOKE_MODE_GROW) != mm::GrowAlpha(a, d, c))    { ok = false; break; }
+            if (ER_ApplyChoke(a, d,  c, ER_CHOKE_MODE_IN)   != er::ChokeInAlpha(a, d, c)) { ok = false; break; }
+            if (ER_ApplyChoke(a, d, -c, ER_CHOKE_MODE_GROW) != er::GrowAlpha(a, d, c))    { ok = false; break; }
             if (ER_ApplyChoke(a, d,  c, ER_CHOKE_MODE_OFF)  != a) { ok = false; break; }
         }
         Check(ok, "alpha choke", "in/grow/off, bit-identical");
@@ -202,7 +202,7 @@ int main()
         bool ok = true;
         for (int y = -40; y < 400 && ok; ++y)
             for (int x = -40; x < 400; ++x)
-                if (mm::GrainAt(x, y) != ER_GrainAt(x, y)) { ok = false; break; }
+                if (er::GrainAt(x, y) != ER_GrainAt(x, y)) { ok = false; break; }
         Check(ok, "grain sample", "bit-identical over 440x440 coords");
 
         // Amplitude conversion: mean |neighbour diff| -> amplitude (*1.53).
@@ -220,7 +220,7 @@ int main()
     }
 
     // ---------------------------------------------------------------------
-    // 6. Core matte — ER_CoreTest must reproduce mm::BuildCoreMatte for the
+    // 6. Core matte — ER_CoreTest must reproduce er::BuildCoreMatte for the
     //    same inputs, on a real image, in all three erode branches. This is
     //    the decision, fed the same distances; the DISTANCE itself is checked
     //    separately in test 9.
@@ -246,14 +246,14 @@ int main()
         }
 
         std::vector<float> dShrink(N), dGrow(N);
-        mm::EuclideanDistanceTransform(nonint.data(),   dShrink.data(), W, H);
-        mm::EuclideanDistanceTransform(interior.data(), dGrow.data(),   W, H);
+        er::EuclideanDistanceTransform(nonint.data(),   dShrink.data(), W, H);
+        er::EuclideanDistanceTransform(interior.data(), dGrow.data(),   W, H);
 
         bool ok = true;
         const float erodes[] = { 0.f, 0.005f, 2.f, 7.3f, -3.f, -0.5f };
         std::vector<uint8_t> cpuCore(N);
         for (float e : erodes) {
-            mm::BuildCoreMatte(alpha.data(), cpuCore.data(), W, H, 0.5f, e);
+            er::BuildCoreMatte(alpha.data(), cpuCore.data(), W, H, 0.5f, e);
 
             int mode = ER_CORE_MODE_COPY;
             if      (e >  0.01f) mode = ER_CORE_MODE_SHRINK;
@@ -298,7 +298,7 @@ int main()
                     const float ramp = soft < gap ? soft : gap;
                     const float plateau = gap - ramp;
                     if (e <= plateau || ramp <= 0.f) ref = 1.f;
-                    else ref = 1.f - mm::ER_Smooth01((e - plateau) / ramp);
+                    else ref = 1.f - er::ER_Smooth01((e - plateau) / ramp);
                 }
             }
             if (ref != ER_DistViewValue(e, in ? 1.f : 0.f, gap, soft)) { ok = false; break; }
@@ -339,7 +339,7 @@ int main()
             const int fH = 1 + (int)(r.next() % 60u);
             const int cW = (fW + 1) / 2, cH = (fH + 1) / 2;
 
-            mm::detail_pp::PPLevel C;
+            er::detail_pp::PPLevel C;
             C.W = cW; C.H = cH;
             C.px.resize((size_t)cW * cH * 4);
             for (size_t i = 0; i < C.px.size(); ++i) C.px[i] = r.range(-2.f, 2.f);
@@ -352,7 +352,7 @@ int main()
             for (int y = 0; y < fH && okv; ++y) {
                 for (int x = 0; x < fW; ++x) {
                     float ref[4];
-                    mm::detail_pp::Bilinear4(C,
+                    er::detail_pp::Bilinear4(C,
                         ((double)x + 0.5) * suD - 0.5,
                         ((double)y + 0.5) * svD - 0.5, ref);
 
@@ -442,7 +442,7 @@ int main()
             }
 
             std::vector<float> exact(N), jfa;
-            mm::EuclideanDistanceTransform(seed.data(), exact.data(), W, H);
+            er::EuclideanDistanceTransform(seed.data(), exact.data(), W, H);
             JumpFlood(seed, jfa, W, H);
 
             for (size_t i = 0; i < N; ++i) {
@@ -497,9 +497,9 @@ int main()
                                            a > 1e-6f ? orig.g : ext.g,
                                            a > 1e-6f ? orig.b : ext.b };
                 const float extArr[3]  = { ext.r, ext.g, ext.b };
-                const float grain = mm::GrainAt(gx, gy) * amp;
+                const float grain = er::GrainAt(gx, gy) * amp;
                 float o[3];
-                mm::ComposeBandRGB(origArr, extArr, grain, w, det, o);
+                er::ComposeBandRGB(origArr, extArr, grain, w, det, o);
                 ref = ER_MakeRGB(o[0], o[1], o[2]);
             }
 
@@ -543,7 +543,7 @@ int main()
     // 12. Whole pull–push fill, GPU-SHAPED: the mip level schedule, the pull
     //     loop, the push loop and the resolve, composed exactly as
     //     ER_RenderCUDA issues them (ER_BuildLayout's ceil-halving chain, pull
-    //     1..n-1, push n-2..0, resolve level 0) — against mm::PullPushFill.
+    //     1..n-1, push n-2..0, resolve level 0) — against er::PullPushFill.
     //
     //     Test 8 checks the value helpers in isolation; this checks that the
     //     HOST wired them together right. An off-by-one in the level loop or a
@@ -580,7 +580,7 @@ int main()
                 }
 
             std::vector<float> cpuRGB(N * 3, -1.f);
-            if (!mm::PullPushFill(argb.data(), valid.data(), cpuRGB.data(), W, H))
+            if (!er::PullPushFill(argb.data(), valid.data(), cpuRGB.data(), W, H))
                 continue;   // no seeds — nothing to compare
 
             // --- the GPU's chain, on the CPU ---

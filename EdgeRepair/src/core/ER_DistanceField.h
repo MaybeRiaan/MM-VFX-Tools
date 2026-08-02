@@ -1,4 +1,4 @@
-/*  MM_DistanceField.h — exact Euclidean distance transform, AE-free.
+/*  ER_DistanceField.h — exact Euclidean distance transform, AE-free.
 
     Header-only, no PF/SDK types, so it compiles and unit-tests headlessly
     (see tests/test_distancefield.cpp). This is the single distance primitive
@@ -23,7 +23,7 @@
 
 #pragma once
 
-#include "MM_Parallel.h"
+#include "ER_Parallel.h"
 
 #include <vector>
 #include <cmath>
@@ -31,7 +31,7 @@
 #include <limits>
 #include <algorithm>
 
-namespace mm {
+namespace er {
 
 // Sentinel for "no seed in this line yet" — squared-distance space, so it
 // must be large enough that (INF + n^2) never overflows for realistic n.
@@ -110,7 +110,7 @@ inline void EuclideanDistanceTransform(const SeedT *seed, float *out, int W, int
     for (size_t i = 0, n = (size_t)W * H; i < n; ++i)
         f[i] = seed[i] ? 0.0 : DT_INF();
 
-    // Both passes fan out per line via mm::ParallelFor (serial in the headless
+    // Both passes fan out per line via er::ParallelFor (serial in the headless
     // tests, iterate_generic inside AE). Each line's DT_1D touches only its own
     // column/row of f, so the work items are disjoint and the result is byte-
     // identical to the serial code regardless of thread count. Scratch (v/z and
@@ -165,4 +165,4 @@ inline void EuclideanDistanceTransform_BruteForce(const SeedT *seed, float *out,
     }
 }
 
-} // namespace mm
+} // namespace er

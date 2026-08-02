@@ -1,16 +1,16 @@
-/*  MM_Parallel.h — AE-free parallel-for primitive for the Edge Repair
+/*  ER_Parallel.h — AE-free parallel-for primitive for the Edge Repair
     algorithm cores.
 
-    The pure algorithm headers (MM_DistanceField.h, MM_Gaussian.h,
-    MM_PullPush.h) must stay unit-testable with a plain compiler (no AE SDK),
+    The pure algorithm headers (ER_DistanceField.h, ER_Gaussian.h,
+    ER_PullPush.h) must stay unit-testable with a plain compiler (no AE SDK),
     yet must ALSO fan their O(n) hot passes across cores inside AE. This header
     squares that circle with an INJECTED executor:
 
-      - mm::ParallelFor(n, body) runs `body(threadIndex, i)` for i in [0,n).
+      - er::ParallelFor(n, body) runs `body(threadIndex, i)` for i in [0,n).
       - By default it runs SERIALLY (threadIndex always 0) — that is the exact
         path the headless tests take, so the math is deterministic and byte-
         identical to the pre-Stage-5 serial code.
-      - AE installs a backend (mm::SetParallelBackend) that routes the range
+      - AE installs a backend (er::SetParallelBackend) that routes the range
         through in_data->utils->iterate_generic, so AE's own scheduler owns the
         threads (MFR-safe: no std::thread oversubscription against AE's
         per-frame concurrency, and AE throttles the pool).
@@ -29,7 +29,7 @@
     is correct — we only ever parallelize the outer pass of each algorithm.
 
     No PF/SDK types in this header. The AE glue that adapts iterate_generic to
-    the backend signature lives in MM_Common.cpp (which already includes the
+    the backend signature lives in ER_Common.cpp (which already includes the
     SDK), keeping this header pure.
 */
 
@@ -37,7 +37,7 @@
 
 #include <functional>
 
-namespace mm {
+namespace er {
 
 // A backend runs `body(threadIndex, i)` for every i in [0, n). It is free to
 // call body concurrently from multiple threads, but must pass a stable, small
@@ -111,4 +111,4 @@ private:
     ParallelBackend prev_;
 };
 
-} // namespace mm
+} // namespace er

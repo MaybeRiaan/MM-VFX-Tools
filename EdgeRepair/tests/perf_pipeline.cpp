@@ -4,7 +4,7 @@
     scene and times the three O(n) hot passes (EDT, separable Gaussian x3
     channels, pull–push fill) that Stage 5 parallelizes, plus a full composite
     approximation, under two executors:
-      - SERIAL   : mm::ParallelFor default (threadIndex 0), the tests' path.
+      - SERIAL   : er::ParallelFor default (threadIndex 0), the tests' path.
       - THREADED : a std::thread backend installed via SetParallelBackend,
                    simulating AE's iterate_generic fan-out so we can measure
                    the speedup without launching After Effects.
@@ -17,11 +17,11 @@
         cl /EHsc /O2 /std:c++17 perf_pipeline.cpp && perf_pipeline.exe
 */
 
-#include "MM_Parallel.h"
-#include "MM_DistanceField.h"
-#include "MM_CoreMatte.h"
-#include "MM_Gaussian.h"
-#include "MM_PullPush.h"
+#include "ER_Parallel.h"
+#include "ER_DistanceField.h"
+#include "ER_CoreMatte.h"
+#include "ER_Gaussian.h"
+#include "ER_PullPush.h"
 
 #include <cstdio>
 #include <cstdint>
@@ -43,7 +43,7 @@ static double ms_since(Clock::time_point t0)
 // A std::thread backend that mimics iterate_generic: it slices [0,n) across
 // hardware threads and passes each a stable threadIndex. Static work-stealing
 // via an atomic counter keeps load balanced for the uneven pull–push levels.
-static mm::ParallelBackend MakeThreadBackend(int nThreads)
+static er::ParallelBackend MakeThreadBackend(int nThreads)
 {
     return [nThreads](int n, const std::function<void(int, int)> &body) {
         if (n <= 0) return;
@@ -107,36 +107,36 @@ int main()
     vector<uint8_t> core(N);
     for (size_t i = 0; i < N; ++i) alpha[i] = argb[i * 4 + 0];
 
-    auto run = [&](const char *label, mm::ParallelBackend backend,
+    auto run = [&](const char *label, er::ParallelBackend backend,
                    vector<float> &distOut, vector<float> &lowOut,
                    vector<float> &extOut) {
-        mm::ScopedParallelBackend guard(backend);
+        er::ScopedParallelBackend guard(backend);
 
         // BuildCoreMatte (EDT inside for erode) + CoreDistanceField (the driving EDT)
         auto t0 = Clock::now();
-        mm::BuildCoreMatte(alpha.data(), core.data(), W, H, 0.5f, 2.0f);
+        er::BuildCoreMatte(alpha.data(), core.data(), W, H, 0.5f, 2.0f);
         const double tCore = ms_since(t0);
 
         distOut.assign(N, 0.f);
         t0 = Clock::now();
-        mm::CoreDistanceField(core.data(), distOut.data(), W, H);
+        er::CoreDistanceField(core.data(), distOut.data(), W, H);
         const double tEDT = ms_since(t0);
 
         // Pull–push fill
         extOut.assign(N * 3, 0.f);
         t0 = Clock::now();
-        mm::PullPushFill(argb.data(), core.data(), extOut.data(), W, H);
+        er::PullPushFill(argb.data(), core.data(), extOut.data(), W, H);
         const double tPP = ms_since(t0);
 
         // Detail low-pass: separable Gaussian on 3 channels, radius 4
         lowOut.assign(N * 3, 0.f);
-        const auto kern = mm::BuildGaussianKernel(4.0f);
+        const auto kern = er::BuildGaussianKernel(4.0f);
         vector<float> plane(N), tmp(N);
         t0 = Clock::now();
         for (int ch = 0; ch < 3; ++ch) {
             for (size_t i = 0; i < N; ++i) plane[i] = argb[i * 4 + 1 + ch];
-            mm::GaussianBlurH(plane.data(), tmp.data(), W, H, kern);
-            mm::GaussianBlurV(tmp.data(), plane.data(), W, H, kern);
+            er::GaussianBlurH(plane.data(), tmp.data(), W, H, kern);
+            er::GaussianBlurV(tmp.data(), plane.data(), W, H, kern);
             for (size_t i = 0; i < N; ++i) lowOut[i * 3 + ch] = plane[i];
         }
         const double tG = ms_since(t0);
@@ -149,7 +149,7 @@ int main()
 
     vector<float> dS, lS, eS, dT, lT, eT;
     printf("Timings (lower is better):\n");
-    const double totS = run("SERIAL", mm::ParallelBackend{}, dS, lS, eS);
+    const double totS = run("SERIAL", er::ParallelBackend{}, dS, lS, eS);
     const int T = hw ? (int)hw : 8;
     const double totT = run("THREADED", MakeThreadBackend(T), dT, lT, eT);
     printf("\n  speedup (total) = %.2fx on %d threads\n\n", totS / totT, T);

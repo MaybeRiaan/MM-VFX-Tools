@@ -1,10 +1,14 @@
 /*  GT_Common.h — AE-facing row helpers for Grain Transfer.
 
-    Same semantics as the suite's proven MM_Common (ModernEdgeBlur repo):
-    row pack/unpack between AE worlds and float ARGB with float32 internal
-    math, and the iterate_generic row-fanout wrapper. Re-implemented here
-    (not cross-referenced) because this plugin lives in its own repo — the
-    suite's shared code is never touched from this session.
+    Row pack/unpack between AE worlds and float ARGB with float32 internal
+    math, plus the iterate_generic row-fanout wrapper. Written independently
+    rather than cross-referenced, back when this plugin lived in its own repo.
+
+    That turned out to be the pattern the whole suite settled on: as of
+    2026-08-02 every plugin owns its equivalent under its own name and
+    namespace — EdgeRepair/src/core/ER_Common.h (er::), MM_FreqSep's
+    fs_common.h (fs::), MM_Qualify's qk_common.h (qk::) — so a fix in one
+    never silently implies a fix in the others. This file was the precedent.
 
     PackRow leaves float32 unclamped so HDR values survive the round trip;
     8/16bpc are clamped and rounded at the boundary only.

@@ -114,7 +114,7 @@ Keyed/rotoscoped footage has contaminated semi-transparent edge pixels
    texture are the same frequency, so `hi = orig - low` re-added a signed edge
    step. Grain is zero-mean by construction and never sourced from orig's edge,
    so it cannot darken; it also fixed the premultiplied-input rim and dropped
-   the Gaussian pass. See MM_Composite.h / MM_Grain.h.)
+   the Gaussian pass. See ER_Composite.h / ER_Grain.h.)
 6. **Alpha Choke** (default 0 = pure RGB operator): remaps output alpha along
    the same distance field. Positive chokes the matte inward with smooth
    Euclidean falloff; negative grows it. No morphological min/max filters —
@@ -323,7 +323,7 @@ before continuing. Keep every stage compiling and loadable in AE.
 
 - **Stage 0 — Skeleton + shared foundation.** DONE, commit `053d9b5`. New
   plugin target, pure passthrough SmartFX, shared helpers
-  (`src/common/MM_Common.h/.cpp`: pack/unpack, `ForEachRow` over
+  (`src/core/ER_Common.h/.cpp`: pack/unpack, `ForEachRow` over
   `iterate_generic`). *Gate (PASSED, user-confirmed):* loads in AE,
   byte-identical passthrough at 8/16/32bpc.
 - **Stage 1 — Params + inflated plumbing.** DONE, commits `37482c2`,
@@ -339,8 +339,8 @@ before continuing. Keep every stage compiling and loadable in AE.
   sampler produced false-positive facets that looked like seams but weren't
   — see `cf6e593` for the fix and why it mattered.)
 - **Stage 2 — Core matte + distance field (CPU).** DONE, commit `5ceb927`.
-  `src/common/MM_DistanceField.h` (AE-free EDT + brute-force reference),
-  `src/common/MM_CoreMatte.h` (threshold + signed erode via distance-to-
+  `src/core/ER_DistanceField.h` (AE-free EDT + brute-force reference),
+  `src/core/ER_CoreMatte.h` (threshold + signed erode via distance-to-
   boundary, `CoreDistanceField` = the single driving field). View Mode wired
   for Core Matte and Distance Field (Result/Extended Colour still
   passthrough). *Gate:* headless unit test
@@ -356,7 +356,7 @@ before continuing. Keep every stage compiling and loadable in AE.
   would have been faceting on the smooth regions instead. Re-check blend
   continuity across that ridge at the Stage 4 gate.)
 - **Stage 3 — Pull–push fill (CPU, float32 only).** BUILT, commit `06bf37e`
-  (v1.0.0.6). `src/common/MM_PullPush.h` (AE-free, Gortler hole-filling
+  (v1.0.0.6). `src/core/ER_PullPush.h` (AE-free, Gortler hole-filling
   form): mip pull of (premult RGB, coverage=alpha) over CORE pixels only,
   bilinear push fills only coverage-0 texels from the already-fully-covered
   coarser level, unpremultiply at the end; total fill guaranteed when any
@@ -378,11 +378,11 @@ before continuing. Keep every stage compiling and loadable in AE.
   d <= Extend; visible only in the deliberately-unclamped Extended Colour
   view.
 - **Stage 4 — Composite + Detail + Alpha Choke.** BUILT (v1.0.0.7). Full
-  Result mode. Per-pixel formulas live in `src/common/MM_Composite.h` — the
+  Result mode. Per-pixel formulas live in `src/core/ER_Composite.h` — the
   documented CPU/GPU lockstep contract:
   - Blend: `w(d) = 1 - smoothstep(0, Extend, d)`; in the band,
     `out = lerp(low, ext, w) + lerp(1, detail, w) * hi` in straight space,
-    where `low` = alpha-weighted Gaussian split (`src/common/MM_Gaussian.h`,
+    where `low` = alpha-weighted Gaussian split (`src/core/ER_Gaussian.h`,
     blur(premult)/blur(alpha), radius `ER_TEXTURE_BLUR_RADIUS`) and
     `hi = origStraight - low` (forced 0 at alpha~0). Detail attenuation is
     itself weighted by `w`, so the band's outer edge is seamless at any
@@ -413,7 +413,7 @@ before continuing. Keep every stage compiling and loadable in AE.
      STRAIGHT alpha (see the corrected Parameters note above). Every
      semi-transparent pixel came out darkened by exactly its alpha. Fix:
      straight-in/straight-out everywhere; pull–push and the Detail low-pass
-     premultiply internally only (`MM_PullPush.h` contract updated + its
+     premultiply internally only (`ER_PullPush.h` contract updated + its
      test; `EdgeRepair.cpp` ResultRow no longer scales RGB by alpha).
   2. *Layer shifts on effect toggle* — SmartRender inferred the
      output→source offset from buffer-size differences, which assumed AE
@@ -426,7 +426,7 @@ before continuing. Keep every stage compiling and loadable in AE.
   choke-in truncates the soft skirt with a 1px ramp (Simple Choker-like —
   user provisionally OK with it); grow produces a full-opacity collar that
   steps against the surviving soft skirt (documented simplification in
-  `MM_Composite.h`).
+  `ER_Composite.h`).
 
   **Gate round 2 (2026-07-09, v1.0.0.8): both round-1 fixes verified by the
   user** — (a) constant-colour solid + feathered mask: perfectly smooth
@@ -484,7 +484,7 @@ before continuing. Keep every stage compiling and loadable in AE.
   the matte boundary is a SIGNED edge step, and re-adding it inside the band
   paints that step back on. This is a fundamental limit of frequency
   separation for this job, not tuning. **Detail is now SYNTHETIC GRAIN**
-  (`src/common/MM_Grain.h`): deterministic zero-mean per-pixel luma noise,
+  (`src/core/ER_Grain.h`): deterministic zero-mean per-pixel luma noise,
   amplitude auto-estimated from the trusted core (mean |luma neighbour diff|
   over core pixels * 1.53), composited as `out = lerp(orig,ext,w) +
   w*detail*grain` (`ComposeBandRGB`). Zero-mean by construction and never
@@ -514,10 +514,10 @@ before continuing. Keep every stage compiling and loadable in AE.
 - **Stage 5 — CPU performance.** DONE (v1.0.0.14), gate re-defined and PASSED
   2026-07-22. All work is BYTE-IDENTICAL to Stage 4 output — proven, not
   asserted (see tests below). What landed:
-  - **Injected parallel-for** (`src/common/MM_Parallel.h`): `mm::ParallelFor`
+  - **Injected parallel-for** (`src/core/ER_Parallel.h`): `er::ParallelFor`
     with a pluggable backend — serial (deterministic) in the headless tests,
-    `iterate_generic` inside AE (`mm::MakeIterateGenericBackend` in
-    `MM_Common.cpp`; installed for the render scope via `ScopedParallelBackend`
+    `iterate_generic` inside AE (`er::MakeIterateGenericBackend` in
+    `ER_Common.cpp`; installed for the render scope via `ScopedParallelBackend`
     in `SmartRender`). EDT columns+rows, separable Gaussian H/V, and pull–push
     (per mip level) all fan out through it. Every parallel work item writes
     DISJOINT output, so the result is independent of thread count — that is why
@@ -634,7 +634,7 @@ before continuing. Keep every stage compiling and loadable in AE.
 
   1. **Distance = Jump Flood (JFA+2), not the exact EDT.** User-accepted
      2026-07-23. Measured by `tests/test_gpuparity.cpp` against
-     `mm::EuclideanDistanceTransform` on five seed topologies (single seed,
+     `er::EuclideanDistanceTransform` on five seed topologies (single seed,
      disc, sparse noise, thin line, two corners): **worst error 0.0000 px** —
      exact on those shapes. The test asserts a 0.5 px tolerance rather than
      locking in "happens to be exact".
@@ -657,7 +657,7 @@ before continuing. Keep every stage compiling and loadable in AE.
   pull–push value helpers, world/plane addressing, and seed packing — all
   `==`, no epsilon. Plus three composition-level checks that validate the HOST
   wiring, not just the formulas: the whole pull–push chain built exactly as
-  `ER_RenderCUDA` schedules it vs `mm::PullPushFill` (worst 6e-7), the grain
+  `ER_RenderCUDA` schedules it vs `er::PullPushFill` (worst 6e-7), the grain
   reduction in its real grid shape, and the JFA schedule vs the exact EDT.
   Runs in `tests/build_tests.ps1` alongside the rest (all 7 files green).
 
@@ -1076,6 +1076,6 @@ before continuing. Keep every stage compiling and loadable in AE.
 - Headless algorithm tests live in `tests/` and run via
   `tests/build_tests.ps1` (plain `cl.exe`, no AE SDK). Add a new
   `tests/test_*.cpp` for each new AE-free algorithm header
-  (`MM_DistanceField.h`, `MM_CoreMatte.h`, and future pull–push /
+  (`ER_DistanceField.h`, `ER_CoreMatte.h`, and future pull–push /
   blend-weight modules) — the brief requires the pure algorithms be
   unit-tested headlessly.

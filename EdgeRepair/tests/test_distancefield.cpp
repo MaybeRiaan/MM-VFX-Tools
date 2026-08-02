@@ -1,4 +1,4 @@
-/*  test_distancefield.cpp — headless unit test for MM_DistanceField.h.
+/*  test_distancefield.cpp — headless unit test for ER_DistanceField.h.
 
     Compiles with a plain compiler, no AE SDK:
         cl /EHsc /O2 /I ..\src\common test_distancefield.cpp
@@ -13,7 +13,7 @@
     is the bar, not an approximate tolerance.
 */
 
-#include "MM_DistanceField.h"
+#include "ER_DistanceField.h"
 
 #include <cstdio>
 #include <cstdint>
@@ -29,8 +29,8 @@ static int g_fail = 0;
 static bool CheckField(const char *name, const vector<uint8_t> &seed, int W, int H)
 {
     vector<float> fast((size_t)W * H), brute((size_t)W * H);
-    mm::EuclideanDistanceTransform(seed.data(), fast.data(), W, H);
-    mm::EuclideanDistanceTransform_BruteForce(seed.data(), brute.data(), W, H);
+    er::EuclideanDistanceTransform(seed.data(), fast.data(), W, H);
+    er::EuclideanDistanceTransform_BruteForce(seed.data(), brute.data(), W, H);
 
     double worst = 0.0;
     int wx = -1, wy = -1;
@@ -57,7 +57,7 @@ static bool CheckField(const char *name, const vector<uint8_t> &seed, int W, int
 
 int main()
 {
-    printf("MM_DistanceField EDT test — exact O(n) vs brute-force O(n^2)\n");
+    printf("ER_DistanceField EDT test — exact O(n) vs brute-force O(n^2)\n");
 
     // 1. Single seed in the center — distances are a clean radial cone.
     {

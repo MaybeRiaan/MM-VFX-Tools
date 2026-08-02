@@ -50,7 +50,7 @@ validated on Metal modulo host plumbing. Hand-translating two copies would leave
 Metal unverified in both plumbing **and** math, and you would be debugging both
 at once on a machine you did not have while writing it.
 
-This is the same discipline `MM_FreqSep/src/common/MM_Common.h` already states
+This is the same discipline `MM_FreqSep/src/fs_common.h` already states
 for CPU code ("AE-facing but algorithm-free; pure image algorithms go in
 AE-free headers"), extended one axis: **AE-free → also platform-free.**
 
@@ -146,7 +146,7 @@ The high band is legitimately unbounded and may exceed [0,1] or go negative.
 Only the final 8/16bpc pack clamps, and that happens on the CPU side.
 
 **3.4 — Premultiplied ARGB throughout, channel order A,R,G,B.**
-Matches `mm::UnpackRow`. Index as `(y * W + x) * 4 + c`, c: 0=A 1=R 2=G 3=B.
+Matches `fs::UnpackRow`. Index as `(y * W + x) * 4 + c`, c: 0=A 1=R 2=G 3=B.
 
 **3.5 — Blurred-alpha renormalization stays in compose, not in blur.**
 The blur delivers premultiplied planes including a blurred alpha; compose

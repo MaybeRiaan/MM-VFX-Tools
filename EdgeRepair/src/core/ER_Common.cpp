@@ -1,14 +1,13 @@
-/*  MM_Common.cpp — see MM_Common.h, which explains why this is EdgeRepair's
-    OWN copy and not shared code, despite the name.
+/*  ER_Common.cpp — see ER_Common.h.
 
     Semantics follow the row pack/unpack pattern Modern Edge Blur established
     privately, with one deliberate difference: PackRow leaves float32
     unclamped so HDR values survive a round trip.
 */
 
-#include "MM_Common.h"
+#include "ER_Common.h"
 
-namespace mm {
+namespace er {
 
 size_t PixelBytes(PF_PixelFormat fmt)
 {
@@ -123,4 +122,4 @@ ParallelBackend MakeIterateGenericBackend(PF_InData *in_data)
     };
 }
 
-} // namespace mm
+} // namespace er

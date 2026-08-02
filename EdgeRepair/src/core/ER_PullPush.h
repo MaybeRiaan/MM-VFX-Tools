@@ -1,4 +1,4 @@
-/*  MM_PullPush.h — pull–push extension of trusted colour, AE-free and
+/*  ER_PullPush.h — pull–push extension of trusted colour, AE-free and
     header-only (unit-testable headlessly — see tests/test_pullpush.cpp).
 
     This is Edge Repair's ONLY fill engine (the distance field never fills
@@ -43,13 +43,13 @@
 
 #pragma once
 
-#include "MM_Parallel.h"
+#include "ER_Parallel.h"
 
 #include <vector>
 #include <cstdint>
 #include <utility>
 
-namespace mm {
+namespace er {
 
 namespace detail_pp {
 
@@ -96,7 +96,7 @@ inline void Bilinear4(const PPLevel &L, double u, double v, float out[4])
 // Pull–push fill.
 //   argb  : W*H*4 interleaved A,R,G,B in [0,1]-ish float, RGB in STRAIGHT
 //           (unmatted) form — AE's effect-world convention (matches
-//           mm::UnpackRow layout; see ModernEdgeBlur's black-halo history:
+//           er::UnpackRow layout; see ModernEdgeBlur's black-halo history:
 //           AE effects receive and must return straight alpha). The
 //           coverage premultiply happens INTERNALLY at level-0 init; the
 //           mip chain itself is premultiplied throughout.
@@ -236,4 +236,4 @@ inline bool PullPushFill(const float *argb, const uint8_t *valid,
     return true;
 }
 
-} // namespace mm
+} // namespace er

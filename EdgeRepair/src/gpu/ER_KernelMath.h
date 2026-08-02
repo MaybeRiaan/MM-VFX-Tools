@@ -20,25 +20,25 @@
         ER_GPU_OPENCL — reserved, no wrapper yet
     or none of them, in which case this is a host C++ include (tests).
 
-    CPU/GPU LOCKSTEP CONTRACT: functions here must mirror src/common/MM_*.h
+    CPU/GPU LOCKSTEP CONTRACT: functions here must mirror src/core/ER_*.h
     exactly (same formulas, same clamps, same edge cases). When a formula
-    changes in MM_Composite.h / MM_Grain.h / MM_CoreMatte.h, it changes here in
+    changes in ER_Composite.h / ER_Grain.h / ER_CoreMatte.h, it changes here in
     the same commit. The distance field is the ONE deliberate divergence:
     GPU uses Jump Flood (JFA+2, approximate) instead of the CPU's exact
     Meijster/F&H EDT — accepted 2026-07-23, which is why the Stage 6 parity gate
     is "within tolerance", not byte-identical.
 
     WHAT MIRRORS WHAT (each function names its CPU twin):
-        ER_Smooth01        <- mm::ER_Smooth01        (MM_Composite.h)
-        ER_BlendWeight     <- mm::BlendWeight        (MM_Composite.h)
-        ER_ComposeBandRGB  <- mm::ComposeBandRGB     (MM_Composite.h)
-        ER_ChokeInAlpha    <- mm::ChokeInAlpha       (MM_Composite.h)
-        ER_GrowAlpha       <- mm::GrowAlpha          (MM_Composite.h)
-        ER_GrainHash/At    <- mm::GrainHash/GrainAt  (MM_Grain.h)
-        ER_CoreTest        <- mm::BuildCoreMatte     (MM_CoreMatte.h)
+        ER_Smooth01        <- er::ER_Smooth01        (ER_Composite.h)
+        ER_BlendWeight     <- er::BlendWeight        (ER_Composite.h)
+        ER_ComposeBandRGB  <- er::ComposeBandRGB     (ER_Composite.h)
+        ER_ChokeInAlpha    <- er::ChokeInAlpha       (ER_Composite.h)
+        ER_GrowAlpha       <- er::GrowAlpha          (ER_Composite.h)
+        ER_GrainHash/At    <- er::GrainHash/GrainAt  (ER_Grain.h)
+        ER_CoreTest        <- er::BuildCoreMatte     (ER_CoreMatte.h)
         ER_DistViewValue   <- ER_DistViewRow         (EdgeRepair.cpp)
         ER_GrainAmpFromMean<- the grain-amp estimator (EdgeRepair.cpp)
-        ER_PP...           <- mm::PullPushFill       (MM_PullPush.h)
+        ER_PP...           <- er::PullPushFill       (ER_PullPush.h)
         ER_Seed... /
         ER_Jfa...          -- NO CPU twin: the JFA distance approximation
 */
@@ -128,7 +128,7 @@
    literal in ER_ResultRow (EdgeRepair.cpp). */
 #define ER_ALPHA_EPS  1.0e-6f
 
-/* Core-matte modes, mirroring the three branches of mm::BuildCoreMatte.
+/* Core-matte modes, mirroring the three branches of er::BuildCoreMatte.
    The host picks the branch (it knows the Erode value); the kernel must not
    re-derive it, so that "no erode" stays a bit-exact copy of the interior. */
 #define ER_CORE_MODE_COPY   0   /* |erode| < 0.01 : core = interior          */
@@ -229,10 +229,10 @@ ER_FN uint ER_PlaneIndex(uint x, uint y, uint W)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Blend weight and composite — mirrors MM_Composite.h exactly.              */
+/* Blend weight and composite — mirrors ER_Composite.h exactly.              */
 /* ------------------------------------------------------------------------- */
 
-/* smoothstep(0,1) on a pre-normalized t. <- mm::ER_Smooth01 */
+/* smoothstep(0,1) on a pre-normalized t. <- er::ER_Smooth01 */
 ER_FN float ER_Smooth01(float t)
 {
     if (t <= 0.0f) return 0.0f;
@@ -240,7 +240,7 @@ ER_FN float ER_Smooth01(float t)
     return t * t * (3.0f - 2.0f * t);
 }
 
-/* Distance-band weight with an inner ease. <- mm::BlendWeight(d, extend, inner)
+/* Distance-band weight with an inner ease. <- er::BlendWeight(d, extend, inner)
        outer  = 1 - smoothstep(0, extend, d)
        innerW = smoothstep(0, inner, d)
        w      = innerW * outer
@@ -258,7 +258,7 @@ ER_FN float ER_BlendWeight(float d, float extend, float inner)
 }
 
 /* base = lerp(orig, ext, w); out = base + w*detail01*grain (straight RGB).
-   <- mm::ComposeBandRGB. At w->0 this returns orig exactly for ANY detail,
+   <- er::ComposeBandRGB. At w->0 this returns orig exactly for ANY detail,
    which is what makes the band's outer boundary invisible. */
 ER_FN ER_RGB ER_ComposeBandRGB(ER_RGB orig, ER_RGB ext,
                                float grain, float w, float detail01)
@@ -271,7 +271,7 @@ ER_FN ER_RGB ER_ComposeBandRGB(ER_RGB orig, ER_RGB ext,
     return o;
 }
 
-/* newA = a * clamp01(dOut - choke). <- mm::ChokeInAlpha */
+/* newA = a * clamp01(dOut - choke). <- er::ChokeInAlpha */
 ER_FN float ER_ChokeInAlpha(float a, float dOut, float choke)
 {
     const float t = dOut - choke;
@@ -281,7 +281,7 @@ ER_FN float ER_ChokeInAlpha(float a, float dOut, float choke)
 }
 
 /* newA = (dSolid <= 0) ? a : max(a, clamp01(grow + 0.5 - dSolid)).
-   <- mm::GrowAlpha */
+   <- er::GrowAlpha */
 ER_FN float ER_GrowAlpha(float a, float dSolid, float grow)
 {
     if (dSolid <= 0.0f) return a;      /* inside the solid — never harden */
@@ -302,7 +302,7 @@ ER_FN float ER_ApplyChoke(float a, float chokeField, float choke, int mode)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Synthetic grain — mirrors MM_Grain.h exactly (bit-for-bit: integer hash    */
+/* Synthetic grain — mirrors ER_Grain.h exactly (bit-for-bit: integer hash    */
 /* then a 2^-24 scale, both exact in float on every backend).                */
 /* ------------------------------------------------------------------------- */
 
@@ -315,7 +315,7 @@ ER_FN uint ER_GrainHash(uint x, uint y)
     return h;
 }
 
-/* Zero-mean grain at integer pixel (x, y), roughly [-1, 1). <- mm::GrainAt.
+/* Zero-mean grain at integer pixel (x, y), roughly [-1, 1). <- er::GrainAt.
    Keyed to the INFLATED-SOURCE coordinate by the caller, so the pattern is
    stable frame to frame and independent of tiling. */
 ER_FN float ER_GrainAt(int x, int y)
@@ -343,7 +343,7 @@ ER_FN float ER_GrainAmpFromMean(float sum, float count)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Core matte — mirrors mm::BuildCoreMatte.                                  */
+/* Core matte — mirrors er::BuildCoreMatte.                                  */
 /* ------------------------------------------------------------------------- */
 
 /* Threshold test: alpha > thresh marks the pre-erode interior. */
@@ -404,7 +404,7 @@ ER_FN float ER_Dist2ToDist(float d2)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Pull–push — mirrors MM_PullPush.h. Buffer access lives in the wrappers;    */
+/* Pull–push — mirrors ER_PullPush.h. Buffer access lives in the wrappers;    */
 /* everything that decides a VALUE lives here.                               */
 /* ------------------------------------------------------------------------- */
 

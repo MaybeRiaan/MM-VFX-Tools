@@ -1,4 +1,4 @@
-/*  test_gaussian.cpp — headless unit test for MM_Gaussian.h.
+/*  test_gaussian.cpp — headless unit test for ER_Gaussian.h.
 
     Compiles with plain cl.exe, no AE SDK (via tests\build_tests.ps1).
     Exit code 0 = all pass, 1 = a failure.
@@ -11,7 +11,7 @@
     to keep zero-alpha garbage out of the low band.
 */
 
-#include "MM_Gaussian.h"
+#include "ER_Gaussian.h"
 
 #include <cstdio>
 #include <cmath>
@@ -29,13 +29,13 @@ static void Check(bool ok, const char *name, const char *detail)
 
 int main()
 {
-    printf("MM_Gaussian separable blur test\n");
+    printf("ER_Gaussian separable blur test\n");
 
     // 1. Kernel normalization across radii.
     {
         double worst = 0.0;
         for (float r : { 1.f, 2.f, 4.f, 8.f, 16.f }) {
-            auto k = mm::BuildGaussianKernel(r);
+            auto k = er::BuildGaussianKernel(r);
             double s = 0.0;
             for (float v : k) s += v;
             worst = std::fmax(worst, std::fabs(s - 1.0));
@@ -49,9 +49,9 @@ int main()
         const int W = 41, H = 27;
         const float C = 0.371f;
         vector<float> src((size_t)W * H, C), tmp((size_t)W * H), dst((size_t)W * H);
-        auto k = mm::BuildGaussianKernel(8.f);
-        mm::GaussianBlurH(src.data(), tmp.data(), W, H, k);
-        mm::GaussianBlurV(tmp.data(), dst.data(), W, H, k);
+        auto k = er::BuildGaussianKernel(8.f);
+        er::GaussianBlurH(src.data(), tmp.data(), W, H, k);
+        er::GaussianBlurV(tmp.data(), dst.data(), W, H, k);
         double worst = 0.0;
         for (float v : dst) worst = std::fmax(worst, std::fabs((double)v - (double)C));
         char d[64]; snprintf(d, sizeof d, "worst|diff|=%.3g", worst);
@@ -63,9 +63,9 @@ int main()
         const int W = 33, H = 33, cx = 16, cy = 16;
         vector<float> src((size_t)W * H, 0.f), tmp((size_t)W * H), dst((size_t)W * H);
         src[(size_t)cy * W + cx] = 1.f;
-        auto k = mm::BuildGaussianKernel(6.f);
-        mm::GaussianBlurH(src.data(), tmp.data(), W, H, k);
-        mm::GaussianBlurV(tmp.data(), dst.data(), W, H, k);
+        auto k = er::BuildGaussianKernel(6.f);
+        er::GaussianBlurH(src.data(), tmp.data(), W, H, k);
+        er::GaussianBlurV(tmp.data(), dst.data(), W, H, k);
 
         bool peakOK = true;
         double worstAsym = 0.0;
@@ -91,10 +91,10 @@ int main()
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x)
                 src[(size_t)y * W + x] = 0.01f * x + 0.02f * y;
-        auto k = mm::BuildGaussianKernel(8.f);
+        auto k = er::BuildGaussianKernel(8.f);
         const int half = (int)k.size() / 2;
-        mm::GaussianBlurH(src.data(), tmp.data(), W, H, k);
-        mm::GaussianBlurV(tmp.data(), dst.data(), W, H, k);
+        er::GaussianBlurH(src.data(), tmp.data(), W, H, k);
+        er::GaussianBlurV(tmp.data(), dst.data(), W, H, k);
         double worst = 0.0;
         for (int y = half; y < H - half; ++y)
             for (int x = half; x < W - half; ++x)
@@ -123,12 +123,12 @@ int main()
                 pa[i] = a;
                 pc[i] = a * C;          // premultiplied
             }
-        auto k = mm::BuildGaussianKernel(8.f);
+        auto k = er::BuildGaussianKernel(8.f);
         vector<float> tmp((size_t)W * H), ba((size_t)W * H), bc((size_t)W * H);
-        mm::GaussianBlurH(pa.data(), tmp.data(), W, H, k);
-        mm::GaussianBlurV(tmp.data(), ba.data(), W, H, k);
-        mm::GaussianBlurH(pc.data(), tmp.data(), W, H, k);
-        mm::GaussianBlurV(tmp.data(), bc.data(), W, H, k);
+        er::GaussianBlurH(pa.data(), tmp.data(), W, H, k);
+        er::GaussianBlurV(tmp.data(), ba.data(), W, H, k);
+        er::GaussianBlurH(pc.data(), tmp.data(), W, H, k);
+        er::GaussianBlurV(tmp.data(), bc.data(), W, H, k);
 
         double worst = 0.0;
         for (size_t i = 0; i < (size_t)W * H; ++i)

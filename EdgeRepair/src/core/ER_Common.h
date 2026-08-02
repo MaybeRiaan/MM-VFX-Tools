@@ -1,20 +1,17 @@
-/*  MM_Common.h — AE-facing helpers. EDGE REPAIR'S OWN COPY.
+/*  ER_Common.h — Edge Repair's AE-facing helpers. Private to this plugin.
 
-    ── NOT shared code, despite the name and the folder ──────────────────────
-    "common" here means common across THIS plugin's translation units, not
-    across plugins. MM_FreqSep and MM_Qualify each carry a file of this name
-    too. Theirs are byte-identical to each other; THIS one has diverged from
-    both (75 vs 63 lines here, 124 vs 94 in the .cpp) because Edge Repair
-    needed more of it. Editing this file changes Edge Repair and nothing else,
-    and a fix made here does NOT reach the other two.
+    Was src/common/MM_Common.h until 2026-08-02, in the `er::` namespace since
+    the same change. MM_FreqSep and MM_Qualify have their own equivalents
+    (fs_common.h, qk_common.h) which had already drifted from this one — this
+    file grew past what those two need. The rename makes ownership visible in
+    an include line and makes the compiler reject code moved between plugins
+    instead of silently binding it to a diverged twin of the same name.
 
-    The suite deliberately has no shared plugin code yet. If that ever changes
-    it will be a designed step with a real home for the shared parts — not
-    something to infer from a matching filename. Renaming these per-plugin
-    (ER_/FS_/QK_) was considered on 2026-08-02 and deferred: the names are
-    load-bearing in the CPU/GPU lockstep contract (src/gpu/ER_KernelMath.h)
-    and throughout docs/EdgeRepair.md, so the rename buys clarity this comment
-    already buys, at 99 reference changes.
+    The whole of src/core/ is Edge Repair's: AE-free algorithm headers
+    (distance field, core matte, pull-push, gaussian, grain, composite) plus
+    this AE-facing glue. Their GPU twins live in src/gpu/ER_KernelMath.h, which
+    names each mirrored function — that lockstep contract moved with the
+    rename and still resolves.
 
     Contents are AE-facing (PF types) but algorithm-free: row pack/unpack
     between AE worlds and float ARGB, the iterate_generic row-fanout wrapper,
@@ -36,9 +33,9 @@
 #include "AE_EffectCB.h"
 #include "AE_EffectPixelFormat.h"   // PF_PixelFormat_* for the 8/16/32bpc dispatch
 
-#include "MM_Parallel.h"            // ParallelBackend — glued to iterate_generic here
+#include "ER_Parallel.h"            // ParallelBackend — glued to iterate_generic here
 
-namespace mm {
+namespace er {
 
 inline A_long ClampL(A_long v, A_long lo, A_long hi)
 {
@@ -72,14 +69,14 @@ void PackRow(const float *src, void *dstRow, A_long W, PF_PixelFormat fmt);
 void ForEachRow(PF_InData *in_data, A_long rows, void *refcon,
                 PF_Err (*cb)(void *, A_long, A_long, A_long));
 
-// Build a ParallelBackend (see MM_Parallel.h) that fans mm::ParallelFor's
+// Build a ParallelBackend (see ER_Parallel.h) that fans er::ParallelFor's
 // range out across AE's workers via in_data->utils->iterate_generic, so the
 // pure algorithm headers (EDT, Gaussian, pull–push) parallelize inside AE
 // while staying serial (and deterministic) in the headless tests. Falls back
 // to a serial loop when iterate_generic is unavailable. The returned backend
 // captures in_data by value-of-pointer; it must not outlive the render call
-// (SmartRender installs it via mm::ScopedParallelBackend for the render scope
+// (SmartRender installs it via er::ScopedParallelBackend for the render scope
 // only).
 ParallelBackend MakeIterateGenericBackend(PF_InData *in_data);
 
-} // namespace mm
+} // namespace er

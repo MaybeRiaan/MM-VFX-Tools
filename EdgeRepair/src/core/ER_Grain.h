@@ -1,4 +1,4 @@
-/*  MM_Grain.h — deterministic synthetic grain for Edge Repair's Detail, AE-free
+/*  ER_Grain.h — deterministic synthetic grain for Edge Repair's Detail, AE-free
     and header-only (unit-testable headlessly).
 
     WHY grain instead of the plate's own high frequencies: the old Detail split
@@ -22,7 +22,7 @@
 
     Monochrome/luma grain: callers add the SAME sample to R, G, B (chosen 2026-
     07-22 — neutral, no chroma speckle). Amplitude is set by the caller
-    (estimated from the trusted core, see MM_CoreMatte/EdgeRepair.cpp), so this
+    (estimated from the trusted core, see ER_CoreMatte/EdgeRepair.cpp), so this
     header only provides the zero-mean unit-scale field.
 
     No PF/SDK types — pure function, headlessly testable.
@@ -32,7 +32,7 @@
 
 #include <cstdint>
 
-namespace mm {
+namespace er {
 
 // Integer hash (Wang/xxhash-style avalanche) → uint32. Pure, fast, good bit
 // mixing so adjacent pixels decorrelate (no visible lattice).
@@ -56,4 +56,4 @@ inline float GrainAt(int x, int y, uint32_t seed = 0u)
     return u * 2.0f - 1.0f;                                    // [-1,1)
 }
 
-} // namespace mm
+} // namespace er

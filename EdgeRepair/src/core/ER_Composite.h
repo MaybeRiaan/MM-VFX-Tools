@@ -1,4 +1,4 @@
-/*  MM_Composite.h — Edge Repair's Stage 4 per-pixel composite math, AE-free
+/*  ER_Composite.h — Edge Repair's Stage 4 per-pixel composite math, AE-free
     and header-only (unit-testable headlessly — see tests/test_composite.cpp).
 
     These are THE canonical formulas: a future GPU path must implement them
@@ -20,7 +20,7 @@
     where
         ext    = pull–push extended trusted colour (straight)
         detail = Detail param / 100
-        grain  = a ZERO-MEAN synthetic luma sample (MM_Grain.h) already scaled
+        grain  = a ZERO-MEAN synthetic luma sample (ER_Grain.h) already scaled
                  to the plate's local grain amplitude (estimated by the caller
                  from the trusted core), added identically to R, G, B.
     Behaviour: at the band's outer edge (w -> 0) out -> origStraight exactly,
@@ -67,7 +67,7 @@
 
 #pragma once
 
-namespace mm {
+namespace er {
 
 // smoothstep(0,1) helper on a pre-normalized t.
 inline float ER_Smooth01(float t)
@@ -146,4 +146,4 @@ inline float GrowAlpha(float a, float dSolid, float grow)
     return t > a ? t : a;
 }
 
-} // namespace mm
+} // namespace er

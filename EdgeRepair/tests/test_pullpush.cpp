@@ -1,4 +1,4 @@
-/*  test_pullpush.cpp — headless unit test for MM_PullPush.h.
+/*  test_pullpush.cpp — headless unit test for ER_PullPush.h.
 
     Compiles with plain cl.exe, no AE SDK (via tests\build_tests.ps1).
     Exit code 0 = all pass, 1 = a failure.
@@ -18,7 +18,7 @@
         1-wide strips, full validity (input passes through exactly).
 */
 
-#include "MM_PullPush.h"
+#include "ER_PullPush.h"
 
 #include <cstdio>
 #include <cstdint>
@@ -59,7 +59,7 @@ static vector<float> MakeARGB(int W, int H, FA alphaAt, FC colourAt)
 
 int main()
 {
-    printf("MM_PullPush fill test\n");
+    printf("ER_PullPush fill test\n");
 
     // 1. No valid pixel — must return false.
     {
@@ -67,7 +67,7 @@ int main()
         vector<float>   argb((size_t)W * H * 4, 0.5f);
         vector<uint8_t> valid((size_t)W * H, 0);
         vector<float>   out((size_t)W * H * 3, -1.f);
-        const bool r = mm::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
+        const bool r = er::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
         Check(!r && out[0] == -1.f, "no-valid", "returns false, output untouched");
     }
 
@@ -87,7 +87,7 @@ int main()
                     valid[(size_t)y * W + x] = 1;
 
         vector<float> out((size_t)W * H * 3);
-        const bool ok = mm::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
+        const bool ok = er::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
         double worst = 0.0;
         for (size_t i = 0; i < (size_t)W * H * 3; ++i)
             worst = std::fmax(worst, std::fabs((double)out[i] - (double)C[i % 3]));
@@ -124,8 +124,8 @@ int main()
         }
 
         vector<float> outClean((size_t)W * H * 3), outDirty((size_t)W * H * 3);
-        mm::PullPushFill(argbClean.data(), valid.data(), outClean.data(), W, H);
-        mm::PullPushFill(argbDirty.data(), valid.data(), outDirty.data(), W, H);
+        er::PullPushFill(argbClean.data(), valid.data(), outClean.data(), W, H);
+        er::PullPushFill(argbDirty.data(), valid.data(), outDirty.data(), W, H);
         const bool same = std::memcmp(outClean.data(), outDirty.data(),
                                       outClean.size() * sizeof(float)) == 0;
         Check(same, "garbage-immunity", "invalid-pixel garbage changes nothing");
@@ -148,7 +148,7 @@ int main()
                 if (x < 8 || x >= 56) valid[(size_t)y * W + x] = 1;
 
         vector<float> out((size_t)W * H * 3);
-        mm::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
+        er::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
 
         double worstHull = 0.0;
         for (int y = 0; y < H; ++y)
@@ -186,7 +186,7 @@ int main()
             for (int x = 6; x < 14; ++x) valid[(size_t)y * W + x] = 1;
 
         vector<float> out((size_t)W * H * 3);
-        mm::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
+        er::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
         double worst = 0.0;
         for (size_t i = 0; i < (size_t)W * H * 3; ++i)
             worst = std::fmax(worst, std::fabs((double)out[i] - (double)C[i % 3]));
@@ -204,7 +204,7 @@ int main()
             });
         vector<uint8_t> valid((size_t)W * H, 1);
         vector<float> out((size_t)W * H * 3);
-        mm::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
+        er::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
 
         // Straight in → straight out: every valid pixel's own colour comes
         // back through the internal premult/unpremult round trip.
@@ -234,7 +234,7 @@ int main()
             vector<uint8_t> valid((size_t)W * H, 0);
             valid[(size_t)(H / 2) * W + (W / 3)] = 1;
             vector<float> out((size_t)W * H * 3);
-            if (!mm::PullPushFill(argb.data(), valid.data(), out.data(), W, H)) {
+            if (!er::PullPushFill(argb.data(), valid.data(), out.data(), W, H)) {
                 allOK = false;
                 continue;
             }
@@ -265,7 +265,7 @@ int main()
         argb[poison * 4 + 3] = 999.f;
 
         vector<float> out((size_t)W * H * 3);
-        mm::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
+        er::PullPushFill(argb.data(), valid.data(), out.data(), W, H);
         double worst = 0.0;
         for (size_t i = 0; i < (size_t)W * H * 3; ++i)
             worst = std::fmax(worst, std::fabs((double)out[i] - (double)C[i % 3]));

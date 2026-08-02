@@ -139,7 +139,7 @@ src/core/       AE-free DSP (gate-tested headlessly, no SDK dependency)
   GT_Stamp      per-frame stamp (row-based; AE threads fan out over rows)
   GT_Random     SplitMix64 — deterministic, cross-platform
 src/common/     GT_Common — row pack/unpack + iterate_generic wrapper
-                (MM_Common semantics re-implemented; suite repo untouched)
+                (per-plugin, namespace gtc — every plugin has its own now)
 src/            GrainTransfer.{h,cpp}, strings — AE plumbing only
 resources/      PiPL (version + outflags in lockstep with the header)
 third_party/    kissfft subset + licenses (committed)

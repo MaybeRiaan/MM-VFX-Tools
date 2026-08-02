@@ -21,11 +21,11 @@
     a normal test_*.cpp so build_tests.ps1 picks it up too).
 */
 
-#include "MM_Parallel.h"
-#include "MM_DistanceField.h"
-#include "MM_CoreMatte.h"
-#include "MM_Gaussian.h"
-#include "MM_PullPush.h"
+#include "ER_Parallel.h"
+#include "ER_DistanceField.h"
+#include "ER_CoreMatte.h"
+#include "ER_Gaussian.h"
+#include "ER_PullPush.h"
 
 #include <cstdio>
 #include <cstdint>
@@ -74,7 +74,7 @@ int main()
             alpha[(size_t)y * W + x] = a;
         }
 
-    const auto kern = mm::BuildGaussianKernel(4.0f);
+    const auto kern = er::BuildGaussianKernel(4.0f);
 
     // One full pipeline pass into caller-owned outputs; returns nothing but
     // fills dist/ext/low so the caller can compare across frames.
@@ -82,14 +82,14 @@ int main()
         dist.assign(N, 0.f);
         ext.assign(N * 3, 0.f);
         low.assign(N * 3, 0.f);
-        mm::BuildCoreMatte(alpha.data(), core.data(), W, H, 0.5f, 2.0f);
-        mm::CoreDistanceField(core.data(), dist.data(), W, H);
-        mm::PullPushFill(argb.data(), core.data(), ext.data(), W, H);
+        er::BuildCoreMatte(alpha.data(), core.data(), W, H, 0.5f, 2.0f);
+        er::CoreDistanceField(core.data(), dist.data(), W, H);
+        er::PullPushFill(argb.data(), core.data(), ext.data(), W, H);
         vector<float> plane(N), tmp(N);   // (these are caller-side, not header scratch)
         for (int ch = 0; ch < 3; ++ch) {
             for (size_t i = 0; i < N; ++i) plane[i] = argb[i * 4 + 1 + ch];
-            mm::GaussianBlurH(plane.data(), tmp.data(), W, H, kern);
-            mm::GaussianBlurV(tmp.data(), plane.data(), W, H, kern);
+            er::GaussianBlurH(plane.data(), tmp.data(), W, H, kern);
+            er::GaussianBlurV(tmp.data(), plane.data(), W, H, kern);
             for (size_t i = 0; i < N; ++i) low[i * 3 + ch] = plane[i];
         }
     };
@@ -113,13 +113,13 @@ int main()
         static thread_local vector<float> plane, tmp;      // reused across frames
         if ((int)plane.size() < (int)N) plane.resize(N);
         if ((int)tmp.size()   < (int)N) tmp.resize(N);
-        mm::BuildCoreMatte(alpha.data(), core.data(), W, H, 0.5f, 2.0f);
-        mm::CoreDistanceField(core.data(), dist.data(), W, H);
-        mm::PullPushFill(argb.data(), core.data(), ext.data(), W, H);
+        er::BuildCoreMatte(alpha.data(), core.data(), W, H, 0.5f, 2.0f);
+        er::CoreDistanceField(core.data(), dist.data(), W, H);
+        er::PullPushFill(argb.data(), core.data(), ext.data(), W, H);
         for (int ch = 0; ch < 3; ++ch) {
             for (size_t i = 0; i < N; ++i) plane[i] = argb[i * 4 + 1 + ch];
-            mm::GaussianBlurH(plane.data(), tmp.data(), W, H, kern);
-            mm::GaussianBlurV(tmp.data(), plane.data(), W, H, kern);
+            er::GaussianBlurH(plane.data(), tmp.data(), W, H, kern);
+            er::GaussianBlurV(tmp.data(), plane.data(), W, H, kern);
             for (size_t i = 0; i < N; ++i) low[i * 3 + ch] = plane[i];
         }
     };

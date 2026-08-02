@@ -16,7 +16,7 @@
     on top scaled by Detail, and Alpha Choke remaps alpha along a field
     anchored at the ALPHA'S OWN edge (per the 2026-07-09 decision — extra
     EDT, Erode-independent, profile-preserving). All per-pixel formulas live
-    in src/common/MM_Composite.h — that header is the CPU/GPU lockstep
+    in src/core/ER_Composite.h — that header is the CPU/GPU lockstep
     contract.
 
     ALPHA CONVENTION (fixed at the Stage 4 gate — the "dark edge" bug): AE
@@ -50,13 +50,13 @@
 
 #define NOMINMAX
 #include "EdgeRepair.h"
-#include "common/MM_Common.h"
-#include "common/MM_DistanceField.h"
-#include "common/MM_CoreMatte.h"
-#include "common/MM_PullPush.h"
-#include "common/MM_Gaussian.h"
-#include "common/MM_Grain.h"
-#include "common/MM_Composite.h"
+#include "core/ER_Common.h"
+#include "core/ER_DistanceField.h"
+#include "core/ER_CoreMatte.h"
+#include "core/ER_PullPush.h"
+#include "core/ER_Gaussian.h"
+#include "core/ER_Grain.h"
+#include "core/ER_Composite.h"
 #include "EdgeRepair_GPU.h"      // Stage 6: device setup + GPU SmartRender
 
 #include <cmath>
@@ -328,15 +328,15 @@ ER_TileDebugRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*it
 
         float m = rc->src[((size_t)sy * rc->srcW + sx) * 4 + 0]; // center tap
         for (A_long dy = -R; dy <= R && m < 1.f; ++dy) {
-            const A_long syy = mm::ClampL(sy + dy, 0, rc->srcH - 1);
+            const A_long syy = er::ClampL(sy + dy, 0, rc->srcH - 1);
             const A_long dx  = (A_long)std::floor(std::sqrt((double)(R2 - dy * dy)));
             const float *row = rc->src + (size_t)syy * rc->srcW * 4;
 
-            const A_long sxL = mm::ClampL(sx - dx, 0, rc->srcW - 1);
+            const A_long sxL = er::ClampL(sx - dx, 0, rc->srcW - 1);
             const float  aL  = row[(size_t)sxL * 4 + 0];
             if (aL > m) m = aL;
 
-            const A_long sxR = mm::ClampL(sx + dx, 0, rc->srcW - 1);
+            const A_long sxR = er::ClampL(sx + dx, 0, rc->srcW - 1);
             const float  aR  = row[(size_t)sxR * 4 + 0];
             if (aR > m) m = aR;
         }
@@ -346,7 +346,7 @@ ER_TileDebugRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*it
     }
 
     void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
-    mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+    er::PackRow(rowv.data(), outRow, W, rc->fmt);
     return PF_Err_NONE;
 }
 
@@ -374,7 +374,7 @@ ER_PassRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iterati
     const ER_PassRefcon *rc = static_cast<const ER_PassRefcon*>(refconPV);
     const float *srcRow = rc->src + ((size_t)(oy + rc->srcOY) * rc->srcW + rc->srcOX) * 4;
     void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
-    mm::PackRow(srcRow, outRow, rc->outW, rc->fmt);
+    er::PackRow(srcRow, outRow, rc->outW, rc->fmt);
     return PF_Err_NONE;
 }
 
@@ -396,7 +396,7 @@ ER_UnpackRow(void *refconPV, A_long /*thread_indexL*/, A_long y, A_long /*iterat
 {
     const ER_UnpackRefcon *rc = static_cast<const ER_UnpackRefcon*>(refconPV);
     const void *srcRow = reinterpret_cast<const char*>(rc->world->data) + (size_t)y * rc->world->rowbytes;
-    mm::UnpackRow(srcRow, rc->dst + (size_t)y * rc->srcW * 4, rc->srcW, rc->fmt);
+    er::UnpackRow(srcRow, rc->dst + (size_t)y * rc->srcW * 4, rc->srcW, rc->fmt);
     return PF_Err_NONE;
 }
 
@@ -481,7 +481,7 @@ ER_CoreViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*ite
     }
 
     void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
-    mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+    er::PackRow(rowv.data(), outRow, W, rc->fmt);
     return PF_Err_NONE;
 }
 
@@ -521,7 +521,7 @@ ER_DistViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*ite
                 } else {
                     // Position within the ramp: 0 at plateau end, 1 at core.
                     const float t = (e - plateau) / ramp;
-                    v = 1.f - mm::ER_Smooth01(t);
+                    v = 1.f - er::ER_Smooth01(t);
                 }
             }
         }
@@ -529,7 +529,7 @@ ER_DistViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*ite
     }
 
     void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
-    mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+    er::PackRow(rowv.data(), outRow, W, rc->fmt);
     return PF_Err_NONE;
 }
 
@@ -548,7 +548,7 @@ ER_ExtViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iter
     }
 
     void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
-    mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+    er::PackRow(rowv.data(), outRow, W, rc->fmt);
     return PF_Err_NONE;
 }
 
@@ -559,7 +559,7 @@ ER_ExtViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*iter
 // the alpha-edge field, then inside the band 0 < d <= Extend replace the
 // plate's low frequencies with the extension and lay the plate's own high
 // frequencies back on top scaled by Detail. Straight-space maths from
-// MM_Composite.h; STRAIGHT alpha in and out. Null pointers switch features off:
+// ER_Composite.h; STRAIGHT alpha in and out. Null pointers switch features off:
 //   dist/ext/low == null → band inactive (Extend 0, or empty core)
 //   chokeField   == null → choke inactive (choke 0, or no seeds)
 // The w<=0, newA==a fast path copies the source premult VERBATIM — that is
@@ -605,8 +605,8 @@ ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*itera
         float newA = a;
         if (rc->chokeField) {
             newA = rc->chokeF > 0.f
-                 ? mm::ChokeInAlpha(a, rc->chokeField[i], rc->chokeF)
-                 : mm::GrowAlpha(a, rc->chokeField[i], -rc->chokeF);
+                 ? er::ChokeInAlpha(a, rc->chokeField[i], rc->chokeF)
+                 : er::GrowAlpha(a, rc->chokeField[i], -rc->chokeF);
         }
 
         // Band weight — only strictly OUTSIDE the core (d > 0); the core is
@@ -614,7 +614,7 @@ ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*itera
         float w = 0.f;
         if (rc->dist) {
             const float d = rc->dist[i];
-            if (d > 0.f) w = mm::BlendWeight(d, rc->extendF, rc->innerSoft);
+            if (d > 0.f) w = er::BlendWeight(d, rc->extendF, rc->innerSoft);
         }
 
         // STRAIGHT alpha throughout (AE's effect-world convention — see the
@@ -640,7 +640,7 @@ ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*itera
                 }
             }
         } else {
-            // In-band composite (MM_Composite.h contract), straight space:
+            // In-band composite (ER_Composite.h contract), straight space:
             // base = lerp(orig, ext, w); + w*detail*grain. Grain is a zero-mean
             // luma sample keyed to the inflated-source pixel coord (sx,sy) so it
             // is deterministic and stable across frames for a stationary render.
@@ -654,9 +654,9 @@ ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*itera
             }
             const int sx = (int)(ox + rc->srcOX);
             const int sy = (int)(oy + rc->srcOY);
-            const float grain = mm::GrainAt(sx, sy) * rc->grainAmp;
+            const float grain = er::GrainAt(sx, sy) * rc->grainAmp;
             float outS[3];
-            mm::ComposeBandRGB(orig, E, grain, w, rc->detail01, outS);
+            er::ComposeBandRGB(orig, E, grain, w, rc->detail01, outS);
             dst[0] = newA;
             dst[1] = outS[0];
             dst[2] = outS[1];
@@ -665,7 +665,7 @@ ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*itera
     }
 
     void *outRow = reinterpret_cast<char*>(rc->out_world->data) + (size_t)oy * rc->out_world->rowbytes;
-    mm::PackRow(rowv.data(), outRow, W, rc->fmt);
+    er::PackRow(rowv.data(), outRow, W, rc->fmt);
     return PF_Err_NONE;
 }
 
@@ -953,16 +953,16 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         PF_PixelFormat fmt = PF_PixelFormat_INVALID;
         ERR(wsP->PF_GetPixelFormat(out_world, &fmt));
         if (err) goto cleanup;
-        if (mm::PixelBytes(fmt) == 0) { err = PF_Err_BAD_CALLBACK_PARAM; goto cleanup; }
+        if (er::PixelBytes(fmt) == 0) { err = PF_Err_BAD_CALLBACK_PARAM; goto cleanup; }
 
         // Install AE's iterate_generic as the parallel backend for every
-        // mm::ParallelFor inside the algorithm cores (EDT, Gaussian, pull–push)
+        // er::ParallelFor inside the algorithm cores (EDT, Gaussian, pull–push)
         // for the duration of this render. Serial in the headless tests where
         // no backend is set; AE's own scheduler owns the threads here (MFR-safe
         // — no std::thread oversubscription against AE's per-frame concurrency).
         // Cleared automatically when this scope exits.
-        mm::ScopedParallelBackend parallelGuard(
-            mm::MakeIterateGenericBackend(in_data));
+        er::ScopedParallelBackend parallelGuard(
+            er::MakeIterateGenericBackend(in_data));
 
         // (prd / inflate / srcW..outH / srcOX / srcOY were computed above,
         // before the CPU/GPU fork — see the Stage 6 branch.)
@@ -980,7 +980,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         }
         {
             ER_UnpackRefcon urc{ src_world, fmt, srcBuf.data(), srcW };
-            mm::ForEachRow(in_data, srcH, &urc, ER_UnpackRow);
+            er::ForEachRow(in_data, srcH, &urc, ER_UnpackRow);
         }
 
 #if ER_TILING_DEBUG
@@ -993,7 +993,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
             rc.srcOX = srcOX; rc.srcOY = srcOY;
             rc.radius = inflate;
             rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
-            mm::ForEachRow(in_data, outH, &rc, ER_TileDebugRow);
+            er::ForEachRow(in_data, outH, &rc, ER_TileDebugRow);
         }
 #else
         // -----------------------------------------------------------------
@@ -1016,7 +1016,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
             rc.src = srcBuf.data(); rc.srcW = srcW;
             rc.srcOX = srcOX; rc.srcOY = srcOY;
             rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
-            mm::ForEachRow(in_data, outH, &rc, ER_PassRow);
+            er::ForEachRow(in_data, outH, &rc, ER_PassRow);
             goto cleanup;
         }
 
@@ -1039,9 +1039,9 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
 
         // Core matte: threshold at 0.5, signed Erode. Then the driving field.
         ER_PERF_T(tcf0);
-        mm::BuildCoreMatte(alphaPlane.data(), core.data(), (int)srcW, (int)srcH,
+        er::BuildCoreMatte(alphaPlane.data(), core.data(), (int)srcW, (int)srcH,
                            0.5f, (float)p.erodeF);
-        haveField = mm::CoreDistanceField(core.data(), dist.data(), (int)srcW, (int)srcH);
+        haveField = er::CoreDistanceField(core.data(), dist.data(), (int)srcW, (int)srcH);
         ER_PERF_T(tcf1);
 #if ER_PERF_LOG
         ER_PerfLog("[EdgeRepair] %ldx%ld view=%ld  core+field %.1f ms\n",
@@ -1054,7 +1054,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 rc.core = core.data(); rc.srcW = srcW;
                 rc.srcOX = srcOX; rc.srcOY = srcOY;
                 rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
-                mm::ForEachRow(in_data, outH, &rc, ER_CoreViewRow);
+                er::ForEachRow(in_data, outH, &rc, ER_CoreViewRow);
                 break;
             }
             case ER_VIEW_DISTANCE_FIELD: {
@@ -1089,7 +1089,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 // edge → 0 everywhere → the matte is black (no band, or nothing
                 // in it).
                 if (anyIn && anyOut && gap > 0.f) {
-                    mm::EuclideanDistanceTransform(seeds.data(), edgeDist.data(),
+                    er::EuclideanDistanceTransform(seeds.data(), edgeDist.data(),
                                                    (int)srcW, (int)srcH);
                 } else {
                     for (size_t i = 0; i < srcN; ++i) edgeDist[i] = 0.f;
@@ -1103,7 +1103,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 // row callback.
                 rc.innerSoft = (float)p.softF;
                 rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
-                mm::ForEachRow(in_data, outH, &rc, ER_DistViewRow);
+                er::ForEachRow(in_data, outH, &rc, ER_DistViewRow);
                 break;
             }
             case ER_VIEW_EXTENDED_COLOUR: {
@@ -1122,14 +1122,14 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 // Empty core → no trusted colour exists anywhere; leave the
                 // zeroed black rather than showing garbage (same guard
                 // philosophy as the Distance Field view).
-                mm::PullPushFill(srcBuf.data(), core.data(), ext.data(),
+                er::PullPushFill(srcBuf.data(), core.data(), ext.data(),
                                  (int)srcW, (int)srcH);
 
                 ER_ExtViewRefcon rc;
                 rc.ext = ext.data(); rc.srcW = srcW;
                 rc.srcOX = srcOX; rc.srcOY = srcOY;
                 rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
-                mm::ForEachRow(in_data, outH, &rc, ER_ExtViewRow);
+                er::ForEachRow(in_data, outH, &rc, ER_ExtViewRow);
                 break;
             }
             case ER_VIEW_RESULT:
@@ -1138,7 +1138,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 // Stage 4 — the real composite. Build the per-feature inputs
                 // (extension, low-pass, choke field), then one threaded
                 // per-row pass does the straight-space maths from
-                // MM_Composite.h and re-premultiplies.
+                // ER_Composite.h and re-premultiplies.
                 // ---------------------------------------------------------
                 bool doBand = haveField && p.extendF > 0.0;
 
@@ -1155,7 +1155,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                         goto cleanup;
                     }
                     ER_PERF_T(tpp0);
-                    if (!mm::PullPushFill(srcBuf.data(), core.data(),
+                    if (!er::PullPushFill(srcBuf.data(), core.data(),
                                           ext.data(), (int)srcW, (int)srcH)) {
                         doBand = false;   // no trusted colour anywhere
                     }
@@ -1166,7 +1166,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 }
                 // Synthetic-grain amplitude, estimated from the TRUSTED CORE
                 // (2026-07-22 — replaces the old frequency-separation low-pass;
-                // see MM_Composite.h / MM_Grain.h for why). We want the plate's
+                // see ER_Composite.h / ER_Grain.h for why). We want the plate's
                 // local high-frequency luma energy where it is CLEAN — inside
                 // the core, away from the contaminated edge, so no edge step
                 // pollutes the estimate. Cheap, blur-free proxy: mean absolute
@@ -1214,7 +1214,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 }
 
                 // Alpha Choke field — anchored at the ALPHA'S OWN edge (see
-                // MM_Composite.h; 2026-07-09 decision): choke-in measures to
+                // ER_Composite.h; 2026-07-09 decision): choke-in measures to
                 // the nearest zero-alpha pixel, grow to the nearest solid
                 // (a > 0.5) pixel. Only computed when the knob is touched —
                 // choke == 0 never reaches this path, which is what makes
@@ -1239,7 +1239,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                         // frame for choke-in; no solid region for grow):
                         // choke is a well-defined no-op.
                         if (any) {
-                            mm::EuclideanDistanceTransform(seeds.data(),
+                            er::EuclideanDistanceTransform(seeds.data(),
                                 chokeField.data(), (int)srcW, (int)srcH);
                             haveChoke = true;
                         }
@@ -1265,7 +1265,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 rc.srcW = srcW; rc.srcOX = srcOX; rc.srcOY = srcOY;
                 rc.out_world = out_world; rc.fmt = fmt; rc.outW = outW;
                 ER_PERF_T(tcomp0);
-                mm::ForEachRow(in_data, outH, &rc, ER_ResultRow);
+                er::ForEachRow(in_data, outH, &rc, ER_ResultRow);
                 ER_PERF_T(tcomp1);
 #if ER_PERF_LOG
                 ER_PerfLog("  composite %.1f ms\n", ER_PERF_DT(tcomp0, tcomp1));

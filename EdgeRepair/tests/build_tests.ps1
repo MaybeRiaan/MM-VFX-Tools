@@ -1,4 +1,4 @@
-# Headless unit tests for Edge Repair's AE-free algorithm cores.
+﻿# Headless unit tests for Edge Repair's AE-free algorithm cores.
 # Compiles and runs each test with plain cl.exe (no AE SDK). Exit 0 = all
 # passed. The project path contains a space, which breaks cl's argv parsing,
 # so we compile from a copy in a space-free temp dir (same class of issue the
@@ -6,7 +6,7 @@
 
 $ErrorActionPreference = "Stop"
 $TestsDir = $PSScriptRoot
-$CommonDir = Join-Path (Split-Path $TestsDir -Parent) "src\common"
+$CoreDir   = Join-Path (Split-Path $TestsDir -Parent) "src\core"
 # The GPU kernel math (src\gpu\ER_KernelMath.h) also compiles as plain host
 # C++ — that is what lets test_gpuparity.cpp call the EXACT functions the GPU
 # runs and diff them against their MM_*.h twins with no GPU in the loop.
@@ -20,7 +20,7 @@ $work = Join-Path $env:TEMP "edgerepair_tests"
 if (Test-Path $work) { Remove-Item $work -Recurse -Force }
 New-Item -ItemType Directory -Path $work | Out-Null
 
-Copy-Item (Join-Path $CommonDir "*.h") $work -Force
+Copy-Item (Join-Path $CoreDir "*.h") $work -Force
 Copy-Item (Join-Path $GpuDir "ER_KernelMath.h") $work -Force
 $tests = Get-ChildItem $TestsDir -Filter "test_*.cpp"
 

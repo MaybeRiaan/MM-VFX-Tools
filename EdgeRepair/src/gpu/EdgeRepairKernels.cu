@@ -245,7 +245,7 @@ extern "C" __global__ void ER_JfaResolve(
 }
 
 /* ==========================================================================
-   Pull–push fill  (mirrors mm::PullPushFill)
+   Pull–push fill  (mirrors er::PullPushFill)
    ========================================================================== */
 
 /* Level 0: trusted pixels contribute (straight RGB * alpha, alpha) — the

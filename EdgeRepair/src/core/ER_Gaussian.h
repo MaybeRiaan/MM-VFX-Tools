@@ -1,9 +1,9 @@
-/*  MM_Gaussian.h — separable Gaussian blur, AE-free and header-only
+/*  ER_Gaussian.h — separable Gaussian blur, AE-free and header-only
     (unit-testable headlessly — see tests/test_gaussian.cpp).
 
     Used by Edge Repair's Detail frequency split: the "low" band is a PLAIN
     Gaussian low-pass of the plate's straight RGB (the brief's
-    `gaussianBlur(origRGB, r)` — unweighted; see MM_Composite.h for why an
+    `gaussianBlur(origRGB, r)` — unweighted; see ER_Composite.h for why an
     alpha-weighted variant is wrong there). This header provides only the
     planar blur passes; callers compose whatever weighting their maths
     needs (the weighted-divide property is still covered by the unit test
@@ -20,12 +20,12 @@
 
 #pragma once
 
-#include "MM_Parallel.h"
+#include "ER_Parallel.h"
 
 #include <vector>
 #include <cmath>
 
-namespace mm {
+namespace er {
 
 // Normalized 1-D Gaussian kernel: 2*ceil(radius)+1 taps, sigma = radius/2
 // (minimum half-width 1 / sigma 0.5 so tiny radii still blur a little).
@@ -140,4 +140,4 @@ inline void GaussianBlurV(const float *src, float *dst, int W, int H,
     });
 }
 
-} // namespace mm
+} // namespace er

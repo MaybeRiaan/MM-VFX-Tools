@@ -906,7 +906,7 @@ static PF_Err ER_RenderCUDA(PF_InData *in_data, PF_OutData *out_data,
     const bool earlyOut    = resultView && prm.extendF <= 0.0 && !chokeActive;
     const bool doBand      = resultView && prm.extendF > 0.0;
 
-    // Signed erode -> the core-matte branch, exactly as mm::BuildCoreMatte
+    // Signed erode -> the core-matte branch, exactly as er::BuildCoreMatte
     // chooses it (|erode| < 0.01 is "no erode" and must stay a bit-exact copy
     // of the interior — not a shrink by ~0).
     A_long coreMode = ER_CORE_MODE_COPY;

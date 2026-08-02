@@ -1,7 +1,7 @@
-/*  MM_CoreMatte.h — core-matte construction and the driving distance field,
+/*  ER_CoreMatte.h — core-matte construction and the driving distance field,
     AE-free and header-only (unit-testable headlessly).
 
-    Two steps, both built on the exact EDT in MM_DistanceField.h:
+    Two steps, both built on the exact EDT in ER_DistanceField.h:
 
     1. BuildCoreMatte: threshold the layer alpha into a binary interior, then
        apply the SIGNED Erode. Erode > 0 shrinks the interior inward by that
@@ -24,12 +24,12 @@
 
 #pragma once
 
-#include "MM_DistanceField.h"
+#include "ER_DistanceField.h"
 
 #include <vector>
 #include <cstdint>
 
-namespace mm {
+namespace er {
 
 // Threshold + signed erode → binary core matte (1 = core, 0 = not).
 //   alpha : W*H straight-alpha plane in [0,1].
@@ -103,4 +103,4 @@ inline bool CoreDistanceField(const uint8_t *core, float *dist, int W, int H)
     return true;
 }
 
-} // namespace mm
+} // namespace er

@@ -1,4 +1,4 @@
-/*  test_grain.cpp — headless unit test for MM_Grain.h and the grain-based
+/*  test_grain.cpp — headless unit test for ER_Grain.h and the grain-based
     ComposeBandRGB (the 2026-07-22 Detail method that replaced frequency
     separation to stop the edge darkening).
 
@@ -13,8 +13,8 @@
         directional bias (this is the whole point vs. the old hi = orig-low).
       - seamless band edge: at w->0 the composite returns orig for any grain.
 */
-#include "MM_Grain.h"
-#include "MM_Composite.h"
+#include "ER_Grain.h"
+#include "ER_Composite.h"
 #include <cstdio>
 #include <cmath>
 #include <vector>
@@ -27,14 +27,14 @@ static void Check(bool ok, const char *name, const char *d){
 
 int main()
 {
-    printf("MM_Grain + grain composite test\n");
+    printf("ER_Grain + grain composite test\n");
 
     // 1. Deterministic + bounded + zero-mean over a field.
     {
         const int W=256,H=256; double sum=0,sumsq=0; double mn=9,mx=-9; bool det=true;
         for(int y=0;y<H;++y)for(int x=0;x<W;++x){
-            float g=mm::GrainAt(x,y);
-            if(g!=mm::GrainAt(x,y)) det=false;          // pure function
+            float g=er::GrainAt(x,y);
+            if(g!=er::GrainAt(x,y)) det=false;          // pure function
             if(g< -1.f || g>=1.f) det=false;             // bounded [-1,1)
             sum+=g; sumsq+=(double)g*g; if(g<mn)mn=g; if(g>mx)mx=g;
         }
@@ -48,7 +48,7 @@ int main()
     {
         const int W=256,H=256; long eq=0,tot=0;
         for(int y=0;y<H;++y)for(int x=0;x<W-1;++x){
-            if(mm::GrainAt(x,y)==mm::GrainAt(x+1,y))++eq; ++tot; }
+            if(er::GrainAt(x,y)==er::GrainAt(x+1,y))++eq; ++tot; }
         double frac=(double)eq/tot;
         char d[64]; snprintf(d,sizeof d,"equal-neighbour frac=%.5f",frac);
         Check(frac<1e-3, "grain-decorrelated", d);
@@ -59,7 +59,7 @@ int main()
         const float orig[3]={0.3f,0.5f,0.2f}, ext[3]={0.9f,0.1f,0.4f};
         bool ok=true; float o[3];
         for(float g : {-1.f,-0.3f,0.f,0.6f,0.99f}){
-            mm::ComposeBandRGB(orig,ext,g,0.f,1.f,o);
+            er::ComposeBandRGB(orig,ext,g,0.f,1.f,o);
             for(int c=0;c<3;++c) ok &= (o[c]==orig[c]);
         }
         Check(ok,"band-edge-seamless","w=0 -> orig for any grain");
@@ -73,8 +73,8 @@ int main()
         const float w=0.5f, det=1.f, amp=0.08f;
         double sum[3]={0,0,0};
         for(int y=0;y<H;++y)for(int x=0;x<W;++x){
-            float o[3]; float g=mm::GrainAt(x,y)*amp;
-            mm::ComposeBandRGB(orig,ext,g,w,det,o);
+            float o[3]; float g=er::GrainAt(x,y)*amp;
+            er::ComposeBandRGB(orig,ext,g,w,det,o);
             for(int c=0;c<3;++c)sum[c]+=o[c];
         }
         double worst=0; const double n=(double)W*H;

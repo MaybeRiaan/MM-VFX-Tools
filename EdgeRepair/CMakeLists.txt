@@ -158,7 +158,7 @@ add_library(EdgeRepair MODULE
     "${SRC_DIR}/EdgeRepair.cpp"
     "${SRC_DIR}/EdgeRepair_Strings.cpp"
     "${SRC_DIR}/EdgeRepair_GPU.cpp"
-    "${SRC_DIR}/common/MM_Common.cpp"
+    "${SRC_DIR}/core/ER_Common.cpp"
     ${ER_GPU_SOURCES}
     "${AE_SDK_ROOT}/Util/DirectXUtils.cpp"
     ${SDK_SOURCES}
