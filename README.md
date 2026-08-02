@@ -6,8 +6,8 @@ no bloated feature sets. Windows / MSVC / CMake.
 | Plugin | Folder | Status |
 |---|---|---|
 | Grain Transfer | `GrainTransfer/` | Functional in AE; grain-quality passes ongoing |
-| HSL Key (MM Qualify) | `MM_Qualify/` | Built + tested (105 headless tests); in-AE validation pass pending |
-| MM FreqSep | `MM_FreqSep/` | Phases 1–5 done incl. DX12 GPU host (48/48 AE-free); in-AE GPU pass next |
+| HSL Key (MM Qualify) | `MM_Qualify/` | Built + tested (105 headless tests); in-AE validation pending; GPU host is DX12-only (see note below) |
+| MM FreqSep | `MM_FreqSep/` | Phases 1–5 done incl. DX12 GPU host (48/48 AE-free); in-AE GPU pass **blocked** (see note below) |
 | Modern Edge Blur | `ModernEdgeBlur/` | Shipped/working; rename planned |
 | Edge Repair | `ModernEdgeBlur/` | All six stages done incl. CUDA GPU render; rename planned |
 
@@ -30,6 +30,23 @@ cd <ProjectFolder>
 
 Per-project docs, architecture notes, and progress logs are inside each
 project's `docs/` and README — they are the authoritative record.
+
+## Suite documentation (`docs/`)
+
+Cross-cutting knowledge that no single plugin owns. A rule proven by one plugin
+belongs here, not in that plugin's folder.
+
+| Doc | What it answers |
+|---|---|
+| [docs/AE_GPU_Effects.md](docs/AE_GPU_Effects.md) | **Host contract** — how to make AE dispatch to your GPU code, which framework it actually offers, and how to tell whether it really ran. Read before any GPU work. |
+| [docs/gpu-kernel-rules.md](docs/gpu-kernel-rules.md) | **Kernel contract** — how to write shader bodies so one math source serves DX12 / CUDA / Metal / host C++, and how to prove it against the CPU reference. |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | How this repo was assembled from four independent repos, and the recipe if it ever needs repeating. |
+
+> ⚠️ **Open cross-plugin issue.** MM_FreqSep's and MM_Qualify's GPU hosts accept
+> `DIRECTX` only, but AE hands effects `CUDA` on the test box — so those GPU
+> paths never engage in After Effects and render on the CPU, silently and
+> correctly. Their kernels are bit-exact and not in question; the backend choice
+> is. See [docs/AE_GPU_Effects.md](docs/AE_GPU_Effects.md) §1.1.
 
 ## Fresh-checkout note
 

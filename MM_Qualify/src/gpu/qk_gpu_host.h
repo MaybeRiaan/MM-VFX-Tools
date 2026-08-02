@@ -5,7 +5,7 @@
     description the platform hosts execute. mm_gpu_dx.cpp consumes a
     QK_GPUJob and translates it into dispatches; it contains no tiling
     arithmetic of its own. Same architecture as MM FreqSep's mm_gpu_host.h
-    (see that header + docs/gpu-kernel-rules.md for the full rationale).
+    (see that header + ../docs/gpu-kernel-rules.md for the full rationale).
 
     TILING MODEL (the usage-profile requirement: 6K+ footage, memory-bound).
     The output is cut into horizontal bands spanning the FULL source width;

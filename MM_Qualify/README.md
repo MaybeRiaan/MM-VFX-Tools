@@ -48,7 +48,7 @@ The load-bearing idea: **one shared per-pixel core** (`src/qk_core.h`) is
 compiled by *both* the CPU render and the HLSL GPU kernels. Gates, transforms,
 cleanup, IIR, garbage channel and compose are written once, so CPU/GPU parity
 is a property of the build rather than a hand-kept promise. This extends MM
-FreqSep's "platform-free kernels" rule (`docs/gpu-kernel-rules.md` §0) one
+FreqSep's "platform-free kernels" rule (`../docs/gpu-kernel-rules.md` §0) one
 step further — platform-free *and* language-shared.
 
 ```
@@ -112,7 +112,7 @@ The CMake `APPLE` branch produces a `.plugin` bundle with a Rez-compiled PiPL.
 **Not compiled/verified on the Windows dev machine.** The Metal GPU host is
 not yet written; a Mac build renders on the CPU reference path (the
 platform-free kernels + `qk_gpu_host.h` are structured so a Metal host is a
-mechanical port — see `docs/gpu-kernel-rules.md` §4).
+mechanical port — see `../docs/gpu-kernel-rules.md` §4).
 
 ## Test
 

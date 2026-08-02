@@ -84,11 +84,11 @@ Edge correctness: blur must be alpha-weighted (normalize by blurred alpha) or fr
 ### Phase 5 — GPU render + performance
 - GPU render path (`PF_OutFlag2_SUPPORTS_GPU_RENDER_F32`) immediately after CPU reference passes identity tests — DirectX (HLSL) + Metal (MSL), via AE's `PF_GPUDeviceSuite1`.
 - **Architecture: kernel math authored ONCE in a shared header, thin per-platform shims.** DX and Metal both accept a common C-like subset, so each kernel body lives in one place and cannot drift between platforms; only host plumbing (device/buffer/dispatch) is written per platform. This split is the deliverable, not just the working DX build — it becomes the template for taking the rest of the MM suite cross-platform.
-- **DirectX is the validation target; Metal is deferred, not written blind.** Revised 2026-07-18: rather than committing untestable Metal host code, Phase 5 builds DX12 for real while authoring every kernel body platform-free, against a documented ruleset (`docs/gpu-kernel-rules.md`) derived from Metal's actual requirements. Metal then becomes a mechanical port (prologue + host plumbing) rather than a re-derivation.
+- **DirectX is the validation target; Metal is deferred, not written blind.** Revised 2026-07-18: rather than committing untestable Metal host code, Phase 5 builds DX12 for real while authoring every kernel body platform-free, against a documented ruleset (`../docs/gpu-kernel-rules.md`) derived from Metal's actual requirements. Metal then becomes a mechanical port (prologue + host plumbing) rather than a re-derivation.
 - **Kernel math is validated WITHOUT a GPU.** Because `.kernel` bodies carry no platform syntax, their arithmetic is transcribed into C in `tests/gpu_parity_test.cpp` and diffed against the real `blur.cpp` / `fs_core.h` — no DX12 device, no AE host, no Mac. Algorithm error is caught here; anything left when the DX12 host lands is unambiguously plumbing. **Status: Gaussian + compose parity green (Gaussian bit-exact).**
 
 **Phase 5 progress:**
-- [x] `docs/gpu-kernel-rules.md` — the suite-wide ruleset (also the ModernEdgeBlur / EdgeRepair reference)
+- [x] `../docs/gpu-kernel-rules.md` — the suite-wide ruleset (also the ModernEdgeBlur / EdgeRepair reference)
 - [x] `src/gpu/kernels/fs_prologue_hlsl.h` — HLSL vocabulary layer
 - [x] `src/gpu/kernels/fs_gauss.kernel` — separable Gaussian, parity-tested bit-exact
 - [x] `src/gpu/kernels/fs_compose.kernel` — recombine + View modes, parity-tested to ~1ulp
@@ -116,7 +116,7 @@ Edge correctness: blur must be alpha-weighted (normalize by blurred alpha) or fr
   constants + root UAV descriptors (no descriptor heaps), **internally tiled**
   in horizontal bands with blur-support overlap (planner in the platform-free
   `mm_gpu_host.h`), one submission + fence wait per render, per-render objects
-  only (MFR-safe). Host design decisions logged in `gpu-kernel-rules.md` §6.
+  only (MFR-safe). Host design decisions logged in `../docs/gpu-kernel-rules.md` §6.
 - [x] `GPURender` wiring — `PF_OutFlag2_SUPPORTS_GPU_RENDER_F32` +
   `SUPPORTS_DIRECTX_RENDERING` in `main.cpp` AND the PiPL (0x2A001400);
   `PF_Cmd_GPU_DEVICE_SETUP/SETDOWN/SMART_RENDER_GPU` routed; PreRender sets

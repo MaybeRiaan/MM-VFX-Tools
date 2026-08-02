@@ -10,7 +10,7 @@
       - CPU render + tests:  #include "qk_cpu_prologue.h" then this file
       - GPU kernels (HLSL):  #include "qk_prologue_hlsl.h" then this file
     which is what makes GPU/CPU parity a property of the build rather than a
-    hand-kept promise (extends docs/gpu-kernel-rules.md §0 from "platform-free
+    hand-kept promise (extends ../docs/gpu-kernel-rules.md §0 from "platform-free
     kernels" to "one shared body"). Rules for code in this file:
 
       - Only the QK_* prologue vocabulary for math (QK_FLOOR, QK_POW, ...).

@@ -45,7 +45,7 @@ PF_Err ER_GPUDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
 
    An earlier revision claimed this was the reason AE registers our
    GPUVideoFilter module but never instantiates it. That was WRONG; the
-   instantiation question is still open. See docs/AE_GPU_Effects.md §2.3.
+   instantiation question is still open. See ../docs/AE_GPU_Effects.md §2.3.
    No-op when the suite is unavailable — CPU path unaffected. */
 void ER_DeclareGPUPixelFormats(PF_InData *in_data, PF_OutData *out_data);
 

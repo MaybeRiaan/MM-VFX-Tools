@@ -1,7 +1,7 @@
 # MM Qualify — Testing Process
 
 Two layers, in order of authority — the same discipline as MM FreqSep
-(`docs/gpu-kernel-rules.md` §5). Automated tests are the regression gate;
+(`../docs/gpu-kernel-rules.md` §5). Automated tests are the regression gate;
 the in-AE checklist is a development-time confidence pass that needs a live
 AE host and GPU.
 

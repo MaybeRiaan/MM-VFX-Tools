@@ -1,7 +1,7 @@
 /*  pipeline_test.cpp — end-to-end parity of the TILED GPU pipeline against
     the UNTILED CPU reference, AE-free (no DX12, no AE host, no Mac).
 
-    The GPU kernels are platform-free by rule (docs/gpu-kernel-rules §0), so
+    The GPU kernels are platform-free by rule (../docs/gpu-kernel-rules.md §0), so
     their arithmetic is transcribed into C here and driven by the REAL tile
     planner (qkgpu::QK_PlanTiles). Two independent implementations of the
     whole chain — denoise -> gates+cleanup -> temporal IIR -> matte blur ->

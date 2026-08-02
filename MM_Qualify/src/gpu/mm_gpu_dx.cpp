@@ -6,7 +6,7 @@
     the gate/cleanup kernel, matte-blur, then ratio+compose and store the
     band. All tiling arithmetic lives in qk_gpu_host.h; this file is
     exclusively D3D12 plumbing. Architecture and resource-state policy mirror
-    MM FreqSep's mm_gpu_dx.cpp — see that file + docs/gpu-kernel-rules.md §6.
+    MM FreqSep's mm_gpu_dx.cpp — see that file + ../docs/gpu-kernel-rules.md §6.
 
     RESOURCE-STATE POLICY: every buffer binds as a UAV via root descriptors,
     always. D3D12 buffers promote COMMON->UNORDERED_ACCESS on first use and

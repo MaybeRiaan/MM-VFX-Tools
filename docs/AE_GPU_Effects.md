@@ -4,6 +4,18 @@
 nothing here is EdgeRepair-specific. Per-plugin status lives in that plugin's
 own doc.
 
+> **The suite has two GPU documents. This one is the HOST contract — how to get
+> After Effects to dispatch to your GPU code at all, and what it hands you when
+> it does.** Its companion,
+> [`gpu-kernel-rules.md`](gpu-kernel-rules.md), is the KERNEL contract — how to
+> write the shader bodies so one math source serves DX12 / CUDA / Metal / host
+> C++. Read this one first: a perfectly portable kernel is dead code until the
+> host gate in §2 is open. Where they overlap (§4 here vs §0–2 there) they
+> agree in substance — one math body, platform difference quarantined, the
+> shared source compiled as host C++ and diffed against the CPU original — but
+> they were written from two plugins' experience and formalize it differently.
+> §4.6 reconciles them.
+
 Verified end-to-end on the test box (Win 10, i7-9700K, RTX 3070 Ti, driver
 576.28, AE 2026 / 26.2, Mercury CUDA) on **2026-07-30**: EdgeRepair receives
 `what_gpu = CUDA` at PreRender and AE calls `PF_Cmd_SMART_RENDER_GPU` at 4K.
@@ -45,6 +57,43 @@ GPU_DEVICE_SETDOWN  tear down
 `xGPUFilterEntry` / MediaCore / `GPUVideoFilter.0` registry records are **not
 part of this** and are not needed for AE. Build a GPUVideoFilter module only if
 you also want to ship into Premiere.
+
+### 1.1 Which framework AE actually offers — pick your backend from this, not from the flags
+
+**MEASURED 2026-07-23 on the test box (Win 10, RTX 3070 Ti, AE 2026 / 26.2,
+Mercury GPU = CUDA): After Effects hands effects `what_gpu = CUDA` and never
+probes DIRECTX** — even with `SUPPORTS_DIRECTX_RENDERING` declared. That flag
+serves AE-SDK effects hosted in **Premiere Pro**, whose Windows GPU renderer is
+DX12. See `ModernEdgeBlur/src/EdgeRepair_GPU.cpp` (file header) and
+`docs/EdgeRepair.md` Stage 6 for the measurement.
+
+**Consequence, and it is not hypothetical.** A GPU host that accepts only
+`PF_GPU_Framework_DIRECTX` declines the device in `GPU_DEVICE_SETUP`, and AE
+then renders it on the CPU — correctly, at CPU speed, with no error anywhere.
+That is precisely the silent failure this document opens by warning about. Two
+plugins in this suite are in that position today:
+
+| Plugin | GPU host accepts | Exercised by AE on the test box? |
+|---|---|---|
+| EdgeRepair | CUDA **or** DIRECTX (`EdgeRepair_GPU.cpp:264`) | ✅ yes, via CUDA |
+| MM_FreqSep | DIRECTX only (`src/gpu/mm_gpu_dx.cpp:179`) | ❌ no — declines, falls back to CPU |
+| MM_Qualify | DIRECTX only (`src/gpu/mm_gpu_dx.cpp:159`) | ❌ no — declines, falls back to CPU |
+
+Both DX12 hosts are validated bit-exact against their CPU references in their
+AE-free harnesses, so **the kernels are not in question — the backend choice
+is.** Their remaining "first in-AE GPU validation" step cannot pass on this
+hardware as built. Three ways out, in increasing order of effort: run AE with
+Mercury set to a renderer that offers DirectX (unverified that AE offers one at
+all on Windows/NVIDIA — test before assuming); treat DX12 as the Premiere-host
+path and add a CUDA backend for AE, as EdgeRepair did; or accept CPU-only in AE
+for now and say so in the plugin's doc. **What is not acceptable is leaving it
+undecided** — the failure is invisible, so nobody will notice it has been made
+by default.
+
+Scope honestly: this is one box, one GPU vendor, one Mercury setting. It has
+not been tested on AMD/Intel (where OpenCL is the plausible offer) or on macOS
+(Metal). Treat "AE offers CUDA on Windows/NVIDIA" as measured, and "AE never
+offers DirectX anywhere" as an untested inference.
 
 ---
 
@@ -177,8 +226,10 @@ two implementations of the same formulas, and the GPU one is the one you cannot
 step through. Drift between them is silent, arrives months later as "the GPU
 looks slightly different", and is miserable to bisect.
 
-EdgeRepair's Stage 6 port (`src/gpu/`, `tests/test_gpuparity.cpp`) is the
-worked example; the rules below are not specific to it.
+EdgeRepair's Stage 6 port (`ModernEdgeBlur/src/gpu/`,
+`ModernEdgeBlur/tests/test_gpuparity.cpp`) is the worked example; the rules
+below are not specific to it. MM_FreqSep and MM_Qualify solve the same problem
+with a stricter file layout — see §4.6.
 
 **1. One math body, N compile targets.** Every per-pixel formula goes in ONE
 header written in the common subset of HLSL / CUDA / Metal / host C++
@@ -259,6 +310,35 @@ Found the hard way writing one header for four compilers:
 - Keep the backend `#ifdef`s in **one block at the top**. If they spread, the
   "one math body" property is gone and you are back to N implementations.
 
+### 4.6 Reconciling with `gpu-kernel-rules.md`
+
+Two plugins arrived at this problem independently, so the suite carries two
+write-ups. They **agree on the substance** — one math body, platform difference
+quarantined, the shared source compiled as host C++ and diffed against the CPU
+original, composition tested and not just per-pixel formulas. They differ in
+how far the quarantine is formalized:
+
+| | EdgeRepair (this doc) | MM_FreqSep / MM_Qualify (`gpu-kernel-rules.md`) |
+|---|---|---|
+| Kernel source | one shared header (`ER_KernelMath.h`), backend `#ifdef`s in a single block at the top | `.kernel` bodies with **zero** `#ifdef`, all spellings in a separate platform *prologue* header |
+| Shader delivery | loose `CUDA_Assets/` PTX + `DirectX_Assets/` `.cso` next to the `.aex` | DXIL compiled at build time, embedded as C headers — self-contained `.aex`, no runtime compiler |
+| Parity tolerance | `==` (exact) | `==` (exact) in the AE-free harness; ≤ 1e-5 for real-GPU vs CPU |
+
+None of these is a contradiction:
+
+- The prologue split is the **same idea taken one step further** — an `#ifdef`
+  block at the top of a shared header *is* a prologue, just not in its own
+  file. `gpu-kernel-rules.md` §0 is the stricter statement and it is the one to
+  follow for **new** kernel work; two plugins already do. Do not churn
+  EdgeRepair's working single-header form to match without a reason.
+- Delivery differs by necessity, not taste: CUDA PTX is produced by `nvcc` and
+  loaded at runtime, so EdgeRepair ships it as a file; DXIL can be baked into
+  the binary. (PTX is text and could be embedded too — an option, not a rule.)
+- The tolerances measure different things. `==` is right when the *same source*
+  is compiled as host C++ — same arithmetic, same order, so any difference is a
+  real defect. `≤ 1e-5` is right when comparing against a **real GPU**, where
+  fma contraction legitimately differs. Both docs use both, at their own layer.
+
 ---
 
 ## 5. How to tell whether it is actually working
@@ -320,7 +400,7 @@ which loader picked up each plugin.
 - **Never acquire suites with `AEFX_AcquireSuite` in `GLOBAL_SETUP`.** On
   failure it sets `PF_OutFlag_DISPLAY_ERROR_MESSAGE` (`0x100`) on
   `out_data->out_flags` and writes `return_msg`
-  (`sdk/Util/AEFX_SuiteHelper.c:51-57`). That silently corrupts your reported
+  (`${AE_SDK_ROOT}/Util/AEFX_SuiteHelper.c:51-57`). That silently corrupts your reported
   outflags and AE refuses to load the plugin (**25::16**, `0x2000500` vs
   `0x2000400`). Use `in_data->pica_basicP->AcquireSuite` and restore
   `out_flags`/`out_flags2` on the way out.
@@ -358,7 +438,7 @@ Building it here needed three workarounds, all reusable:
 3. **nvcc vs VS 2026** — `cudafe++` crashes against the newest STL. Point nvcc
    at a side-by-side 14.4x toolset with `-ccbin`, plus `--use-local-env`,
    `-allow-unsupported-compiler`, and a rebuilt `INCLUDE`/`VCToolsInstallDir`.
-   The exact recipe is in this repo's `CMakeLists.txt`.
+   The exact recipe is in `ModernEdgeBlur/CMakeLists.txt`.
 
 Instrument its `PreRender` / `SmartRenderGPU` with a file log before testing —
 the effect renders correctly on CPU *and* GPU, so **looking at the frame tells
@@ -418,9 +498,13 @@ the first measurement possible.
 
 ## 10. Tools in this repo
 
-- `tools/pipl_dump.py <file.aex>` — parse a plugin's PiPL off disk (PE resource
-  walk): OutFlags, OutFlags_2, spec version, match name, entry point.
-- `tools/pipl_sweep.py <dir> …` — sweep `.aex` files and report GPU declarers.
+- `ModernEdgeBlur/tools/pipl_dump.py <file.aex>` — parse a plugin's PiPL off
+  disk (PE resource walk): OutFlags, OutFlags_2, spec version, match name,
+  entry point.
+- `ModernEdgeBlur/tools/pipl_sweep.py <dir> …` — sweep `.aex` files and report
+  GPU declarers.
+- `ModernEdgeBlur/tools/gpu_status.ps1` — read the three GPU signals off a
+  build (§5).
 
 Both are useful for checking *your own* build. Per §8, be careful about drawing
 conclusions from other vendors' binaries.

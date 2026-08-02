@@ -24,7 +24,7 @@
     second pass never re-reads src). tmp must be a distinct buffer.
 
     Weights are built on the CPU in double and uploaded verbatim to the GPU
-    (gpu-kernel-rules §3.1) — BuildGaussianKernel is the one builder.
+    (../docs/gpu-kernel-rules.md §3.1) — BuildGaussianKernel is the one builder.
 */
 
 #pragma once

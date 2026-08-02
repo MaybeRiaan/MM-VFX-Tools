@@ -4,7 +4,7 @@
     include and which uses ONLY the QK_* math subset defined here). The C++
     counterpart of the math subset is src/qk_cpu_prologue.h; a future Metal
     prologue must define the SAME names with MSL spellings and the SAME
-    binding ORDER. See MM FreqSep docs/gpu-kernel-rules.md — this file
+    binding ORDER. See ../docs/gpu-kernel-rules.md (suite-level) — this file
     follows its §2 vocabulary, minus the double accumulator (no box sums in
     this plugin, hence no shader-doubles device requirement).
 

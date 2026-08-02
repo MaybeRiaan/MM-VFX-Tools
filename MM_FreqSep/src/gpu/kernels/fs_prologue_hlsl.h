@@ -1,7 +1,7 @@
 /*  fs_prologue_hlsl.h — HLSL spellings of the shared kernel vocabulary.
 
     Included BEFORE a .kernel body. Defines every platform-specific name the
-    kernel bodies are allowed to use; see docs/gpu-kernel-rules.md §2.
+    kernel bodies are allowed to use; see ../docs/gpu-kernel-rules.md §2.
 
     The Metal counterpart (fs_prologue_metal.h) must define the SAME names with
     MSL spellings and, critically, the SAME binding ORDER — kernel bodies index
@@ -96,7 +96,7 @@
 // >> must implement these same five names as a compensated (Kahan) float sum:
 // >>   struct { float s, c; }  with ACC_ADD doing the error-compensation step.
 // >> The kernel body must not change — that is the entire point of routing
-// >> accumulation through this vocabulary. See docs/gpu-kernel-rules.md §4.
+// >> accumulation through this vocabulary. See ../docs/gpu-kernel-rules.md §4.
 // ---------------------------------------------------------------------------
 #define ACCUM_T        double
 #define ACC_ZERO       0.0

@@ -32,7 +32,7 @@ A_long GaussianSupport(double sigma);
 // Normalized sampled-Gaussian weights, size 2R+1, centered at index R, with
 // the normalization sum accumulated in DOUBLE before the float cast. Exposed
 // (rather than private to blur.cpp) because the GPU host must upload THESE
-// exact weights — gpu-kernel-rules.md §3.1: the GPU never rebuilds them in
+// exact weights — ../docs/gpu-kernel-rules.md §3.1: the GPU never rebuilds them in
 // float, or the last-bit divergence turns the parity tolerance into noise.
 void BuildGaussianKernel(double sigma, A_long R, std::vector<float> &k);
 

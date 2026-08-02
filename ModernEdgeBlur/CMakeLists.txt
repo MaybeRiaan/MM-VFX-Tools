@@ -140,7 +140,7 @@ set(MM_COMMON_SOURCES
 # NOT needed for After Effects. AE GPU-renders through the AE-SDK F32 path
 # (EdgeRepair_GPU.cpp); GPUVideoFilter is PREMIERE's GPU mechanism, and this
 # module is inert when the plugin is installed in AE's Plug-ins folder.
-# See docs/AE_GPU_Effects.md.
+# See ../docs/AE_GPU_Effects.md.
 #
 # Kept because it is written and working-ish, for if Premiere support is ever
 # wanted. It compiles against the PREMIERE PRO SDK headers, which are NOT
@@ -166,7 +166,7 @@ if(EDGEREPAIR_PREMIERE_GPU)
        NOT EXISTS "${SDK_ROOT}/Premiere/Utils/PrGPUFilterModule.h")
         message(FATAL_ERROR "EDGEREPAIR_PREMIERE_GPU=ON but the Premiere Pro SDK "
             "headers are missing under sdk/Premiere/ (need Headers/* and "
-            "Utils/PrGPUFilterModule.h) — see docs/AE_GPU_Effects.md §6")
+            "Utils/PrGPUFilterModule.h) — see ../docs/AE_GPU_Effects.md §6")
     endif()
     list(APPEND ER_GPU_SOURCES "${SRC_DIR}/gpu/ER_GPUFilter.cpp")
     message(STATUS "EdgeRepair: building Premiere GPUVideoFilter module (AE does not use it)")

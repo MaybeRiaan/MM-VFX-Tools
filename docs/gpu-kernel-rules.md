@@ -4,15 +4,36 @@
 implemented (device setup, embedded-DXIL PSOs, banded tiling, matte, fence
 sync) and the **complete pipeline — kernels AND band tiling — is validated
 bit-exact against the CPU reference in the AE-free harness**
-(`tests/gpu_parity_test.cpp`, 0.000e+00 on every case). First in-AE render
-validation (View popup per band, GPU vs Software-Only renderer) is the
-remaining hands-on step; see `docs/phase6-validation.md`. **Metal is not yet
+(`MM_FreqSep/tests/gpu_parity_test.cpp`, 0.000e+00 on every case). First in-AE
+render validation (View popup per band, GPU vs Software-Only renderer) is the
+remaining hands-on step — **currently blocked, see §5.2**; the protocol is
+`MM_FreqSep/docs/phase6-validation.md`. **Metal is not yet
 written.** These rules exist so that writing it later is a mechanical port,
 not a re-derivation.
 
-This document is the **suite reference** — ModernEdgeBlur and EdgeRepair adopt
-the same structure when they go cross-platform. (Explicitly *not* MasterFilm;
-see the Phase 5 note in `mm-freqsep-plan.md` for why it is not applicable.)
+This document is the **suite reference** for kernel structure. MM_Qualify
+already follows it (`MM_Qualify/src/gpu/`); EdgeRepair reaches the same
+discipline through a single shared header instead of a prologue split — see
+`AE_GPU_Effects.md` §4.6, which reconciles the two and recommends **this**
+layout for new kernel work. (Explicitly *not* MasterFilm; see the Phase 5 note
+in `MM_FreqSep/docs/mm-freqsep-plan.md` for why it is not applicable.)
+
+> **This is the KERNEL contract — how to write shader bodies that survive a
+> platform port.** Its companion,
+> [`AE_GPU_Effects.md`](AE_GPU_Effects.md), is the HOST contract — how to get
+> After Effects to dispatch to your GPU code in the first place, and what it
+> hands you when it does. **Read that one first if your GPU path has never
+> rendered a frame in AE**, because none of the rules here matter until the
+> host gate is open — and see its §1.1 before choosing a backend: the DX12
+> hosts described in §6 below are, on the current test box, **never exercised
+> by After Effects**, which offers CUDA on Windows/NVIDIA. That does not
+> invalidate anything in this document; the kernels are bit-exact and the
+> layout is sound. It means the DX12 *host* is currently a Premiere-host path,
+> and AE coverage needs a CUDA backend behind the same kernels.
+
+Paths in this document are relative to the **suite root** unless they name a
+project folder explicitly; where a rule cites `blur.cpp` or `guided.cpp`
+without a prefix, it means MM_FreqSep's copy (`MM_FreqSep/src/`).
 
 ---
 
@@ -29,16 +50,16 @@ validated on Metal modulo host plumbing. Hand-translating two copies would leave
 Metal unverified in both plumbing **and** math, and you would be debugging both
 at once on a machine you did not have while writing it.
 
-This is the same discipline `src/common/MM_Common.h` already states for CPU code
-("AE-facing but algorithm-free; pure image algorithms go in AE-free headers"),
-extended one axis: **AE-free → also platform-free.**
+This is the same discipline `MM_FreqSep/src/common/MM_Common.h` already states
+for CPU code ("AE-facing but algorithm-free; pure image algorithms go in
+AE-free headers"), extended one axis: **AE-free → also platform-free.**
 
 ---
 
 ## 1. Layout
 
 ```
-src/gpu/
+MM_FreqSep/src/gpu/          (MM_Qualify/src/gpu/ mirrors this, qk_* prefix)
   kernels/
     fs_prologue_hlsl.h      HLSL spellings of the shared vocabulary
     fs_prologue_metal.h     MSL spellings of the SAME vocabulary   [TODO: Metal]
@@ -145,7 +166,7 @@ bit-exact against the CPU *only* in double. Measured on this codebase:
 Route all box accumulation through `ACCUM_T` / `ACC_ADD` / `ACC_GET` so the
 Metal prologue can substitute a compensated (Kahan) float sum, since Apple GPUs
 do not support `double` in shaders. A `control:` test in
-`tests/gpu_parity_test.cpp` asserts the float variant still drifts — if that
+`MM_FreqSep/tests/gpu_parity_test.cpp` asserts the float variant still drifts — if that
 test ever starts passing trivially, this hazard has stopped being covered.
 
 **3.6 — `fma` contraction is allowed to differ; tolerance absorbs it.**
@@ -178,7 +199,7 @@ they are all plumbing, which is the point of the structure.
 
 Two layers, in order of authority:
 
-**5.1 — AE-free, automated (`tests/run_tests.ps1`).** Every `.kernel` body is
+**5.1 — AE-free, automated (`MM_FreqSep/tests/run_tests.ps1`).** Every `.kernel` body is
 transcribed into C and diffed against the real CPU implementation, AND the
 complete banded pipeline — load/swizzle → separation → smooth → matte →
 compose → store, driven by the REAL `FS_PlanTiles` — is diffed against the
@@ -192,14 +213,20 @@ in-AE mismatch is D3D12 plumbing (bindings, barriers, sync) by elimination.
 and with Software Only and diff per band via the View popup — Low Band and
 High Band isolate the blur/guided kernels away from compose, which is what
 makes a mismatch diagnosable rather than just visible. Full protocol:
-`docs/phase6-validation.md`. Target: **max-abs ≤ 1e-5** per channel (§3.6 —
-fma/contraction differences on real silicon land well inside this).
+`MM_FreqSep/docs/phase6-validation.md`. Target: **max-abs ≤ 1e-5** per channel
+(§3.6 — fma/contraction differences on real silicon land well inside this).
 
 Known gap, accepted deliberately: 5.2 is a *development-time* check, not a
 regression gate — GPU rendering needs a live AE-hosted device. 5.1 is the
 regression gate, and it covers everything except the D3D12 API layer itself.
 
-## 6. DX12 host decisions (the template ModernEdgeBlur/EdgeRepair inherit)
+**Blocked, as of 2026-08-02:** step 5.2 cannot be run in After Effects for
+either DX12 plugin. AE offers `what_gpu = CUDA` on the test box and these hosts
+accept DIRECTX only, so they decline the device and AE renders them on the CPU
+— silently and correctly. See `AE_GPU_Effects.md` §1.1. 5.1 is unaffected and
+remains the regression gate; what is missing is real-silicon confirmation.
+
+## 6. DX12 host decisions
 
 - **Shaders compile at BUILD time** (dxc from the Windows SDK, one `-E` per
   entry point) into DXIL embedded as C headers. No runtime compiler DLL, no

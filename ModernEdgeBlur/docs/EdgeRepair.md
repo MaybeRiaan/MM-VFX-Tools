@@ -16,7 +16,7 @@ stages land; it is what lets a fresh session resume without re-deriving the
 spec from conversation history. (There is no separate handoff doc — this file
 IS the handoff; it absorbed `docs/HANDOFF_VIEWMODES.md` on 2026-07-22.)
 
-> **GPU work: read [`AE_GPU_Effects.md`](AE_GPU_Effects.md) first.** How AE
+> **GPU work: read [`AE_GPU_Effects.md`](../../docs/AE_GPU_Effects.md) first.** How AE
 > 2026 actually GPU-accelerates effects (MediaCore GPUVideoFilter /
 > `xGPUFilterEntry` — NOT the documented AE-SDK `SUPPORTS_GPU_RENDER_F32`
 > path), the five-point checklist, the silent-failure traps, and how to
@@ -49,7 +49,7 @@ IS the handoff; it absorbed `docs/HANDOFF_VIEWMODES.md` on 2026-07-22.)
   `PF_Cmd_SMART_RENDER_GPU` at 4K. **The mechanism is the documented AE-SDK F32
   path**, not the MediaCore GPUVideoFilter mechanism an earlier revision of
   these docs claimed — GPUVideoFilter is *Premiere's* path. The full, corrected
-  route is `docs/AE_GPU_Effects.md`; read it before GPU work on any plugin.
+  route is `../../docs/AE_GPU_Effects.md`; read it before GPU work on any plugin.
 
   What actually unblocked it, after seven failed hypotheses: **`GPU_DEVICE_SETUP`
   must re-affirm `out_data->out_flags2 = PF_OutFlag2_SUPPORTS_GPU_RENDER_F32`**
@@ -572,7 +572,7 @@ before continuing. Keep every stage compiling and loadable in AE.
 - **Stage 6 — GPU path. DONE — GATE PASSED 2026-08-02 (v1.0.0.36),
   user-confirmed on real footage.** AE gate opened 2026-07-30 and the CUDA
   kernel port landed the same day. See "Current status" at the top of this file
-  and `docs/AE_GPU_Effects.md` before any further GPU work on any plugin.
+  and `../../docs/AE_GPU_Effects.md` before any further GPU work on any plugin.
 
   ### Kernel port — what landed (2026-07-30, v1.0.0.36)
 

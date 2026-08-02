@@ -1,7 +1,7 @@
 /*  gpu_parity_test.cpp — GPU kernel math validated WITHOUT a GPU.
 
     The .kernel bodies in src/gpu/kernels/ are platform-free by rule
-    (docs/gpu-kernel-rules.md §0), which has a useful consequence: their
+    (../docs/gpu-kernel-rules.md §0), which has a useful consequence: their
     arithmetic can be transcribed into plain C and diffed against the CPU
     reference on this machine, with no DX12 device, no AE host, and no Mac.
 

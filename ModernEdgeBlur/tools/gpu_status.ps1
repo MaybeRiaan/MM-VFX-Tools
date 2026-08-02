@@ -3,7 +3,7 @@
 # Run AFTER launching AE and applying the effect. Paste the whole output into
 # a session; it is the evidence a fresh session needs to judge whether the
 # MediaCore GPUVideoFilter module actually ran.
-# See docs/AE_GPU_Effects.md section 4 for how to read the three signals.
+# See ../docs/AE_GPU_Effects.md section 4 for how to read the three signals.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\gpu_status.ps1
 #   powershell -ExecutionPolicy Bypass -File tools\gpu_status.ps1 -Plugin MM_Qualify
@@ -42,7 +42,7 @@ if (-not (Test-Path $cache)) {
             }
         } else {
             "  NO GPUVideoFilter subkey => module not registered."
-            "  => fix registration first (docs/AE_GPU_Effects.md 2.1 / 2.2)."
+            "  => fix registration first (../docs/AE_GPU_Effects.md 2.1 / 2.2)."
         }
     }
 }
@@ -56,7 +56,7 @@ if (Test-Path $LogPath) {
         $gpuvf | Select-Object -First 15
     } else {
         "NO 'GPUVF' lines => module registered but never instantiated/rendered."
-        "=> check GPU pixel-format declaration (docs/AE_GPU_Effects.md 2.3)."
+        "=> check GPU pixel-format declaration (../docs/AE_GPU_Effects.md 2.3)."
     }
     "`n  (other log lines, deduped:)"
     $lines | Where-Object { $_ -notmatch 'GPUVF' } |
