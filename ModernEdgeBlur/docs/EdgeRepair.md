@@ -729,7 +729,7 @@ before continuing. Keep every stage compiling and loadable in AE.
     later Metal build a toolchain step, not a port (explicit user
     requirement).
   - **Backends:** DirectX 12 built + shipped now (works on any Windows GPU,
-    incl. the NVIDIA test box; Adobe's own `sdk/Util/DirectXUtils` helper
+    incl. the NVIDIA test box; Adobe's own `${AE_SDK_ROOT}/Util/DirectXUtils` helper
     targets it). CUDA source maintained but NOT built — no CUDA toolkit on
     the build machines (no nvcc); enabling it later = install toolkit + add
     the nvcc/PTX step + the CUDA branch in `EdgeRepair_GPU.cpp`. Metal
@@ -761,7 +761,7 @@ before continuing. Keep every stage compiling and loadable in AE.
     `DirectX_Assets/EdgeRepair_*.cso` + `.rs` DEPLOYED NEXT TO THE .AEX
     (both the AE plugins folder and `dist/` — `dist/DirectX_Assets/` is now
     part of the deliverable). Binding ABI fixed by
-    `sdk/Util/DirectXUtils.cpp`: root param 0 = CBV table, 1 = UAV table,
+    `${AE_SDK_ROOT}/Util/DirectXUtils.cpp`: root param 0 = CBV table, 1 = UAV table,
     2 = SRV table, raw ByteAddressBuffers; a per-device mutex serializes
     the shared D3D12 command list (AE does not promise GPU renders are
     serialized). Param structs must stay field-identical across

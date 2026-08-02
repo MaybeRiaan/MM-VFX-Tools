@@ -33,13 +33,12 @@ An After Effects plugin that softens the edges of keyed or masked layers with a 
 
 ## Setup
 
-1. Clone the repo.
-2. Copy AE SDK files into `sdk/`:
-   - `sdk/Headers/` ← SDK `Examples/Headers/`
-   - `sdk/Util/` ← SDK `Examples/Util/`
-3. Copy `PiPLTool.exe` from SDK `Examples/Resources/` into `resources/`.
-
-SDK files are gitignored (not redistributable).
+Nothing to copy. The build uses one shared AE SDK install for the whole suite
+via the `AE_SDK_ROOT` cache var (default
+`E:/OFX DEV/AE SDK/AfterEffectsSDK_25.6_61_win/.../Examples`); pass
+`-DAE_SDK_ROOT=<path>` if yours lives elsewhere. `PiPLtool.exe` is taken from
+the SDK's own `Resources/`. SDKs are never committed — the license prohibits
+redistribution.
 
 ## Build
 

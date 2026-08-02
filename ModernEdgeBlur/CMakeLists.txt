@@ -10,7 +10,29 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/MMSuite.cmake" OPTIONAL)
 
 # Local SDK paths
-set(SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sdk")
+# The AE SDK lives OUTSIDE this repo and is never committed (its license
+# prohibits redistribution). One shared install serves the whole suite, same
+# convention as every other project here. Override with -DAE_SDK_ROOT=... .
+#
+# This project vendored its own byte-identical copy under sdk/ until 2026-08-02;
+# Headers/, Util/ and resources/PiPLTool.exe were each verified identical to the
+# shared install (PiPLTool matched by md5 — it IS the SDK's own PiPLtool.exe)
+# before the switch. See docs/MIGRATION.md.
+set(AE_SDK_ROOT "E:/OFX DEV/AE SDK/AfterEffectsSDK_25.6_61_win/ae25.6_61.64bit.AfterEffectsSDK/Examples"
+    CACHE PATH "After Effects SDK Examples directory")
+
+if(NOT EXISTS "${AE_SDK_ROOT}/Headers/AE_Effect.h")
+    message(FATAL_ERROR "AE SDK not found at: ${AE_SDK_ROOT} (override with -DAE_SDK_ROOT=...)")
+endif()
+
+set(SDK_ROOT "${AE_SDK_ROOT}")
+
+# The PREMIERE SDK is a separate download with no shared install, and is needed
+# only for the optional Premiere GPUVideoFilter module (EDGEREPAIR_PREMIERE_GPU,
+# default OFF — After Effects never uses it; see ../docs/AE_GPU_Effects.md §1.2).
+# It stays vendored under sdk/Premiere/, gitignored like any SDK.
+set(PREMIERE_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sdk/Premiere"
+    CACHE PATH "Premiere Pro SDK root (only for EDGEREPAIR_PREMIERE_GPU=ON)")
 set(RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
 set(SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
@@ -30,9 +52,9 @@ set(SDK_SOURCES
     ${SDK_ROOT}/Util/Smart_Utils.cpp
 )
 
-set(PIPLTOOL "${RESOURCES_DIR}/PiPLTool.exe")
+set(PIPLTOOL "${AE_SDK_ROOT}/Resources/PiPLtool.exe")
 if(NOT EXISTS ${PIPLTOOL})
-    message(FATAL_ERROR "PiPLTool.exe not found at: ${PIPLTOOL}")
+    message(FATAL_ERROR "PiPLtool.exe not found at: ${PIPLTOOL}")
 endif()
 
 if(COMMAND mm_ae_plugins_dir)
@@ -181,11 +203,12 @@ option(EDGEREPAIR_PREMIERE_GPU
 
 set(ER_GPU_SOURCES "")
 if(EDGEREPAIR_PREMIERE_GPU)
-    if(NOT EXISTS "${SDK_ROOT}/Premiere/Headers/PrSDKGPUFilter.h" OR
-       NOT EXISTS "${SDK_ROOT}/Premiere/Utils/PrGPUFilterModule.h")
+    if(NOT EXISTS "${PREMIERE_SDK_ROOT}/Headers/PrSDKGPUFilter.h" OR
+       NOT EXISTS "${PREMIERE_SDK_ROOT}/Utils/PrGPUFilterModule.h")
         message(FATAL_ERROR "EDGEREPAIR_PREMIERE_GPU=ON but the Premiere Pro SDK "
-            "headers are missing under sdk/Premiere/ (need Headers/* and "
-            "Utils/PrGPUFilterModule.h) — see ../docs/AE_GPU_Effects.md §6")
+            "headers are missing under ${PREMIERE_SDK_ROOT} (need Headers/* and "
+            "Utils/PrGPUFilterModule.h). Drop a copy there or pass "
+            "-DPREMIERE_SDK_ROOT=... — see ../docs/AE_GPU_Effects.md §6")
     endif()
     list(APPEND ER_GPU_SOURCES "${SRC_DIR}/gpu/ER_GPUFilter.cpp")
     message(STATUS "EdgeRepair: building Premiere GPUVideoFilter module (AE does not use it)")
@@ -203,7 +226,7 @@ add_meb_plugin(EdgeRepair "${RESOURCES_DIR}/EdgeRepairPiPL.r"
 
 if(EDGEREPAIR_PREMIERE_GPU)
     set_source_files_properties("${SRC_DIR}/gpu/ER_GPUFilter.cpp" PROPERTIES
-        INCLUDE_DIRECTORIES "${SDK_ROOT}/Premiere/Headers;${SDK_ROOT}/Premiere/Utils"
+        INCLUDE_DIRECTORIES "${PREMIERE_SDK_ROOT}/Headers;${PREMIERE_SDK_ROOT}/Utils"
         COMPILE_DEFINITIONS "PRWIN_ENV")
 endif()
 

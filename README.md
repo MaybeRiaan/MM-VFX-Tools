@@ -93,17 +93,16 @@ belongs here, not in that plugin's folder.
 ## Fresh-checkout note
 
 The Adobe AE SDK is not in this repo (its license prohibits redistribution).
-One shared install serves every project: GrainTransfer, MM_Qualify and
-MM_FreqSep reference the SDK's
+**One shared install serves every project** — all of them reference the SDK's
 `Examples/` dir via the `AE_SDK_ROOT` CMake cache var (test runners honour an
 `AE_SDK_ROOT` env var), defaulting to
 `E:\OFX DEV\AE SDK\AfterEffectsSDK_25.6_61_win\...\Examples`. On a new
 machine, unzip the SDK and pass `-DAE_SDK_ROOT=<path>` (or set the env var)
-if it lives elsewhere.
+if it lives elsewhere. `PiPLtool.exe` comes from the SDK's own `Resources/`.
+**Nothing needs restoring by hand.**
 
-`ModernEdgeBlur/` is the one exception, pending consolidation: it still
-expects a vendored `sdk/` subset plus `resources/PiPLTool.exe` (both
-gitignored — copy them from the SDK per that project's README). Its AE-SDK
-subset is verified identical to the shared install; the extra `sdk/Premiere/`
-subset is only needed for `-DEDGEREPAIR_PREMIERE_GPU=ON`, which is OFF by
-default and unused by After Effects.
+One optional extra: the **Premiere** SDK is a separate download with no shared
+install, needed only for `-DEDGEREPAIR_PREMIERE_GPU=ON`. It stays vendored
+(gitignored) at `EdgeRepair/sdk/Premiere/`, overridable with
+`-DPREMIERE_SDK_ROOT=<path>`. That module is OFF by default, unused by After
+Effects, and parked under the CUDA-only decision above.

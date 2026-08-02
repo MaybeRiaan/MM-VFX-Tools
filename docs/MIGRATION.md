@@ -207,12 +207,17 @@ Notes specific to this repo:
 2. **Rename Modern Edge Blur** — display name / menu strings / folder only;
    PiPL match name stays (see Decisions #3). Unblocked now that the migration
    has landed; owner is doing this next, across the suite, ahead of release.
-3. **SDK consolidation for ModernEdgeBlur** — still vendors `sdk/`; the AE
-   subset is verified `diff -rq` clean against the shared install, so the
-   switch to `AE_SDK_ROOT` is a `CMakeLists.txt:9` change. Caveat: `sdk/Premiere/`
-   is the **Premiere** SDK, which has no shared install — it needs its own
-   cache var or stays vendored. Low urgency: `EDGEREPAIR_PREMIERE_GPU` is OFF
-   by default and AE never uses that module.
+3. ~~**SDK consolidation for ModernEdgeBlur**~~ — DONE 2026-08-02. The whole
+   suite now builds against one shared AE SDK install via `AE_SDK_ROOT`, and
+   `PiPLtool.exe` comes from the SDK's own `Resources/`. Before removal the
+   vendored copies were re-verified: `Headers/` and `Util/` `diff -rq` clean,
+   and `resources/PiPLTool.exe` matched the SDK's `PiPLtool.exe` by md5
+   (`2a03f56a…`) — it was never a separate tool. Proof the swap changed
+   nothing observable: the built `.aex` PiPL resources (match name, version,
+   outflags, entry point) are **identical to a pre-change dump** for both
+   plugins, and all 7 test files still pass. The Premiere SDK subset has no
+   shared install and stays vendored, now behind its own `PREMIERE_SDK_ROOT`
+   cache var.
 4. **Old local folders** — left in place as frozen backups with original
    hashes. Untracked `_MOVED.md` markers dropped in each migrated one so
    nobody accidentally resumes work there. Delete only after the suite has

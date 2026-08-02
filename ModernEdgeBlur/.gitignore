@@ -34,9 +34,10 @@ cmake_install.cmake
 .DS_Store
 Thumbs.db
 
-# Adobe AE SDK — not redistributable. Drop a copy into ./sdk/ locally.
+# SDKs are never committed (license prohibits redistribution). The AE SDK now
+# comes from the shared AE_SDK_ROOT install; only the optional Premiere SDK
+# subset is still vendored here, under sdk/Premiere/.
 sdk/
-resources/PiPLTool.exe
 
 # Distributable builds — committed for remote testing.
 # Overrides the *.aex / *.exe ignores above for this directory only.
