@@ -24,12 +24,26 @@ IS the handoff; it absorbed `docs/HANDOFF_VIEWMODES.md` on 2026-07-22.)
 > five plugins**; the Stage 6 section below is only Edge Repair's own status
 > and raw experiment log.
 
-## Current status & resuming (2026-07-30)
+## Current status & resuming (2026-08-02)
 
-- **EdgeRepair v1.0.0.36.** Stages 0–5 are DONE + AE-gated. The CPU path is the
-  reference path: correct, threaded, ~300 ms/frame at 4K on 8 threads.
-- **Stage 6 (GPU): AE gate OPEN, and the CUDA kernel port is LANDED —
-  AWAITING ITS OWN AE GATE (2026-07-30).**
+- **EdgeRepair v1.0.0.36. ALL SIX STAGES ARE DONE AND AE-GATED.** The CPU path
+  remains the reference/fallback (correct, threaded, ~300 ms/frame at 4K on 8
+  threads); CUDA carries the full pipeline when AE offers it.
+- **Stage 6 (GPU): GATE PASSED 2026-08-02, user-confirmed.** CPU/GPU parity
+  holds on real footage across the checklist (difference render at Detail 0 and
+  50, all four View Modes, Alpha Choke identity and ±, 8/16/32 bpc, RAM preview
+  + Render Queue, no launch failures in the log). Nothing outstanding on
+  correctness.
+- **Parked, by the user's call (2026-08-02):** some look/parameter values want
+  fine-tuning at some point — deferred behind higher priorities, and NOT a
+  defect list. Which values was left unspecified; ask before changing defaults.
+- Remaining Stage 6 *cleanup* (none of it blocking, all listed at the end of
+  the Stage 6 entry): bisect the unconditional `GPU_RENDER_POSSIBLE`, and
+  optionally the DX12/Metal orchestration.
+
+### How the gate was reached (2026-07-30)
+
+- **AE gate open + the CUDA kernel port, same day.**
 
   *Gate open (v1.0.0.34):* AE hands us `what_gpu = CUDA` at PreRender and calls
   `PF_Cmd_SMART_RENDER_GPU` at 4K. **The mechanism is the documented AE-SDK F32
@@ -555,9 +569,10 @@ before continuing. Keep every stage compiling and loadable in AE.
   light edge rim at high Detail — the synthetic-grain Detail fixed it (grain
   never touches orig's edge RGB), confirmed in AE on premultiplied footage
   2026-07-22.
-- **Stage 6 — GPU path.** AE gate OPEN 2026-07-30; **CUDA kernel port LANDED
-  the same day (v1.0.0.36), awaiting its own AE gate.** See "Current status" at
-  the top of this file and `docs/AE_GPU_Effects.md` before resuming.
+- **Stage 6 — GPU path. DONE — GATE PASSED 2026-08-02 (v1.0.0.36),
+  user-confirmed on real footage.** AE gate opened 2026-07-30 and the CUDA
+  kernel port landed the same day. See "Current status" at the top of this file
+  and `docs/AE_GPU_Effects.md` before any further GPU work on any plugin.
 
   ### Kernel port — what landed (2026-07-30, v1.0.0.36)
 
@@ -666,9 +681,25 @@ before continuing. Keep every stage compiling and loadable in AE.
     (`what_gpu != NONE && gpu_data`) is the next cleanup AFTER the kernel gate
     passes.
 
-  ### *Stage 6 kernel gate — the test protocol*
+  ### *Stage 6 kernel gate — PASSED 2026-08-02*
+
+  The protocol below is what the user ran, and all of it checked out. Keep it:
+  it is the regression checklist for any future change to the GPU path, and the
+  difference render (step 1) is the only way to tell a real divergence from a
+  plausible-looking one.
 
   With Project Settings → Mercury GPU Acceleration = CUDA:
+
+  0. **The numeric A/B, and the one that actually proves parity.** One frame,
+     Composited, defaults but Detail 0. Render Queue to **32-bit EXR** on CUDA
+     (`A`), switch to Software Only, render again (`B`). Comp `A` over `B`,
+     blend mode **Difference**, Levels input-white pulled to ~0.004 (≈250x
+     amplification). Expect essentially black. Structure confined to the band =
+     a real math divergence; non-black everywhere, or a shifted ghost =
+     addressing/pitch/offset, not math. Repeat at Detail 50 to bring the grain
+     amplitude reduction in. Expected residual is ~1e-7 on band edges only —
+     anything visible without amplification is a bug.
+  Then, as stage isolation (each narrows a failure to one kernel group):
   1. Apply Edge Repair to a keyed plate. **The result must now MATCH the CPU
      render** (Mercury → Software Only), not pass through — that is the whole
      point of this round. Compare at Erode 2 / Extend 32 / Detail 50.
@@ -1002,14 +1033,25 @@ before continuing. Keep every stage compiling and loadable in AE.
       `ER_GPU_LOG=1`, unconditional GPU_RENDER_POSSIBLE (marked EXPERIMENT in
       `PreRender`), `ER_GPU_DIAG_NOINFLATE` define (now 0). Once GPU renders,
       bisect the unconditional flag back to the gated form.
-  - **DONE 2026-07-30 (v1.0.0.36) — see "Kernel port" above:** the four kernel
-    groups are in `ER_KernelMath.h` + the CUDA wrapper (threshold/erode core
-    matte; JFA+2 distance; pull–push mip chain; composite = grain + inner-ease
-    blend + choke, each mirroring its `MM_*.h` twin), and the headless
-    CPU-vs-GPU parity harness is `tests/test_gpuparity.cpp`. **Remaining:** the
-    AE kernel gate (protocol above) — CPU/GPU parity within tolerance on real
-    footage + a soak test on the GPU path — then the PreRender flag bisect, and
-    optionally DX12/Metal orchestration.
+  - **DONE 2026-07-30 (v1.0.0.36), GATED 2026-08-02 — see "Kernel port"
+    above:** the four kernel groups are in `ER_KernelMath.h` + the CUDA wrapper
+    (threshold/erode core matte; JFA+2 distance; pull–push mip chain; composite
+    = grain + inner-ease blend + choke, each mirroring its `MM_*.h` twin), and
+    the headless CPU-vs-GPU parity harness is `tests/test_gpuparity.cpp`.
+
+  ### Remaining Stage 6 cleanup — OPTIONAL, none of it blocking
+
+  Stage 6 is complete and gated; these are tidy-ups, not open defects.
+  1. **Bisect the unconditional `GPU_RENDER_POSSIBLE`** in `PreRender` (marked
+     EXPERIMENT there) back to the gated form `what_gpu != NONE && gpu_data`.
+     It was kept through the kernel gate on purpose — one variable per AE test.
+     It costs an AE round-trip to verify, so it waits for a session with time
+     for one. If GPU rendering ever stops engaging, this is the first suspect.
+  2. **DX12 host orchestration + Metal entries** — see "NOT ported" above.
+     Speculative until a host exists that can gate them.
+  3. **A long GPU soak** (the CPU path has `test_soak.cpp`; the GPU path has no
+     equivalent). The device scratch is grow-only and freed at setdown, so the
+     risk is low, but it is unmeasured.
 
 ## Build mechanics specific to Edge Repair
 
