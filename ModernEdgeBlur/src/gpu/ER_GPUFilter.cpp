@@ -135,7 +135,7 @@ public:
 
         // TEMPORARY VISIBLE MARKER (remove once the kernel port begins).
         // A pure passthrough is indistinguishable from the CPU path, so the
-        // Mercury CUDA-vs-Software A/B in docs/AE_GPU_Effects.md §4.3 cannot
+        // Mercury CUDA-vs-Software A/B in docs/AE_GPU_Effects.md §5.3 cannot
         // detect success. Zeroing the top ~12% of the frame makes "the GPU
         // module ran" unmistakable on screen.
         if (res == ER_CUDA_SUCCESS && cu.MemsetD8Async) {

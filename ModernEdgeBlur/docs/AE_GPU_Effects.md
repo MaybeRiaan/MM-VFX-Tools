@@ -20,7 +20,7 @@ Where something is *believed* rather than *measured*, it says so.
 > sweeping installed third-party `.aex` files. Those binaries ship for *both*
 > hosts, so their contents say nothing about which path AE drives.
 >
-> §7 records the wrong turns so nobody repeats them.
+> §8 records the wrong turns so nobody repeats them.
 
 ---
 
@@ -55,7 +55,7 @@ the CPU with no error and looks perfect.
 
 ### 2.1 Declare the GPU flags — and guard the Premiere branch
 
-Mirror Adobe's own AE GPU sample (`SDK_Invert_ProcAmp`, §6):
+Mirror Adobe's own AE GPU sample (`SDK_Invert_ProcAmp`, §7):
 
 ```cpp
 out_data->out_flags  = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE;
@@ -64,7 +64,7 @@ out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE
                      | PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
 
 if (in_data->appl_id == 'PrMr') {
-    // Premiere wants pixel formats instead (see §5)
+    // Premiere wants pixel formats instead (see §6)
 } else {
     out_data->out_flags2 |= PF_OutFlag2_SUPPORTS_GPU_RENDER_F32
                           | PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING;
@@ -77,7 +77,7 @@ if (in_data->appl_id == 'PrMr') {
 - **Do not set `USE_OUTPUT_EXTENT`.** Adobe's AE GPU sample declares
   `eGLO 0x02000400` — `PIX_INDEPENDENT | DEEP_COLOR_AWARE` only.
 - **Do not declare `SUPPORTS_QUERY_DYNAMIC_FLAGS`** unless you genuinely have
-  dynamic flags — see §5.
+  dynamic flags — see §6.
 
 ### 2.2 Re-affirm GPU support in `GPU_DEVICE_SETUP` ← **the one that bit us**
 
@@ -161,18 +161,111 @@ AE tolerates that. Mirror your version bump into both files.
 - Allocate through `PF_GPUDeviceSuite1` only — never raw `cudaMalloc`.
 - **Launch on AE's stream** (`device_info.command_queuePV`) and do **not**
   synchronize: AE owns synchronization, and that stream also serializes
-  concurrent Multi-Frame Rendering launches, which is what makes the path
-  lock-free.
+  concurrent Multi-Frame Rendering launches, which is what makes a *stateless*
+  kernel lock-free. Share any device scratch between renders and that stops
+  being true — see §4.
 - 16f (`_16f`) formats are declared on the Premiere path; a kernel that may see
   them must handle half floats.
 
 ---
 
-## 4. How to tell whether it is actually working
+## 4. Porting the math without the two paths drifting
+
+Everything above gets AE to *dispatch* to your GPU code. This section is about
+what you dispatch to — and it is where the long-term cost lives. You now have
+two implementations of the same formulas, and the GPU one is the one you cannot
+step through. Drift between them is silent, arrives months later as "the GPU
+looks slightly different", and is miserable to bisect.
+
+EdgeRepair's Stage 6 port (`src/gpu/`, `tests/test_gpuparity.cpp`) is the
+worked example; the rules below are not specific to it.
+
+**1. One math body, N compile targets.** Every per-pixel formula goes in ONE
+header written in the common subset of HLSL / CUDA / Metal / host C++
+(`ER_KernelMath.h`). The per-backend wrappers hold **only** entry decorations
+and buffer plumbing — never arithmetic. This is also what makes a later Metal
+build a toolchain step instead of a port.
+
+**2. A formula changes in both places in the SAME commit,** or not at all. Say
+so in both headers, and have each shared function name its CPU twin in a
+comment. "I'll port it after" is how drift starts.
+
+**3. Compile the shared header as host C++ and test it against the CPU
+original.** That is the whole point of keeping it in the common subset: the
+headless tests call *the exact functions the GPU runs*, with no GPU in the
+loop. Compare with `==`, not an epsilon — it is the same arithmetic in the same
+order, so anything looser hides a real divergence.
+
+Test the **composition**, not just the formulas. Per-pixel helpers passing
+individually says nothing about whether the host wired them together right; an
+off-by-one in a mip-level loop or a swapped fine/coarse sails straight through.
+Re-run the multi-pass schedule on the CPU and diff the whole result.
+
+**4. Where the paths legitimately differ, MEASURE it and write the number
+down.** An approximation accepted up front (an iterative distance transform
+instead of an exact one, a float reduction instead of double) should ship with
+its measured error and expected magnitude *in the doc*, so a later session
+reading a faint difference render knows whether it is looking at the accepted
+divergence or a new bug. "Sub-pixel" is a hope; "worst 0.0000 px across five
+seed topologies, tolerance 0.5" is a fact.
+
+**5. Keep at least one HLSL entry point in the build even if you never ship
+DX12.** fxc type-checks the *whole translation unit*, so a single compiled
+entry validates the entire shared header against HLSL's rules on every build.
+This caught a construct CUDA and C++ both accept and HLSL rejects, months
+before anyone would have compiled it for real.
+
+### Branching when you cannot read back
+
+CPU pipelines routinely ask a question between passes — "did the matte come out
+empty?", "did the fill find a seed?" — and branch on the host. On the GPU that
+answer costs a stream synchronization, which you must not do (§3).
+
+The fix: have the **producing** kernel `atomicOr` a bit into a small device
+flags buffer, and have the **consuming** kernel test it. Same decisions, no
+round-trip. Zero the buffer in a tiny kernel at the top of each frame. Make
+sure every CPU early-out has a matching flag, and cover the degenerate cases
+(empty mask, no edge at all) in the parity test — those are exactly the ones
+that never come up in normal footage and break in a customer's project.
+
+### Multi-pass scratch, and when the path stops being lock-free
+
+§3 notes that AE's per-device stream serializes concurrent MFR launches. That
+makes a *stateless* kernel lock-free — but the moment you share device scratch
+between renders, serializing **enqueue** becomes load-bearing: take a mutex
+around the whole pass sequence. Because the stream is FIFO, that is sufficient
+— render A's passes all execute before render B's touch the buffers.
+
+Allocate scratch **once per device**, sub-divided per render and grown only
+when a bigger frame arrives (the device-side analogue of a per-thread scratch
+struct), and free it in `GPU_DEVICE_SETDOWN`. Reserve only what the current
+parameters need — intermediates like a mip chain can dwarf the frame itself.
+
+### Language differences that actually bite
+
+Found the hard way writing one header for four compilers:
+
+- **HLSL has no ternary over struct types** (`cond ? structA : structB`) — use
+  an `if`. fxc reports it as "type mismatch between conditional values".
+- **Out-parameters differ**: `out T` (HLSL), `T&` (CUDA/C++), `thread T&`
+  (Metal, which needs the address space). Hide it behind one macro.
+- **cs_5_1 has no float atomics.** A reduction that uses `atomicAdd` on CUDA
+  needs a different shape to stay portable — a fixed grid writing per-block
+  partials, then a short serial finalize, works everywhere and has the bonus of
+  being independent of scheduling.
+- **Wrap `sqrt`/`abs`/`min`/`max`/`floor` in macros.** The spellings and
+  overload sets differ per language; picking them up implicitly compiles fine
+  on one backend and fails on the next.
+- Keep the backend `#ifdef`s in **one block at the top**. If they spread, the
+  "one math body" property is gone and you are back to N implementations.
+
+---
+
+## 5. How to tell whether it is actually working
 
 The failure mode is silent. Use these, in this order.
 
-### 4.1 Log inside the GPU entry points
+### 5.1 Log inside the GPU entry points
 
 Log `what_gpu` in PreRender and log entry to `SMART_RENDER_GPU`. This is the
 decisive signal:
@@ -185,7 +278,7 @@ SMART_RENDER GPU what_gpu=3 out=3840x2160 src=3840x2160
 `what_gpu`: `0 = NONE, 1 = OPENCL, 2 = METAL, 3 = CUDA, 4 = DIRECTX`.
 **`what_gpu=0` at every PreRender ⇒ the gate is shut — go to §2.2 first.**
 
-### 4.2 Make the milestone kernel **visibly destructive**
+### 5.2 Make the milestone kernel **visibly destructive**
 
 > A passthrough kernel makes the CUDA-vs-Software A/B **worthless** — output is
 > bit-identical whether or not the GPU ran. We wasted several test rounds on
@@ -204,7 +297,7 @@ That is also a free check that pointer, pitch and channel layout are right.
 Keep it behind a compile switch (`ER_GPU_VISIBLE_MARKER`) and delete it when
 real kernels land.
 
-### 4.3 Don't bother with the registry
+### 5.3 Don't bother with the registry
 
 `GPUVideoFilter.0` under
 `HKCU\Software\Adobe\After Effects\26.2\PluginCache\en_US` is the **Premiere**
@@ -216,7 +309,7 @@ which loader picked up each plugin.
 
 ---
 
-## 5. Gotchas
+## 6. Gotchas
 
 - **`PF_Cmd_QUERY_DYNAMIC_FLAGS` — don't declare it unless you need it.**
   `SUPPORTS_QUERY_DYNAMIC_FLAGS` is not part of the GPU recipe, and getting the
@@ -243,7 +336,7 @@ which loader picked up each plugin.
 
 ---
 
-## 6. The reference sample — build it when stuck
+## 7. The reference sample — build it when stuck
 
 `SDK_Invert_ProcAmp` in the **AE** SDK is a complete, working AE GPU effect
 (CUDA + OpenCL + DirectX + Metal). It is the ground truth; reading and building
@@ -282,7 +375,7 @@ Other samples, and what they are good for:
 
 ---
 
-## 7. What we got wrong (so you don't repeat it)
+## 8. What we got wrong (so you don't repeat it)
 
 Seven hypotheses were tested against live AE, each costing a restart, all
 negative — because the real problem (§2.2) was in none of them:
@@ -305,7 +398,7 @@ samples tell you what *the host* requires. When a mechanism question comes up:
 
 ---
 
-## 8. Realistic payoff
+## 9. Realistic payoff
 
 For a memory-bandwidth-bound effect at 4K (EdgeRepair's profile):
 
@@ -323,11 +416,11 @@ the first measurement possible.
 
 ---
 
-## 9. Tools in this repo
+## 10. Tools in this repo
 
 - `tools/pipl_dump.py <file.aex>` — parse a plugin's PiPL off disk (PE resource
   walk): OutFlags, OutFlags_2, spec version, match name, entry point.
 - `tools/pipl_sweep.py <dir> …` — sweep `.aex` files and report GPU declarers.
 
-Both are useful for checking *your own* build. Per §7, be careful about drawing
+Both are useful for checking *your own* build. Per §8, be careful about drawing
 conclusions from other vendors' binaries.
