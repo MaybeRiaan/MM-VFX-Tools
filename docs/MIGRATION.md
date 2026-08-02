@@ -1,7 +1,9 @@
 # MM VFX Tools — Unified Repo Migration (handoff document)
 
 **Started:** 2026-07-29
-**Status:** GrainTransfer, MM_Qualify, MM_FreqSep migrated. **ModernEdgeBlur + EdgeRepair deferred** (active development in the old repo — see "Deferred migration" below for the turnkey procedure).
+**Status:** COMPLETE — all five plugins migrated. GrainTransfer, MM_Qualify,
+MM_FreqSep on 2026-07-29; ModernEdgeBlur + EdgeRepair on 2026-08-02 (the
+deferred migration, run once EdgeRepair's Stage 6 GPU work landed).
 
 ## Goal
 
@@ -136,10 +138,29 @@ One non-fatal note: GrainTransfer's post-build deploy could not overwrite the
 loaded (file lock). The build script treats this as non-fatal; the next build
 with AE closed will deploy normally.
 
-## Deferred migration: ModernEdgeBlur + EdgeRepair
+### ModernEdgeBlur + EdgeRepair (2026-08-02)
 
-Run this when the in-flight EdgeRepair GPU work reaches a commit point.
-**Until then, all edge-tool work continues in `e:\OFX DEV\ModernEdgeBlur`.**
+| Project | Build | Tests |
+|---|---|---|
+| ModernEdgeBlur + EdgeRepair | ✅ clean `build.ps1 -NoBuildIncrement -Clean` — both `.aex` targets, PiPL, fxc DirectX assets, nvcc CUDA PTX, deployed to AE | ✅ 7/7 headless test files, incl. `test_gpuparity` ("All parity checks passed") and `test_soak` |
+
+**Content parity was proven at the git-object level, not just by eyeball:**
+the migrated `ModernEdgeBlur/` subtree hash equals the old repo's root tree
+hash exactly (`9617867`), and all 56 tracked blobs match 1:1. Note that a
+plain `cmp` of the *working trees* reports ~32 files as differing — that is
+`core.autocrlf=true` re-checking-out CRLF where the old working tree happened
+to hold LF. The committed content is identical; `git status` is clean in both.
+Compare blobs/trees, not working files, when verifying a migration here.
+
+## Deferred migration: ModernEdgeBlur + EdgeRepair — RUN 2026-08-02
+
+Gate condition (in-flight EdgeRepair GPU work at a commit point) was met:
+old-repo HEAD `b6bf98a` "docs(GPU): generalize the CPU/GPU lockstep discipline
+into the suite-wide doc", clean tree, in sync with origin, all six EdgeRepair
+stages done. 59 commits rewritten and merged; suite went 29 → 89 commits.
+**Edge-tool development now happens here, in `ModernEdgeBlur/`.**
+
+This is the procedure as actually run:
 
 ```bash
 # 0. In the OLD repo: commit everything (git add -A; git commit) so the
@@ -157,41 +178,50 @@ git merge mig/main --allow-unrelated-histories \
     -m "Merge ModernEdgeBlur + EdgeRepair history (from MaybeRiaan/ModernEdgeBlur)"
 git remote remove mig
 
-# 4. Apply the SDK consolidation (see "Untracked build inputs" above): point
-#    its CMakeLists at AE_SDK_ROOT like the other three projects instead of
-#    copying its vendored sdk/ (verify the vendored copy matches the full SDK
-#    first — diff -rq — in case it was patched).
-# 5. Build BOTH plugins from the new location; run tests; compare .aex output
-#    against the old repo's dist/ before switching development over.
-# 6. Only then: stop working in the old folder (drop a MOVED marker in it).
+# 4. DONE — parity build first, consolidation second (deliberate order: a
+#    byte-identical tree proves the MOVE, before any change proves itself).
+#    The vendored sdk/ + resources/PiPLTool.exe were verified `diff -rq`
+#    clean against the shared install, then copied to the new location.
+# 5. DONE — build + tests green from the new location (see Verification).
+# 6. DONE — development moved here.
 ```
 
 Notes specific to this repo:
 
-- `dist/` (including `EdgeRepair.aex`) **is tracked** there — it migrates with
+- `dist/` (including `EdgeRepair.aex`) **is tracked** there — it migrated with
   history; no hand-copy needed.
-- Two plugins, one CMake project — migrate as a single `ModernEdgeBlur/`
-  folder. Do not attempt to split them; they share `src/common/` and the
-  README documents that Modern Edge Blur's code is never modified for Edge
-  Repair's sake. The folder gets renamed together with the plugin rename,
-  post-migration.
+- Two plugins, one CMake project — migrated as a single `ModernEdgeBlur/`
+  folder, as planned. The eventual split is now a *post*-migration option, not
+  a migration concern: `src/common/` turns out to be included **only** by
+  `EdgeRepair.cpp` (`ModernEdgeBlur.cpp` pulls in nothing but its own header
+  and the STL), so the two plugins share the CMake helper and the SDK glue —
+  not code. Splitting is therefore mechanical; its real cost is duplicating
+  `add_meb_plugin()`. Do it as its own change, after the rename.
+- A `pre-dilation` tag came across with the history and now points into the
+  rewritten commits.
 
 ## Post-migration follow-ups (open items)
 
-1. **GitHub remote** — `gh` CLI is not installed, so this is a manual step:
-   create an empty repo on github.com (suggested: `MaybeRiaan/MM-VFX-Tools`,
-   private), then:
-   ```
-   git remote add origin https://github.com/MaybeRiaan/MM-VFX-Tools.git
-   git push -u origin main
-   ```
+1. ~~**GitHub remote**~~ — DONE: `origin` =
+   `https://github.com/MaybeRiaan/MM-VFX-Tools.git`.
 2. **Rename Modern Edge Blur** — display name / menu strings / folder only;
-   PiPL match name stays (see Decisions #3). Do after the deferred migration.
-3. **Old local folders** — left in place as frozen backups with original
+   PiPL match name stays (see Decisions #3). Unblocked now that the migration
+   has landed; owner is doing this next, across the suite, ahead of release.
+3. **SDK consolidation for ModernEdgeBlur** — still vendors `sdk/`; the AE
+   subset is verified `diff -rq` clean against the shared install, so the
+   switch to `AE_SDK_ROOT` is a `CMakeLists.txt:9` change. Caveat: `sdk/Premiere/`
+   is the **Premiere** SDK, which has no shared install — it needs its own
+   cache var or stays vendored. Low urgency: `EDGEREPAIR_PREMIERE_GPU` is OFF
+   by default and AE never uses that module.
+4. **Old local folders** — left in place as frozen backups with original
    hashes. Untracked `_MOVED.md` markers dropped in each migrated one so
    nobody accidentally resumes work there. Delete only after the suite has
-   been building from here for a while.
-4. **Parent repo hygiene** — `e:\OFX DEV` itself is a git repo (SkinRemapOFX).
+   been building from here for a while. `ModernEdgeBlur/Specimen/` (an
+   untracked third-party `Deep Glow.aex` kept for reference) was deliberately
+   **not** carried over: nothing in the tree references it, and the PiPL-sweep
+   investigation it served is recorded as a wrong turn in `AE_GPU_Effects.md`.
+   It stays in the old folder if ever wanted.
+5. **Parent repo hygiene** — `e:\OFX DEV` itself is a git repo (SkinRemapOFX).
    `MM VFX TOOLS/` was added to its `.gitignore` so the nested repos don't
    fight. The other project folders were already untracked there.
 
@@ -200,9 +230,8 @@ Notes specific to this repo:
 - **SDK consolidated 2026-07-29** (was: two coexisting strategies). All three
   migrated projects now reference one shared SDK install via the
   `AE_SDK_ROOT` cache var; the vendored `sdk/` copies were verified
-  byte-identical to the full SDK, then removed. ModernEdgeBlur still vendors
-  its `sdk/` in the old repo — apply the same consolidation when it migrates
-  (deferred-migration step 4).
+  byte-identical to the full SDK, then removed. ModernEdgeBlur arrived
+  2026-08-02 still vendoring its `sdk/` — consolidation pending, follow-up #3.
 - **`PiPLTool.exe` was never a separate tool** — it is the SDK's own
   `Examples/Resources/PiPLtool.exe` (identical md5), so the builds now take
   it straight from `${AE_SDK_ROOT}/Resources/` and nothing is hand-copied.
