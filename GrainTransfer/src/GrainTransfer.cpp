@@ -45,6 +45,10 @@
 
 #include "AE_ComputeCacheSuite.h"
 
+#ifdef _WIN32
+#include "gpu/gt_gpu_host.h"
+#endif
+
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -186,20 +190,59 @@ struct GT_AnalysisValue {
     gt::TileBank      bank;
 };
 
+// The render depth the cache key names. It must be the PROJECT's depth, NOT
+// whatever PF_GetPixelFormat reports for the output world, because on the GPU
+// path every world is PF_PixelFormat_GPU_BGRA128 regardless of project depth.
+// Keying on the world format there would mint a key the CPU path can never
+// have populated, so the GPU would miss the cache on every frame, decline
+// forever, and the port would look like it silently did nothing.
+//
+// `bitdepth` is carried on BOTH PF_PreRenderInput and PF_SmartRenderInput, so
+// PreRender can build the identical key without an output world — which is
+// what makes the cache-gated GPU offer below possible at all. On the CPU path
+// this maps 1:1 onto the format the world reports (AE conforms worlds to the
+// project depth, and gtc::PixelBytes accepts exactly these three).
+static PF_PixelFormat GT_FormatForBitdepth(short bpc)
+{
+    switch (bpc) {
+        case 32: return PF_PixelFormat_ARGB128;
+        case 16: return PF_PixelFormat_ARGB64;
+        default: return PF_PixelFormat_ARGB32;
+    }
+}
+
+// The two 64-bit halves of the analysis key. Factored out so the compute
+// cache's key and the GPU host's tile-bank identity are derived from ONE
+// expression — if they drifted, the device would keep serving a stale bank
+// under a key the cache considers current.
+static void GT_AnalysisHashes(const GT_AnalysisKey &key, uint64_t &h1, uint64_t &h2)
+{
+    const uint64_t s = 0x4754414E414C5953ull;   // arbitrary class salt
+    const A_long *k = key.srcState;
+    h1 = gt::HashSeed((uint64_t)(uint32_t)k[0] << 32 | (uint32_t)k[1],
+                      (uint64_t)(uint32_t)k[2] << 32 | (uint32_t)k[3], s);
+    h2 = gt::HashSeed(h1, (uint64_t)(uint32_t)key.seed,
+                      (uint64_t)(uint32_t)key.encodeMode);
+    h2 = gt::HashSeed(h2, (uint64_t)(uint32_t)key.pixelFormat, s);
+}
+
+// Identity of the analysis PRODUCT, for the device-side tile-bank cache. Zero
+// is reserved for "no bank", so a hash that lands there is nudged.
+static uint64_t GT_AnalysisIdentity(const GT_AnalysisKey &key)
+{
+    uint64_t h1 = 0, h2 = 0;
+    GT_AnalysisHashes(key, h1, h2);
+    return h2 ? h2 : 1ull;
+}
+
 extern "C" {
 
 static A_Err GT_CacheGenerateKey(AEGP_CCComputeOptionsRefconP optionsP,
                                  AEGP_CCComputeKeyP out_keyP)
 {
     const GT_AnalysisOptions *opt = static_cast<const GT_AnalysisOptions*>(optionsP);
-    uint64_t s = 0x4754414E414C5953ull;   // arbitrary class salt
     uint64_t h1 = 0, h2 = 0;
-    const A_long *k = opt->key.srcState;
-    h1 = gt::HashSeed((uint64_t)(uint32_t)k[0] << 32 | (uint32_t)k[1],
-                      (uint64_t)(uint32_t)k[2] << 32 | (uint32_t)k[3], s);
-    h2 = gt::HashSeed(h1, (uint64_t)(uint32_t)opt->key.seed,
-                      (uint64_t)(uint32_t)opt->key.encodeMode);
-    h2 = gt::HashSeed(h2, (uint64_t)(uint32_t)opt->key.pixelFormat, s);
+    GT_AnalysisHashes(opt->key, h1, h2);
     out_keyP->bytes[0] = (A_long)(uint32_t)(h1 >> 32);
     out_keyP->bytes[1] = (A_long)(uint32_t)h1;
     out_keyP->bytes[2] = (A_long)(uint32_t)(h2 >> 32);
@@ -463,8 +506,12 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 
     out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION,
                                       STAGE_VERSION, BUILD_VERSION);
-    // Must match resources/GrainTransferPiPL.r literals exactly (0x02000444 /
-    // 0x08001400) or AE rejects with a version/outflags mismatch.
+    // Must match resources/GrainTransferPiPL.r literals EXACTLY (0x02000444 /
+    // 0x2A201400) or AE rejects the plugin at load with a version/outflags
+    // mismatch (25::16). Recompute both sides when either changes:
+    //   out_flags  = 0x02000000 | 0x400 | 0x40 | 0x4               = 0x02000444
+    //   out_flags2 = 0x400 | 0x1000 | 0x00200000 | 0x02000000
+    //              | 0x08000000 | 0x20000000                       = 0x2A201400
     out_data->out_flags  = PF_OutFlag_DEEP_COLOR_AWARE |
                            PF_OutFlag_PIX_INDEPENDENT  |
                            PF_OutFlag_USE_OUTPUT_EXTENT |
@@ -473,6 +520,24 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
                            PF_OutFlag2_SUPPORTS_SMART_RENDER      |
                            PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
                            PF_OutFlag2_I_MIX_GUID_DEPENDENCIES;    // PreRender calls GuidMixInPtr
+
+#ifdef _WIN32
+    // GPU support. BOTH flags are required and they do different jobs:
+    // SUPPORTS_GPU_RENDER_F32 is the actual declaration, and
+    // SUPPORTS_DIRECTX_RENDERING does NOT force the effect onto DirectX —
+    // Adobe's own samples set it alongside CUDA hosts, and §8 hypothesis 1
+    // records that adding/removing it changed nothing on the CUDA path.
+    // ModernEdgeBlur, the suite's other CUDA-only plugin, declares the same
+    // pair. If AE ever did drive DirectX here, GT_CudaDeviceSetup declines
+    // (PF_Err_NONE, gpu_data null) and the CPU renders the frame.
+    //
+    // Declaring it here is necessary but NOT sufficient: GPU_DEVICE_SETUP must
+    // RE-AFFIRM out_flags2 as a plain assignment, or AE offers what_gpu = NONE
+    // at every PreRender forever (AE_GPU_Effects.md §2.2 — the mistake that
+    // cost the suite seven experiments). See gpu/gt_gpu_cuda.cpp.
+    out_data->out_flags2 |= PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 |
+                            PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING;
+#endif
 
     AEGP_SuiteHandler suites(in_data->pica_basicP);
     PF_Handle globH = suites.HandleSuite1()->host_new_handle(sizeof(GT_GlobalData));
@@ -676,6 +741,74 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
         }
     }
 
+#ifdef _WIN32
+    // -----------------------------------------------------------------------
+    // GPU render offer (../../docs/AE_GPU_Effects.md §2.3).
+    //
+    // This is the ONE plugin in the suite whose PreRender withholds the flag on
+    // a condition, and the distinction matters: it withholds on a FACT IT KNOWS
+    // — the analysis for this exact source state is not in the compute cache —
+    // never on ignorance of the device. It does NOT consult what_gpu and does
+    // NOT consult gpu_data. Gating on those is a DEADLOCK, not caution: AE
+    // offers what_gpu = NONE with gpu_data = null at every PreRender until it
+    // has SEEN this flag at least once, so a gate conditioned on a known device
+    // never raises it and is therefore never offered a device. MM_Qualify and
+    // MM_FreqSep both shipped exactly that bug and neither reached the GPU
+    // until 2026-08-04.
+    //
+    // WHY A CACHE GATE IS NEEDED AT ALL. In SMART_RENDER_GPU every world is
+    // device memory, INCLUDING the Grain Source — so the CPU FFT analysis
+    // cannot read it, and §2.4 is explicit that there is no falling back
+    // mid-render. The CPU path's "no analysis yet -> pass the frame through"
+    // branch would therefore become permanent on the GPU: every frame passes
+    // through, the analysis is never computed, grain never appears. Gating on a
+    // cache HIT inverts that. Miss -> the CPU renders this frame, which pays
+    // for the analysis and populates the cache; hit -> every later frame of
+    // that source state goes GPU. That is exactly the plugin's own cost model.
+    //
+    // The probe is KEY-ONLY (AEGP_CheckoutCached, never ComputeIfNeeded): it
+    // must not do work here, only ask whether the work is already done.
+    {
+        bool cached = false;
+        if (!err && prd && prd->hasSource) {
+            GT_AnalysisOptions opt;
+            memset(&opt, 0, sizeof(opt));
+            memcpy(opt.key.srcState, &prd->srcState, sizeof(opt.key.srcState));
+            opt.key.seed = prd->p.seedL;
+            opt.key.encodeMode = prd->encodeMode;
+            // The output world does not exist yet, so the depth comes from the
+            // render context — the whole reason GT_FormatForBitdepth exists.
+            opt.key.pixelFormat =
+                (A_long)GT_FormatForBitdepth(extra->input->bitdepth);
+
+            GT_GlobalData *gg = g;
+            SPBasicSuite *bs = in_data->pica_basicP;
+            AEGP_ComputeCacheSuite1 *ccs = nullptr;
+            if (gg && gg->cache_registered && bs &&
+                bs->AcquireSuite(kAEGPComputeCacheSuite,
+                    kAEGPComputeCacheSuiteVersion1,
+                    (const void**)&ccs) == kSPNoError && ccs) {
+                AEGP_CCCheckoutReceiptP receipt = nullptr;
+                if (ccs->AEGP_CheckoutCached(GT_CACHE_CLASS, &opt, &receipt)
+                        == A_Err_NONE && receipt) {
+                    cached = true;
+                    ccs->AEGP_CheckinComputeReceipt(receipt);
+                }
+                bs->ReleaseSuite(kAEGPComputeCacheSuite,
+                                 kAEGPComputeCacheSuiteVersion1);
+            }
+        }
+
+        if (cached)
+            extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+
+        const PF_LRect &rq = extra->input->output_request.rect;
+        gtgpu::GT_GPULogPreRenderDecision(
+            extra->input->what_gpu, extra->input->gpu_data, cached, cached,
+            (int)(rq.right - rq.left), (int)(rq.bottom - rq.top));
+    }
+#endif
+
     return err;
 }
 
@@ -832,7 +965,12 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
             memcpy(opt.key.srcState, &prd->srcState, sizeof(opt.key.srcState));
             opt.key.seed = prd->p.seedL;
             opt.key.encodeMode = prd->encodeMode;
-            opt.key.pixelFormat = (A_long)fmt;   // re-analyze on a depth switch
+            // Re-analyze on a depth switch. Derived from the render context's
+            // bitdepth, NOT from `fmt`, so PreRender's key-only probe and this
+            // one agree — on the GPU path `fmt` would be GPU_BGRA128 and could
+            // never match. On this path the two are the same value.
+            opt.key.pixelFormat =
+                (A_long)GT_FormatForBitdepth(extra->input->bitdepth);
 
             SPBasicSuite *bs = in_data->pica_basicP;
             const bool haveCache = g && g->cache_registered && bs &&
@@ -996,6 +1134,129 @@ cleanup:
     return err;
 }
 
+#ifdef _WIN32
+// ---------------------------------------------------------------------------
+// SMART_RENDER_GPU — a SEPARATE command from SMART_RENDER (§2.4), not a mode
+// of it. Every world here is device memory.
+//
+// This runs ONLY when PreRender raised GPU_RENDER_POSSIBLE, which it does only
+// on a cache hit, so the analysis is guaranteed present and the source layer is
+// never touched: no checkout, no unpack, no FFT. That is the entire reason the
+// gate exists — see PreRender.
+//
+// The tile bank is handed over as a host pointer plus an identity; the CUDA
+// host uploads it once per analysis and reuses it for every later frame.
+// ---------------------------------------------------------------------------
+static PF_Err
+SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data,
+               PF_SmartRenderExtra *extra)
+{
+    PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
+
+    PF_EffectWorld *src_world = nullptr;
+    PF_EffectWorld *out_world = nullptr;
+    ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, GT_INPUT, &src_world));
+    ERR(extra->cb->checkout_output(in_data->effect_ref, &out_world));
+    if (err || !src_world || !out_world) return err ? err : PF_Err_BAD_CALLBACK_PARAM;
+
+    {
+        const GT_PreRenderData *prd =
+            static_cast<const GT_PreRenderData*>(extra->input->pre_render_data);
+
+        GT_GlobalData *g = nullptr;
+        if (in_data->global_data)
+            g = static_cast<GT_GlobalData*>(*(in_data->global_data));
+
+        gtgpu::GT_GPUJob job;
+        job.W = (int)(src_world->width  < out_world->width  ? src_world->width  : out_world->width);
+        job.H = (int)(src_world->height < out_world->height ? src_world->height : out_world->height);
+
+        AEGP_CCCheckoutReceiptP receipt = nullptr;
+        AEGP_ComputeCacheSuite1 *ccs = nullptr;
+        const GT_AnalysisValue *analysis = nullptr;
+
+        if (prd && prd->hasSource) {
+            GT_AnalysisOptions opt;
+            memset(&opt, 0, sizeof(opt));
+            memcpy(opt.key.srcState, &prd->srcState, sizeof(opt.key.srcState));
+            opt.key.seed = prd->p.seedL;
+            opt.key.encodeMode = prd->encodeMode;
+            opt.key.pixelFormat =
+                (A_long)GT_FormatForBitdepth(extra->input->bitdepth);
+
+            SPBasicSuite *bs = in_data->pica_basicP;
+            if (g && g->cache_registered && bs &&
+                bs->AcquireSuite(kAEGPComputeCacheSuite,
+                    kAEGPComputeCacheSuiteVersion1,
+                    (const void**)&ccs) == kSPNoError && ccs) {
+                // Key-only, exactly as PreRender probed. A miss here would mean
+                // the entry was evicted between PreRender and now; the job then
+                // stays passthrough rather than attempting an analysis that
+                // cannot be done from device memory.
+                if (ccs->AEGP_CheckoutCached(GT_CACHE_CLASS, &opt, &receipt)
+                        == A_Err_NONE && receipt) {
+                    AEGP_CCComputeValueRefconP vp = nullptr;
+                    if (ccs->AEGP_GetReceiptComputeValue(receipt, &vp) == A_Err_NONE)
+                        analysis = static_cast<const GT_AnalysisValue*>(vp);
+                }
+            }
+
+            if (analysis && analysis->bank.valid() && analysis->resp.valid) {
+                const double dsx = in_data->downsample_x.den
+                    ? (double)in_data->downsample_x.num / (double)in_data->downsample_x.den : 1.0;
+
+                gt::StampParams sp = gt::MakeFrameStamp(
+                    (uint64_t)(uint32_t)prd->p.seedL, prd->frame,
+                    analysis->bank.count, analysis->bank.n);
+                sp.amount = (float)(prd->p.amountF / 100.0);
+                sp.trim   = (float)(prd->p.responseF / 100.0);
+                sp.invScale = (float)((100.0 / (prd->p.sizeF < GT_SIZE_MIN
+                                                ? GT_SIZE_DFLT : prd->p.sizeF)) * dsx);
+                sp.encode = (gt::Encode)prd->encodeMode;
+                sp.previewGrainOnly = prd->p.previewB ? true : false;
+
+                job.bankKey    = GT_AnalysisIdentity(opt.key);
+                job.bankData   = analysis->bank.tiles.data();
+                job.bankFloats = analysis->bank.tiles.size();
+                job.tileN      = analysis->bank.n;
+
+                job.tileIndex = sp.tileIndex;
+                job.offX = sp.offX;   job.offY = sp.offY;
+                job.flipX = sp.flipX ? 1 : 0;
+                job.flipY = sp.flipY ? 1 : 0;
+                // Same predicate gt::StampRow uses, so the two paths pick the
+                // same sampling branch for the same Size.
+                job.exact = std::fabs(sp.invScale - 1.f) < 1e-6f ? 1 : 0;
+                job.encode = (int)sp.encode;
+                job.preview = sp.previewGrainOnly ? 1 : 0;
+                job.invScale = sp.invScale;
+                job.amount = sp.amount;
+                job.trim = sp.trim;
+                job.previewBase = GT_PreviewBase((int)sp.encode);
+                gt::PackResponse(analysis->resp, job.resp);
+
+                job.passthrough = false;
+            }
+        }
+
+        ERR(gtgpu::GT_CudaRender(in_data, out_data, extra->input->gpu_data,
+                                 extra->input->device_index, job,
+                                 src_world, out_world));
+
+        // Check in only AFTER the render — the bank pointer above is borrowed
+        // from the receipt and the upload reads it.
+        if (receipt && ccs)
+            ccs->AEGP_CheckinComputeReceipt(receipt);
+        if (ccs && in_data->pica_basicP)
+            in_data->pica_basicP->ReleaseSuite(kAEGPComputeCacheSuite,
+                                              kAEGPComputeCacheSuiteVersion1);
+    }
+
+    (void)err2;
+    return err;
+}
+#endif /* _WIN32 */
+
 // ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
@@ -1022,6 +1283,17 @@ PF_Err EffectMain(PF_Cmd cmd, PF_InData *in_data, PF_OutData *out_data,
             case PF_Cmd_PARAMS_SETUP:     err = ParamsSetup(in_data, out_data, params, output);        break;
             case PF_Cmd_SMART_PRE_RENDER: err = PreRender(in_data, out_data, (PF_PreRenderExtra*)extra); break;
             case PF_Cmd_SMART_RENDER:     err = SmartRender(in_data, out_data, (PF_SmartRenderExtra*)extra); break;
+#ifdef _WIN32
+            // SMART_RENDER_GPU is a SEPARATE command, not a flag on
+            // SMART_RENDER — handling only the latter is a silent CPU render
+            // (AE_GPU_Effects.md §2.4).
+            case PF_Cmd_GPU_DEVICE_SETUP:
+                err = gtgpu::GT_CudaDeviceSetup(in_data, out_data, (PF_GPUDeviceSetupExtra*)extra); break;
+            case PF_Cmd_GPU_DEVICE_SETDOWN:
+                err = gtgpu::GT_CudaDeviceSetdown(in_data, out_data, (PF_GPUDeviceSetdownExtra*)extra); break;
+            case PF_Cmd_SMART_RENDER_GPU:
+                err = SmartRenderGPU(in_data, out_data, (PF_SmartRenderExtra*)extra); break;
+#endif
         }
     } catch (PF_Err &e) { err = e; }
     return err;

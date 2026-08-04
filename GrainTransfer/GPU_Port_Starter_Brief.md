@@ -114,6 +114,23 @@ candidates. Write down which and why. **If you cannot resolve it cleanly, say
 so and stop** rather than shipping a gate that silently never fires — that is
 the exact failure mode this suite has now hit twice.
 
+> **RESOLVED 2026-08-04 — derive it, from `bitdepth`.** `PF_PreRenderInput`
+> carries `short bitdepth` ("bitdepth the effect is being driven in (in bpc)",
+> `AE_Effect.h:2495`), and `PF_SmartRenderInput` carries the same field, so
+> both paths can build the identical key with no output world. The mapping is
+> 1:1 and total: `gtc::PixelBytes` accepts exactly `ARGB32/64/128`, which are
+> exactly 8/16/32 bpc. `GT_FormatForBitdepth` in `GrainTransfer.cpp` is that
+> mapping, and BOTH SmartRender and PreRender now use it.
+>
+> The wrinkle turned out to be **worse than stated, and in a way that only
+> shows on the GPU**: keying on `PF_GetPixelFormat(out_world)` is not merely
+> unavailable in PreRender, it is *wrong* in `SMART_RENDER_GPU`, where every
+> world reports `PF_PixelFormat_GPU_BGRA128` whatever the project depth. A GPU
+> path built on that would mint a key the CPU path can never have populated,
+> miss on every frame, and decline forever — a silent permanent-CPU render
+> that looks exactly like the port having done nothing. Deriving from
+> `bitdepth` is what makes the two paths agree; it is not a stylistic choice.
+
 ## THE WORK, in order
 
 1. **`src/gpu/kernels/` + the prologue trio.** `gt_prologue_hlsl.h`,

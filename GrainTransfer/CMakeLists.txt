@@ -92,6 +92,111 @@ if(MSVC)
     set_source_files_properties(${PIPL_RC} PROPERTIES LANGUAGE RC GENERATED TRUE)
 endif()
 
+# ===========================================================================
+# CUDA kernels -> PTX.
+#
+# The plugin links NO CUDA libraries: gpu/gt_cuda_shim.h loads nvcuda.dll (a
+# DRIVER component) at runtime. Only the .cu -> PTX step needs nvcc, and when
+# the toolkit is absent this whole block SKIPS: no PTX ships, device setup
+# declines CUDA at runtime, AE falls back to the CPU reference. A build machine
+# without CUDA therefore still produces a working plugin — one that renders on
+# the CPU.
+#
+# PTX targets compute_75 (Turing/RTX-class baseline). PTX is a text format the
+# driver JIT-compiles forward for newer GPUs, so one asset serves every card
+# from Turing up.
+#
+# This mirrors MM_Qualify/CMakeLists.txt and EdgeRepair's before it — see
+# EdgeRepair for the full reasoning behind the -ccbin dance below.
+# ===========================================================================
+# -DGT_NVCC_EXE=NOTFOUND forces the no-toolkit path, which is how the graceful
+# skip below gets TESTED on a machine that HAS the toolkit. Asserting that the
+# skip works is not the same as exercising it.
+if(NOT DEFINED GT_NVCC_EXE)
+    file(GLOB GT_NVCC_CANDIDATES
+        "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*/bin/nvcc.exe")
+    if(GT_NVCC_CANDIDATES)
+        list(SORT GT_NVCC_CANDIDATES)
+        list(GET GT_NVCC_CANDIDATES -1 GT_NVCC_EXE)
+    else()
+        find_program(GT_NVCC_EXE nvcc)
+    endif()
+endif()
+
+set(GT_KERNEL_FILES
+    "${SRC_DIR}/gt_core.h"
+    "${SRC_DIR}/gpu/kernels/gt_stamp.kernel")
+
+if(GT_NVCC_EXE)
+    message(STATUS "nvcc: ${GT_NVCC_EXE} - building CUDA_Assets PTX")
+
+    # CUDA 12.8's nvcc cannot digest VS 2026's newest STL (hard static_assert:
+    # "expected CUDA 13.2 or newer", plus EDG chokes on its C++23 patterns).
+    # VS 2026 installs older MSVC toolsets side-by-side — hand nvcc the OLDEST
+    # 14.4x (VS 2022-era v143) via -ccbin. If none exists the flag is omitted
+    # and nvcc uses the default cl, which may fail; install the "MSVC v143"
+    # component or CUDA 13.2+ in that case.
+    file(GLOB GT_CUDA_CCBIN_CANDIDATES
+        "C:/Program Files/Microsoft Visual Studio/*/*/VC/Tools/MSVC/14.4*/bin/Hostx64/x64/cl.exe")
+    set(GT_NVCC_CCBIN "")
+    set(GT_NVCC_ENV "")
+    if(GT_CUDA_CCBIN_CANDIDATES)
+        list(SORT GT_CUDA_CCBIN_CANDIDATES)
+        list(GET GT_CUDA_CCBIN_CANDIDATES 0 GT_CUDA_CCBIN)
+        message(STATUS "nvcc host compiler (ccbin): ${GT_CUDA_CCBIN}")
+        set(GT_NVCC_CCBIN -ccbin "${GT_CUDA_CCBIN}")
+
+        # ccbin alone is not enough: the build environment's INCLUDE (set by
+        # vcvars for the NEWEST toolset) would still hand the old cl the new
+        # STL. Rebuild INCLUDE for the nvcc step from the chosen toolset's own
+        # headers plus the newest installed Windows SDK.
+        get_filename_component(GT_CCBIN_DIR "${GT_CUDA_CCBIN}" DIRECTORY)
+        get_filename_component(GT_MSVC_ROOT "${GT_CCBIN_DIR}/../../.." ABSOLUTE)
+        file(GLOB GT_WINSDK_INC_CANDIDATES
+            "C:/Program Files (x86)/Windows Kits/10/Include/10.*")
+        list(SORT GT_WINSDK_INC_CANDIDATES)
+        list(GET GT_WINSDK_INC_CANDIDATES -1 GT_WINSDK_INC)
+        file(TO_NATIVE_PATH "${GT_MSVC_ROOT}/include" GT_INC_MSVC)
+        file(TO_NATIVE_PATH "${GT_WINSDK_INC}/ucrt"   GT_INC_UCRT)
+        file(TO_NATIVE_PATH "${GT_WINSDK_INC}/shared" GT_INC_SHARED)
+        file(TO_NATIVE_PATH "${GT_WINSDK_INC}/um"     GT_INC_UM)
+        file(TO_NATIVE_PATH "${GT_MSVC_ROOT}" GT_MSVC_ROOT_NATIVE)
+        file(TO_NATIVE_PATH "${GT_CCBIN_DIR}" GT_CCBIN_DIR_NATIVE)
+        # nvcc's own VS detection always lands on the NEWEST toolset, so give
+        # it a fully consistent 14.4x environment instead: --use-local-env
+        # makes it trust INCLUDE; VCToolsInstallDir covers its VS probing; the
+        # PATH prepend satisfies its cl-in-PATH == ccbin consistency check.
+        set(GT_NVCC_ENV ${CMAKE_COMMAND} -E env
+            --modify "PATH=path_list_prepend:${GT_CCBIN_DIR_NATIVE}"
+            "INCLUDE=${GT_INC_MSVC}\;${GT_INC_UCRT}\;${GT_INC_SHARED}\;${GT_INC_UM}"
+            "VCToolsInstallDir=${GT_MSVC_ROOT_NATIVE}\\")
+    endif()
+
+    set(GT_CUDA_ASSETS "${CMAKE_CURRENT_BINARY_DIR}/CUDA_Assets")
+    add_custom_command(
+        OUTPUT "${GT_CUDA_ASSETS}/GrainTransfer_Kernels.ptx"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${GT_CUDA_ASSETS}"
+        COMMAND ${GT_NVCC_ENV} "${GT_NVCC_EXE}" -ptx -arch=compute_75
+                --use-local-env
+                -allow-unsupported-compiler ${GT_NVCC_CCBIN} -o
+                "${GT_CUDA_ASSETS}/GrainTransfer_Kernels.ptx"
+                "${SRC_DIR}/gpu/cuda/gt_kernels.cu"
+        # An edit to the kernel body or to gt_core.h must rebuild the PTX, or
+        # the shipped asset silently drifts from the CPU path it mirrors.
+        DEPENDS "${SRC_DIR}/gpu/cuda/gt_kernels.cu"
+                "${SRC_DIR}/gpu/kernels/gt_prologue_cuda.h"
+                ${GT_KERNEL_FILES}
+        COMMENT "nvcc: gt_kernels.cu -> CUDA_Assets/GrainTransfer_Kernels.ptx"
+        VERBATIM
+    )
+    add_custom_target(gt_cuda_ptx
+        DEPENDS "${GT_CUDA_ASSETS}/GrainTransfer_Kernels.ptx")
+else()
+    message(STATUS "nvcc not found - CUDA_Assets PTX will NOT be built. "
+                   "The plugin still builds and runs; After Effects will "
+                   "render it on the CPU (GPU device setup declines).")
+endif()
+
 add_library(GrainTransfer MODULE
     "${SRC_DIR}/GrainTransfer.cpp"
     "${SRC_DIR}/GrainTransfer_Strings.cpp"
@@ -100,11 +205,16 @@ add_library(GrainTransfer MODULE
     "${SRC_DIR}/core/GT_Grain.cpp"
     "${SRC_DIR}/core/GT_Response.cpp"
     "${SRC_DIR}/core/GT_Stamp.cpp"
+    "${SRC_DIR}/gpu/gt_gpu_cuda.cpp"
     "${KISSFFT_DIR}/kiss_fft.c"
     "${KISSFFT_DIR}/kiss_fftnd.c"
     ${SDK_SOURCES}
     ${PIPL_RC}
 )
+
+if(GT_NVCC_EXE)
+    add_dependencies(GrainTransfer gt_cuda_ptx)
+endif()
 
 set_target_properties(GrainTransfer PROPERTIES
     PREFIX ""
@@ -123,5 +233,19 @@ add_custom_command(TARGET GrainTransfer POST_BUILD
     COMMENT "Installing GrainTransfer to After Effects plugins folder"
     VERBATIM
 )
+
+# Kernel assets must sit NEXT TO the .aex, in AE's own Plug-ins folder — not
+# Common/Plug-ins/7.0/MediaCore, which is Premiere's (../docs/AE_GPU_Effects.md
+# §2.5). A stale PTX here is the classic half-finished deploy: device setup
+# fails to resolve an entry point and declines the whole backend rather than
+# discovering it mid-render, where the worlds are device memory and there is no
+# CPU to fall back to.
+if(GT_NVCC_EXE)
+    add_custom_command(TARGET GrainTransfer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${GT_CUDA_ASSETS}" "${AE_PLUGINS_DIR}/CUDA_Assets"
+        COMMENT "Installing GrainTransfer CUDA_Assets next to the deployed .aex"
+        VERBATIM)
+endif()
 
 message(STATUS "GrainTransfer.aex → ${AE_PLUGINS_DIR}")

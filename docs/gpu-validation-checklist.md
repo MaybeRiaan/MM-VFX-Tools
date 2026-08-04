@@ -18,18 +18,23 @@ Mercury GPU = CUDA). Contracts: [`AE_GPU_Effects.md`](AE_GPU_Effects.md) (host),
 | **MM_Qualify** ("Qualify") | ✅ .aex + PTX | ✅ 128/128, all GPU cases `0.000e+00` | ⏳ **ready to test** |
 | **Modern Edge Blur** | ✅ .aex + PTX | ✅ 84 216 checks, 0 failures | ⏳ **ready to test** |
 | **MM_FreqSep** ("Skin Retouch") | ✅ .aex + PTX | ✅ 27/27, all `0.000e+00` | ⏳ **ready to test** |
-| **Grain Transfer** | ✅ .aex (no GPU path yet) | ✅ DSP gates pass — no GPU coverage | 🚧 **not ported** — see [brief](../GrainTransfer/GPU_Port_Starter_Brief.md) |
+| **Grain Transfer** | ✅ .aex + PTX | ✅ 18/18 kernel parity `0.000e+00`, DSP gates pass | ⏳ **ready to test** |
 | *EdgeRepair* (reference) | ✅ .aex + PTX | ✅ | ✅ **verified 2026-07-30** |
 
 All five suite plugins build clean and every `CUDA_Assets/*.ptx` is deployed
 next to its `.aex` in AE's own Plug-ins folder.
 
-**Grain Transfer has no GPU path at all** — no `src/gpu/`, no kernels, no GPU
-flags. It is already SmartFX, which is the hard prerequisite, so the port is
-additive; and because its per-frame work is a pure per-pixel stamp with no
-neighbourhood reads, it needs **one kernel and no tile planner** — the simplest
-port in the suite. §4 below carries its test steps in advance so the whole set
-can be built and validated in one session once it lands.
+**Grain Transfer was ported 2026-08-04** and is the only plugin here that was
+CUDA-only from its first GPU commit — it was written after §1.2 was measured,
+so it was never aimed at DirectX. One kernel (`gt_stamp`, plus a trivial
+`gt_copy` for passthrough), no tile planner, and its per-pixel math extracted
+into `src/gt_core.h`, which the CPU path now compiles too. That refactor was
+proven output-identical to the previous revision: all 15 deterministic test
+renders byte-for-byte unchanged against `HEAD`, in both encodes, on real
+footage.
+
+**Its gate is the analysis cache, not a memory budget** — the one place in this
+suite where PreRender legitimately withholds `GPU_RENDER_POSSIBLE`. See §4.
 
 ---
 
@@ -44,10 +49,17 @@ correctly, with no error anywhere. Audited 2026-08-04, all green:
 | Modern Edge Blur | ✅ | ✅ | ✅ `if (gpuPossible)` | ✅ |
 | MM_FreqSep | ✅ | ✅ both hosts | ✅ `if (fits)` | ✅ |
 | EdgeRepair | ✅ | ✅ | ✅ `if (gpuPossible)` | ✅ |
-| Grain Transfer | 🚧 none yet | 🚧 | 🚧 | 🚧 |
+| Grain Transfer | ✅ | ✅ | ✅ `if (cached)` | ✅ |
 
-Re-run this audit after the Grain Transfer port — it is four greps and it is
-the difference between a useful AE session and a wasted one.
+Re-run this audit after any GPU change — it is four greps and it is the
+difference between a useful AE session and a wasted one.
+
+**Grain Transfer's column 3 is the one entry that is not `if (it fits)`.** Read
+it carefully before copying it anywhere: `cached` is the result of a key-only
+compute-cache probe, i.e. a fact the host KNOWS about work already done. It is
+not a device capability, and the gate never consults `what_gpu` or `gpu_data` —
+doing so is the deadlock this column exists to prevent, not a stricter version
+of it.
 
 ### The deadlock that column 3 exists to prevent
 
