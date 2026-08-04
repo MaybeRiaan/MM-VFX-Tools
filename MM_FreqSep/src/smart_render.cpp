@@ -275,40 +275,73 @@ FS_PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
 		}
 	}
 
-	// GPU render offer. PF_RenderOutputFlag_GPU_RENDER_POSSIBLE is set only
-	// when (a) AE is driving a framework this build hosts and device setup
-	// succeeded (gpu_data non-null — it stays null on unhandled frameworks, on
-	// machines with no CUDA driver, when the PTX is missing, and on DX devices
-	// without shader doubles), and (b) the WORST-CASE tile plan for this
-	// request fits the device scratch budget — the same FS_PlanTiles the
-	// render will run, fed the same budget, so gate and render cannot
-	// disagree. Anything else renders on the proven CPU path: slower, never
-	// wrong. (Pathological case that trips (b): radius near the 250 max on
-	// 6K+ footage on a small-VRAM card.)
+	// GPU render offer (../../docs/AE_GPU_Effects.md §2.3). Raised on EVERY
+	// frame except one this host can PROVE will not fit: a worst-case tile plan
+	// that does not fit the device scratch budget, run through the SAME
+	// FS_PlanTiles the render runs so gate and render cannot disagree.
+	// Declining here costs a CPU render — slower, never wrong. Discovering it
+	// at SMART_RENDER_GPU costs the frame, because by then the worlds are
+	// device memory and there is nothing to fall back to. (Pathological case
+	// that trips it: radius near the 250 max on 6K+ footage, small-VRAM card.)
+	//
+	// THE GATE NEVER FIRES ON A FRAME IT COULD NOT SIZE — no framework offered
+	// yet, no gpu_data, no budget reading, degenerate rect. Withholding the
+	// flag out of ignorance is a DEADLOCK, not caution: AE offers
+	// what_gpu = NONE with gpu_data = null at every PreRender until it has SEEN
+	// this flag at least once, so a gate conditioned on a known device never
+	// raises it and is therefore never offered a device.
+	//
+	// This is measured, not reasoned. EdgeRepair — the only plugin AE has ever
+	// GPU-rendered — records it verbatim at EdgeRepair.cpp:859: "The original
+	// gate (what_gpu != NONE && gpu_data) never fired because AE offered
+	// what_gpu=NONE at every prerender", and raises unconditionally instead.
+	// THIS FILE CARRIED EXACTLY THAT GATE until 2026-08-04, which is why the
+	// CUDA host added the day before was correct and unreachable: AE rendered
+	// the effect on the CPU, silently and correctly, exactly as it had when the
+	// only host was DX12. MM_Qualify had the identical bug, fixed the same day.
+	// See ModernEdgeBlur's MEB_GPUBudgetAllows for the shape a budget gate must
+	// have.
 #ifdef _WIN32
-	if (!err &&
-		fsgpu::FS_FrameworkSupported(extra->input->what_gpu) &&
-		extra->input->gpu_data) {
+	if (!err) {
 		const PF_LRect &rq = extra->input->output_request.rect;
 		const int outW = rq.right - rq.left;
 		const int outH = rq.bottom - rq.top;
+
+		bool   fits     = true;          // cannot size it -> do NOT withhold
+		double needMB   = 0.0;
+		double budgetMB = 0.0;
+
 		const size_t budget = fsgpu::FS_ScratchBudget(extra->input->what_gpu,
 		                                              extra->input->gpu_data);
-		if (outW > 0 && outH > 0 && budget > 0) {
+		if (fsgpu::FS_FrameworkSupported(extra->input->what_gpu) &&
+			extra->input->gpu_data && budget > 0 && outW > 0 && outH > 0) {
+			budgetMB = (double)budget / (1024.0 * 1024.0);
+
 			// Worst case: the layer honors the full inflation on both axes
-			// (real checkouts can only come back smaller). inflateY is
-			// exactly FS_TileMarginY's value — both derive from the same
-			// per-axis support terms in FS_InflateAmount.
+			// (real checkouts can only come back smaller). inflateY is exactly
+			// FS_TileMarginY's value — both derive from the same per-axis
+			// support terms in FS_InflateAmount.
 			const bool guided = (p.methodL == FS_METHOD_GUIDED);
 			const int srcW = outW + 2 * inflateX;
 			const int srcH = outH + 2 * inflateY;
+
+			const size_t bytesTile = fsgpu::FS_TileBytesPerRow(guided, srcW);
+			const size_t bytesOut  = fsgpu::FS_OutBytesPerRow(outW);
+
 			fsgpu::FS_TilePlan plan;
-			if (fsgpu::FS_PlanTiles(outH, srcH, inflateY, inflateY,
-					fsgpu::FS_TileBytesPerRow(guided, srcW),
-					fsgpu::FS_OutBytesPerRow(outW), budget, &plan)) {
-				extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
-			}
+			fits = fsgpu::FS_PlanTiles(outH, srcH, inflateY, inflateY,
+			                           bytesTile, bytesOut, budget, &plan);
+			if (fits)
+				needMB = (double)((size_t)plan.tileRowsMax * bytesTile +
+				                  (size_t)plan.bandHMax * bytesOut)
+				         / (1024.0 * 1024.0);
 		}
+
+		if (fits)
+			extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+
+		fsgpu::FS_GPULogPreRenderDecision(extra->input->what_gpu,
+			extra->input->gpu_data, fits, outW, outH, needMB, budgetMB);
 	}
 #endif
 

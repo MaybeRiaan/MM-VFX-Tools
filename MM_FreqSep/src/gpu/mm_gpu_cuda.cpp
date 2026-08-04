@@ -399,6 +399,17 @@ size_t FS_CudaScratchBudget(const void *gpu_data)
 	return data ? data->scratchBudget : 0;
 }
 
+void FS_GPULogPreRenderDecision(PF_GPU_Framework what_gpu, const void *gpu_data,
+                                bool raised, int outW, int outH,
+                                double scratchMB, double budgetMB)
+{
+	FS_GPU_LOG_FIRST(s_prerender, 24,
+		"[MM_FreqSep] PRERENDER what_gpu=%d gpu_data=%p out=%dx%d "
+		"need=%.1fMB budget=%.1fMB -> GPU_RENDER_POSSIBLE=%s\n",
+		(int)what_gpu, gpu_data, outW, outH, scratchMB, budgetMB,
+		raised ? "YES" : "no");
+}
+
 // ---------------------------------------------------------------------------
 // Launcher. Every launch goes on AE'S OWN stream and is NOT synchronized here —
 // AE owns stream synchronization. First failure wins and every later launch is
@@ -529,8 +540,11 @@ PF_Err FS_CudaRender(PF_InData *in_data, PF_OutData *out_data,
 			const size_t scratchBytes = (size_t)nPlanes * planeBytes
 			                          + outBytes + matteBytes + weightBytes;
 
+			// Tagged "SMART_RENDER GPU" so one grep answers "did AE actually
+			// dispatch to the GPU?" across every plugin in the suite.
 			FS_GPU_LOG_FIRST(s_plan, 6,
-				"[MM_FreqSep] GPU plan src=%dx%d out=%dx%d off=(%d,%d) guided=%d "
+				"[MM_FreqSep] SMART_RENDER GPU what_gpu=CUDA "
+				"src=%dx%d out=%dx%d off=(%d,%d) guided=%d "
 				"sepR=(%d,%d) guidedR=(%d,%d) smoothR=(%d,%d) view=%d matte=%d "
 				"bands=%d scratch=%.1fMB\n",
 				job.srcW, job.srcH, job.outW, job.outH, job.srcOX, job.srcOY,

@@ -203,6 +203,16 @@ PF_Err FS_CudaRender(PF_InData *in_data, PF_OutData *out_data,
                      PF_EffectWorld *srcWorld, PF_EffectWorld *outWorld,
                      PF_EffectWorld *matteWorld);
 
+// Records the per-frame PreRender GPU decision to %TEMP%\MM_FreqSep_gpu.log —
+// what AE offered, what the frame needs, and whether GPU_RENDER_POSSIBLE was
+// raised. This is THE decisive signal: the GPU failure mode is silent (the
+// effect renders correctly on the CPU), so the frame tells you nothing
+// (../../docs/AE_GPU_Effects.md §5.1). `what_gpu=0` on every line means the
+// gate is shut. No-op when logging is compiled out.
+void FS_GPULogPreRenderDecision(PF_GPU_Framework what_gpu, const void *gpu_data,
+                                bool raised, int outW, int outH,
+                                double scratchMB, double budgetMB);
+
 // --- DirectX 12 (mm_gpu_dx.cpp) — the Premiere path ---------------------
 PF_Err FS_DXDeviceSetup(PF_InData *in_data, PF_OutData *out_data,
                         PF_GPUDeviceSetupExtra *extra);
