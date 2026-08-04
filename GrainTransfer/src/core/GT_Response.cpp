@@ -106,21 +106,33 @@ void MeasureResponse(const float *const rgb[3], const float *const residual[3],
     out.valid = true;
 }
 
-float EvalSigma(const ResponseCurve &c, int channel, float L, float trim)
+GT_Resp CoreResp(const ResponseCurve &c)
 {
     const int K = ResponseCurve::kBands;
-    float s;
-    if (L <= c.lumaMid[0]) {
-        s = c.sigma[channel][0];
-    } else if (L >= c.lumaMid[K - 1]) {
-        s = c.sigma[channel][K - 1];
-    } else {
-        int b = 0;
-        while (b < K - 2 && L > c.lumaMid[b + 1]) ++b;
-        const float t = (L - c.lumaMid[b]) / (c.lumaMid[b + 1] - c.lumaMid[b]);
-        s = c.sigma[channel][b] + t * (c.sigma[channel][b + 1] - c.sigma[channel][b]);
+    GT_Resp r;
+    for (int b = 0; b < K; ++b) r.mid[b] = c.lumaMid[b];
+    for (int ch = 0; ch < 3; ++ch) {
+        for (int b = 0; b < K; ++b) r.sig[ch * K + b] = c.sigma[ch][b];
+        r.flat[ch] = c.flatSigma[ch];
     }
-    return c.flatSigma[channel] + trim * (s - c.flatSigma[channel]);
+    return r;
+}
+
+void PackResponse(const ResponseCurve &c, float *out23)
+{
+    const GT_Resp r = CoreResp(c);
+    const int K = ResponseCurve::kBands;
+    int i = 0;
+    for (int b = 0; b < K; ++b)      out23[i++] = r.mid[b];
+    for (int s = 0; s < 3 * K; ++s)  out23[i++] = r.sig[s];
+    for (int ch = 0; ch < 3; ++ch)   out23[i++] = r.flat[ch];
+}
+
+// The interpolation itself lives in gt_core.h so the kernels compile the same
+// text. This is the ResponseCurve-shaped door onto it.
+float EvalSigma(const ResponseCurve &c, int channel, float L, float trim)
+{
+    return GT_EvalSigma(CoreResp(c), channel, L, trim);
 }
 
 } // namespace gt

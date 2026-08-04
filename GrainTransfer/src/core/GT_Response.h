@@ -19,10 +19,13 @@
 
 #pragma once
 
+#include "../gt_cpu_prologue.h"
+#include "../gt_core.h"
+
 namespace gt {
 
 struct ResponseCurve {
-    static const int kBands = 5;
+    static const int kBands = GT_RESP_BANDS;
 
     float lumaMid[kBands] = {};    // band centers, apply-space luma
     float sigma[3][kBands] = {};   // per-channel grain sigma at each band
@@ -40,7 +43,17 @@ void MeasureResponse(const float *const rgb[3], const float *const residual[3],
 
 // σ for `channel` at apply-space luminance L. Piecewise-linear between band
 // centers, clamped at the ends, then lerped toward flatSigma by (1 − trim),
-// trim in [0,1] (the Response param / 100).
+// trim in [0,1] (the Response param / 100). Forwards to gt_core.h's
+// GT_EvalSigma — the body the GPU kernels compile.
 float EvalSigma(const ResponseCurve &c, int channel, float L, float trim);
+
+// The curve as gt_core.h's flat struct: the form the shared math takes.
+GT_Resp CoreResp(const ResponseCurve &c);
+
+// Flatten into the 23-float block a kernel's GT_RESP_DECL declares — 5 band
+// mids, then 15 sigmas in CHANNEL-MAJOR order (c*5 + b), then 3 flat sigmas.
+// This ORDER is the binding contract with GT_RESP_LOAD; both derive from
+// gt_core.h and gpu/cuda/gt_kernel_args.h asserts they stay contiguous.
+void PackResponse(const ResponseCurve &c, float *out23);
 
 } // namespace gt

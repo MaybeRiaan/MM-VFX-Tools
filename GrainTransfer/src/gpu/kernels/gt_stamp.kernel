@@ -1,0 +1,152 @@
+/*  gt_stamp.kernel — Grain Transfer's whole per-frame GPU path.
+
+    PLATFORM-FREE (gpu-kernel-rules §0). All arithmetic lives in
+    ../../gt_core.h, which the CPU render path compiles too; this file is
+    addressing, buffer access and the BGRA swizzle.
+
+    WHY THERE IS ONLY ONE REAL ENTRY POINT, AND NO TILE PLANNER. Grain
+    Transfer's expensive work — FFT spectrum measure, response measure, RPN
+    tile bake — runs ONCE per source state on the CPU behind
+    AEGP_ComputeCacheSuite1 and never appears here. What is left per frame is
+    pure per-pixel: sample one precomputed tile, modulate by the response
+    curve at the target's own luminance, add in apply space. There are NO
+    image-neighbourhood reads at all, so unlike every other GPU plugin in this
+    suite there is nothing to band, no margins to carry, and no counterpart to
+    QK_PlanTiles. If you find yourself adding one, re-read the algorithm.
+
+    The tile bank IS read out of a neighbourhood, but it is a small fixed
+    resource (at most 8 x 3 x 256 x 256 floats = 6 MB) uploaded once per
+    analysis, not per frame — see gt_gpu_cuda.cpp.
+
+    WORLD LAYOUT. AE hands GPU worlds as PF_PixelFormat_GPU_BGRA128: float
+    BGRA, pitched rows. The CPU path works in packed ARGB (gtc::UnpackRow).
+    BGRA reversed IS ARGB, so the swizzle is index reversal (3 - c) — done
+    here, in the shared kernel, never in a host (rules §2, and qk_tile.kernel
+    for the same decision made the same way).
+*/
+
+#include "../../gt_core.h"
+
+/* ===========================================================================
+   Stamp: src world -> dst world, adding modulated grain from the tile bank.
+
+   Pitches are in FLOATS (rowbytes / 4). W and H are the intersection of the
+   two worlds, so both indexings stay in range.
+   =========================================================================== */
+
+KERNEL_BEGIN(gt_stamp)
+
+BUF_IN (gGtSrc,   0);   /* source world, float BGRA, pitched   */
+BUF_IN (gGtTiles, 1);   /* tile bank, count x 3 x n x n floats */
+BUF_OUT(gGtDst,   0);   /* dest world,  float BGRA, pitched    */
+
+PARAM_BLOCK_BEGIN
+    int   gGtW;            /* pixels per row (intersection)        */
+    int   gGtH;            /* rows                                 */
+    int   gGtSrcPitch;     /* source pitch, in floats              */
+    int   gGtDstPitch;     /* dest pitch, in floats                */
+    int   gGtN;            /* tile size                            */
+    int   gGtTileIndex;    /* which tile of the bank, this frame   */
+    int   gGtOffX;         /* per-frame tile-space offsets         */
+    int   gGtOffY;
+    int   gGtFlipX;        /* per-frame flips (0/1)                */
+    int   gGtFlipY;
+    int   gGtExact;        /* invScale == 1 fast path (0/1)        */
+    int   gGtEncode;       /* GT_ENC_DISPLAY | GT_ENC_LOGLINEAR    */
+    int   gGtPreview;      /* previewGrainOnly (0/1)               */
+    float gGtInvScale;     /* tile-space step per output pixel     */
+    float gGtAmount;       /* Amount / 100                         */
+    float gGtTrim;         /* Response / 100                       */
+    float gGtPreviewBase;  /* GT_PreviewBase(encode)               */
+    GT_RESP_DECL           /* 23 floats — see gt_core.h            */
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(gt_stamp)
+{
+    GT_GUARD(gGtW, gGtH)
+    int x = GID_X, y = GID_Y;
+
+    int so = y * gGtSrcPitch + x * 4;
+    int dof = y * gGtDstPitch + x * 4;
+
+    /* BGRA -> ARGB by index reversal. */
+    float a = gGtSrc[so + 3];
+    float r = gGtSrc[so + 2];
+    float g = gGtSrc[so + 1];
+    float b = gGtSrc[so + 0];
+
+    /* Tile taps. Addressing is shared with the CPU; the fetch is ours,
+       because a structured buffer cannot be passed to a function. */
+    int base, plane, i00, i01, i10, i11;
+    float ax, ay;
+    GT_GrainAddr(gGtN, gGtTileIndex, x, y, gGtOffX, gGtOffY,
+                 gGtFlipX, gGtFlipY, gGtInvScale, gGtExact,
+                 base, plane, i00, i01, i10, i11, ax, ay);
+
+    float gr, gg, gb;
+    if (gGtExact != 0) {
+        gr = gGtTiles[base + 0 * plane + i00];
+        gg = gGtTiles[base + 1 * plane + i00];
+        gb = gGtTiles[base + 2 * plane + i00];
+    } else {
+        int p0 = base + 0 * plane;
+        int p1 = base + 1 * plane;
+        int p2 = base + 2 * plane;
+        gr = GT_Bilerp(gGtTiles[p0 + i00], gGtTiles[p0 + i01],
+                       gGtTiles[p0 + i10], gGtTiles[p0 + i11], ax, ay);
+        gg = GT_Bilerp(gGtTiles[p1 + i00], gGtTiles[p1 + i01],
+                       gGtTiles[p1 + i10], gGtTiles[p1 + i11], ax, ay);
+        gb = GT_Bilerp(gGtTiles[p2 + i00], gGtTiles[p2 + i01],
+                       gGtTiles[p2 + i10], gGtTiles[p2 + i11], ax, ay);
+    }
+
+    GT_Resp resp;
+    GT_RESP_LOAD(resp)
+
+    float oa, orr, og, ob;
+    GT_StampPixel(a, r, g, b, gr, gg, gb,
+                  resp, gGtEncode, gGtAmount, gGtTrim,
+                  gGtPreview, gGtPreviewBase,
+                  oa, orr, og, ob);
+
+    /* ARGB -> BGRA, same reversal. */
+    gGtDst[dof + 3] = oa;
+    gGtDst[dof + 2] = orr;
+    gGtDst[dof + 1] = og;
+    gGtDst[dof + 0] = ob;
+}
+
+KERNEL_END(gt_stamp)
+
+/* ===========================================================================
+   Copy: src world -> dst world, untouched.
+
+   The CPU path's passthrough is a no-op on an in-place buffer; on the GPU the
+   output world is a DIFFERENT allocation, so "change nothing" still has to
+   move every pixel. Swizzle-free — both sides are BGRA, so this is a straight
+   copy and the reversal would cancel anyway.
+   =========================================================================== */
+
+KERNEL_BEGIN(gt_copy)
+
+BUF_IN (gCpSrc, 0);
+BUF_OUT(gCpDst, 0);
+
+PARAM_BLOCK_BEGIN
+    int gCpW;
+    int gCpH;
+    int gCpSrcPitch;
+    int gCpDstPitch;
+PARAM_BLOCK_END
+
+KERNEL_ENTRY(gt_copy)
+{
+    GT_GUARD(gCpW, gCpH)
+    int x = GID_X, y = GID_Y;
+    int so = y * gCpSrcPitch + x * 4;
+    int dof = y * gCpDstPitch + x * 4;
+    for (int c = 0; c < 4; ++c)
+        gCpDst[dof + c] = gCpSrc[so + c];
+}
+
+KERNEL_END(gt_copy)
