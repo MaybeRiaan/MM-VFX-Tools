@@ -32,6 +32,8 @@
 
 #include "AE_Effect.h"
 
+struct MEB_Params;
+
 /* PF_Cmd_GPU_DEVICE_SETUP: initialize the per-device GPU state (load the
    precompiled PTX on AE's CUcontext, resolve every kernel) and hand it to AE
    via extra->output->gpu_data. Frameworks this build does not render on, and a
@@ -48,6 +50,24 @@ PF_Err MEB_GPUDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
    behind PF_RenderOutputFlag_GPU_RENDER_POSSIBLE. Keep in sync with what
    MEB_GPUDeviceSetup actually initializes. */
 bool MEB_GPUFrameworkSupported(PF_GPU_Framework what_gpu);
+
+/* PreRender's scratch budget gate: false only when a GPU render of a W x H
+   frame with these parameters PROVABLY does not fit the device's scratch
+   budget, in which case the caller must leave GPU_RENDER_POSSIBLE unraised and
+   let the CPU pipeline take the frame — slower, never wrong. There is no such
+   choice later: at SMART_RENDER_GPU the worlds are already device memory, so a
+   refused allocation fails the frame outright.
+
+   Returns TRUE whenever the frame cannot be sized (AE has not offered a
+   framework yet, no gpu_data, degenerate rect). The flag must never be withheld
+   out of ignorance: AE offers what_gpu = NONE until it has seen it at least
+   once, so a gate that demanded a known device would deadlock itself shut
+   (../../docs/AE_GPU_Effects.md §2.2-§2.3).
+
+   Pass the full output REQUEST rect: the world SmartRender is handed can only
+   be smaller, so this sizes the worst case. Same planner the render runs. */
+bool MEB_GPUBudgetAllows(PF_GPU_Framework what_gpu, const void *gpu_data,
+                         A_long W, A_long H, const MEB_Params &prm);
 
 /* Diagnostic (MEB_GPU_LOG in ModernEdgeBlur_GPU.cpp ->
    %TEMP%\ModernEdgeBlur_gpu.log): records the per-frame PreRender GPU decision
@@ -69,7 +89,6 @@ void MEB_GPULogPreRenderDecision(PF_GPU_Framework what_gpu,
    and the passthrough case — mirroring SmartRender's CPU pipeline pass for
    pass. There is NO CPU fallback after a GPU error: the worlds are device
    memory and CPU code cannot address them. */
-struct MEB_Params;
 PF_Err MEB_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data,
                           PF_SmartRenderExtra *extra,
                           PF_EffectWorld *src_world, PF_EffectWorld *out_world,

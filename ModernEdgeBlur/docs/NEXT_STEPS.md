@@ -11,14 +11,20 @@
 > flags, PreRender's `GPU_RENDER_POSSIBLE`, the `what_gpu` fork in SmartRender,
 > and three new `EffectMain` cases. PiPL `out_flags2` → `0x2A001400`.
 >
+> **Added 2026-08-04:** the PreRender scratch budget gate (Priority 5, now done
+> in code) — frames whose device scratch will not fit are sent to the CPU
+> instead of failing mid-render. It also pulled the render's host-side pass
+> decisions out into one `MEB_PlanFrame`, which the gate and the render share.
+> Builds clean; parity gate still 0 failures.
+>
 > Full write-up: [Architecture.md → GPU path](Architecture.md#gpu-path-added-2026-08-03).
 >
 > **NEXT, in order:**
-> 1. **Build it.** Nothing here has been compiled yet. The nvcc PTX step and the
->    fxc type-check step are both new in CMakeLists.txt and both skip gracefully
->    if their tool is missing.
-> 2. **Run the parity gate:** `.\tests\build_tests.ps1`. Headless, no AE, no GPU.
->    It must pass before any in-AE testing is worth doing.
+> 1. ~~**Build it.**~~ DONE 2026-08-04 — builds clean, no warnings, via the suite
+>    script `..\build.ps1`. The nvcc PTX step and the fxc type-check step both
+>    ran (CUDA 12.8, Windows SDK 10.0.26100 present on this box).
+> 2. ~~**Run the parity gate.**~~ DONE 2026-08-04 — `.\tests\build_tests.ps1`,
+>    **84216 checks, 0 failures**. Re-run it after any formula change.
 > 3. **Spot-check CPU perf** on the 4.6K comp against the numbers below
 >    (TOTAL avg 351 ms, worst 580 ms). The extraction into `MEB_CoreMath.h` is
 >    inline + `__restrict` and should be free, but the blocked vertical loops are
@@ -29,6 +35,9 @@
 >    `what_gpu=0` at every PreRender means it is shut — go to
 >    `../../docs/AE_GPU_Effects.md` §2.2 before theorising. Then A/B the same
 >    frame against Mercury → *Software Only*; target max-abs ≤ 1e-5.
+>    **While you are in that log, take the scratch-budget measurement Priority 5
+>    is waiting on** — the `PRERENDER budget` and `GPU scratch grown` lines are
+>    there for it, and it is a read, not an experiment.
 > 5. Only then: consider the perf levers noted in Architecture.md (shared-memory
 >    blur tiles; fusing the vertical blur with the composite to save a full
 >    frame of bandwidth).
@@ -130,14 +139,12 @@ Timing labels changed: `Unpack`→`Ingest`, `ZeroRGB` gone (fused), `Composite` 
 
 A second plugin (`EdgeRepair.aex`) was prototyped in an earlier session but removed in the clean-slate rebuild. It will be reintroduced as a separate `add_meb_plugin` entry in CMakeLists.txt once ModernEdgeBlur v1 is fully validated. The `add_meb_plugin` CMake function already supports multiple targets.
 
-## Priority 5 — GPU scratch budget gate in PreRender (TODO, 2026-08-03)
+## Priority 5 — GPU scratch budget gate in PreRender — DONE in code (2026-08-04), one number still unmeasured
 
-**Deferred deliberately.** Planned for the session that also revisits MM_FreqSep,
-because that plugin already has the thing to copy.
-
-**The problem.** The GPU path asks AE for one scratch block sized to the frame
-and the active parameters — 11 floats/pixel at the defaults, 12 with Shift Edge
-active (per-buffer table in [Architecture.md](Architecture.md) → "Device memory"):
+**The problem it solves.** The GPU path asks AE for one scratch block sized to
+the frame and the active parameters — 11 floats/pixel at the defaults, 12 with
+Shift Edge active (per-buffer table in [Architecture.md](Architecture.md) →
+"Device memory"):
 
 | Frame | default | + Shift Edge | passthrough |
 |---|---|---|---|
@@ -149,28 +156,72 @@ If `AllocateDeviceMemory` refuses, `MEB_RenderCUDA` returns
 `PF_Err_OUT_OF_MEMORY` and **the frame fails** — it does not fall back to the CPU
 pipeline. It cannot: by the time `PF_Cmd_SMART_RENDER_GPU` runs, AE has already
 handed over input and output worlds that live in device memory, and CPU code
-cannot address them. The decision has to be taken earlier, in PreRender, where
-declining costs nothing.
+cannot address them. So the decision is taken in PreRender, where declining costs
+only speed.
 
-**The fix.** What MM_FreqSep already does and calls its "budget gate"
-(`../../docs/gpu-kernel-rules.md` §6): compute the worst-case scratch size in
-PreRender and raise `PF_RenderOutputFlag_GPU_RENDER_POSSIBLE` only when it fits a
-budget. Infeasible frames then render on the CPU — slower, never wrong. Two
-properties of that version are worth copying rather than reinventing:
+**What was built** (`MEB_GPUBudgetAllows` in `src/ModernEdgeBlur_GPU.cpp`, called
+from `PreRender`; full description in [Architecture.md](Architecture.md) →
+"The budget gate"):
 
-- **The gate and the render must run the SAME size calculation**, so they cannot
-  disagree about whether a frame fits. Here that means calling `MEB_BuildLayout`
-  from PreRender too — it already takes nothing but `W`, `H`, four booleans and
-  the two kernel sizes, so it is a lift, not a rewrite.
-- MM_FreqSep budgets **¼ of dedicated VRAM, clamped to [256 MB, 1 GB]**. That
-  fraction is a judgement call rather than a measurement, which is the main
-  reason this is deferred instead of guessed at now.
+- **One planner, both callers — the property that was worth copying.**
+  `MEB_PlanFrame` now owns every host-side decision the render used to make
+  inline (which passes run, the Gaussian weights, the morphology geometry) and
+  ends in the single `MEB_BuildLayout` call. PreRender's gate and
+  `MEB_RenderCUDA` both go through it, so the size approved and the size
+  allocated come from one call site and cannot drift apart.
+- Sizes the full output **request** rect (the render's world is clipped into it)
+  against the **currently held** scratch, which is grow-only and so can only be
+  larger by render time. Both worst cases err toward "the render needs less".
+- **A frame the held scratch already covers always passes**, because that render
+  allocates nothing at all. This is the steady state, and it means a card whose
+  free VRAM AE's cache has since eaten keeps GPU-rendering instead of quietly
+  reverting to the CPU.
+- **The gate never fires on a frame it could not size** — no framework offered
+  yet, no `gpu_data`, unreadable params. Withholding the flag out of ignorance is
+  the deadlock EdgeRepair burned seven experiments on (AE offers
+  `what_gpu = NONE` until it has seen the flag), and it is why this deliberately
+  does *not* copy MM_FreqSep's `FrameworkSupported(what_gpu) && gpu_data`
+  precondition.
 
-**Measure before picking a fraction:** whether AE's `AllocateDeviceMemory`
-already degrades gracefully under pressure, or whether it competes with AE's own
-frame cache. The answer decides whether ¼ of VRAM is generous or reckless.
+**Two deliberate deviations from MM_FreqSep** (`../../docs/gpu-kernel-rules.md`
+§6), both traceable to one structural difference: its budget feeds a **tile
+planner**, so the number only moves how many bands a frame is cut into and never
+correctness; here there is no tiling and the budget is a hard feasibility
+threshold.
 
-**Why it is not urgent.** On the test box (RTX 3070 Ti, 8 GB) even 4.6K with
+1. **No 1 GB upper clamp.** Harmless there. Here the same clamp would mean
+   "never GPU-render above about 5K", on any card, forever — and 8K comps are
+   exactly the case this gate was written for.
+2. **¼ of FREE VRAM, re-measured at every gated PreRender**, not ¼ of dedicated
+   VRAM cached at device setup. Free is the better question (whatever AE's cache
+   holds is already subtracted for us), and re-measuring matters because the
+   cache is cold precisely when a device is set up — the least representative
+   moment to take the reading. MM_FreqSep's CUDA host had already moved to free
+   VRAM; this only adds the per-frame refresh. Its unconditional 256 MB floor is
+   also conditioned here on ≥512 MB actually being free, since promising 256 MB
+   on a card with 200 MB free is harmless when it picks a band height and a
+   guaranteed hard frame failure when it is the whole gate.
+
+**STILL UNMEASURED — the ¼ fraction.** Deliberately left at MM_FreqSep's value
+rather than invented, so the suite has one number to revise instead of two. What
+decides whether a quarter is generous or reckless is still the original question:
+does AE's `AllocateDeviceMemory` take memory straight from the free pool, or does
+it compete with AE's own frame cache? **The instrumentation to answer it is now
+in place** — take the reading during the first in-AE GPU render (step 4 at the
+top of this file), from `%TEMP%\ModernEdgeBlur_gpu.log`:
+
+- `PRERENDER budget WxH need=… held=… free=… budget=… -> …` — one line per gated
+  PreRender, first 10.
+- `GPU scratch grown to N MB (free X -> Y MB)` — free VRAM either side of the
+  real allocation.
+
+Read them together: if `X - Y ≈ N`, the allocator is taking from the free pool
+and a quarter is very conservative — raise it. If the drop is much larger than
+`N`, or an allocation succeeds at a free level below `N`, it is evicting AE's
+cache to serve us, and a quarter is right or even generous. Either way, replace
+this section with the measurement.
+
+**Why it was not urgent.** On the test box (RTX 3070 Ti, 8 GB) even 4.6K with
 Shift Edge is ~700 MB, comfortable. It matters for 8K comps, laptop GPUs, and
 comps stacking several GPU-accelerated effects.
 

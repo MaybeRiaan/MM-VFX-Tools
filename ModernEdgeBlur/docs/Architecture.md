@@ -200,8 +200,42 @@ render thread — so Multi-Frame Rendering does not multiply it. A mutex seriali
 scratch growth and the whole enqueue sequence; AE's stream is FIFO, so
 serialising enqueue serialises execution (AE_GPU_Effects.md §4).
 
-If the allocation is refused the render fails rather than degrading silently:
-once the worlds are on the device there is no CPU fallback.
+#### The budget gate (PreRender)
+
+If the allocation is refused inside `SMART_RENDER_GPU` the **frame fails** — the
+worlds are already device memory, so there is no CPU to fall back to. So the
+decision is taken in PreRender instead, where declining costs only speed:
+`MEB_GPUBudgetAllows` sizes the frame and leaves `GPU_RENDER_POSSIBLE` unraised
+when it will not fit. Infeasible frames render on the CPU: slower, never wrong.
+
+- **One planner, both callers.** `MEB_PlanFrame` makes every host-side decision
+  — which passes run, the Gaussian weights, the morphology geometry — and ends
+  in the single `MEB_BuildLayout` call. PreRender's gate and `MEB_RenderCUDA`
+  both go through it, so the size approved and the size allocated cannot drift.
+- **Worst case on both axes.** The gate sizes the full output *request*
+  (the render's world is clipped into it) against the *currently held* scratch
+  (grow-only, so it can only be larger by render time).
+- **Already-held scratch always passes.** After the first frame of a given size
+  the render allocates nothing, so no budget can refuse it — a card whose free
+  memory AE's cache has since eaten keeps GPU-rendering rather than silently
+  reverting to the CPU.
+- **Budget = ¼ of FREE VRAM** (`cuMemGetInfo`), floored at 256 MB while ≥512 MB
+  is actually free, **no upper clamp**, 384 MB if the query is unavailable.
+
+Two deliberate deviations from MM_FreqSep's version of this gate
+(`../../docs/gpu-kernel-rules.md` §6), both because its budget feeds a *tile
+planner* — where the number only picks a band height — while here it is a hard
+feasibility threshold:
+
+1. **No 1 GB ceiling.** Harmless there; here it would mean "never GPU-render
+   above ~5K", on any card, forever — and 8K is what this gate is for.
+2. **Free VRAM, re-measured per gated PreRender**, not a fraction of dedicated
+   VRAM cached at device setup. AE's frame cache is cold exactly when a device
+   is set up, which is the least representative moment to measure.
+
+The ¼ fraction itself is inherited rather than measured — see
+[NEXT_STEPS.md](NEXT_STEPS.md) Priority 5 for the in-AE measurement that settles
+it, and the log lines that take it.
 
 ### Validation
 
@@ -213,7 +247,9 @@ once the worlds are on the device there is no CPU fallback.
 - **In AE:** log check first (`%TEMP%\ModernEdgeBlur_gpu.log`, `MEB_GPU_LOG`) —
   `what_gpu=3` at PreRender and `SMART_RENDER GPU` entries mean the gate is
   open; `what_gpu=0` at every PreRender means it is shut, and
-  AE_GPU_Effects.md §2.2 is the first place to look. Then A/B the same frame
+  AE_GPU_Effects.md §2.2 is the first place to look. `PRERENDER budget … TOO BIG
+  - CPU` means the gate is open but this frame was deliberately sent to the CPU.
+  Then A/B the same frame
   against Mercury → *Software Only*. Target max-abs ≤ 1e-5 per channel: fma
   contraction on real silicon lands well inside that.
 - **Not yet done:** the in-AE A/B. Everything above it is code-complete and
@@ -229,7 +265,11 @@ the CPU, correctly, with no error):
 2. `GPU_DEVICE_SETUP` **re-affirms** `out_flags2 = SUPPORTS_GPU_RENDER_F32` —
    a plain assignment, not an OR. This is the one that cost Edge Repair seven
    failed experiments.
-3. `PreRender` raises `GPU_RENDER_POSSIBLE` unconditionally.
+3. `PreRender` raises `GPU_RENDER_POSSIBLE`. Unconditionally except for frames
+   the budget gate can *prove* will not fit (see "The budget gate" above) — it
+   never withholds the flag on a frame it could not size, because AE offers
+   `what_gpu = NONE` until it has seen the flag and a gate that demanded a known
+   device would deadlock itself shut.
 4. `PF_Cmd_SMART_RENDER_GPU` is handled — it is a **separate command** from
    `PF_Cmd_SMART_RENDER`.
 5. The `.aex` and `CUDA_Assets/` install to **AE's** Plug-ins folder, not

@@ -922,13 +922,32 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
     // takes the GPU path, even with SUPPORTS_GPU_RENDER_F32 declared. It
     // declares POSSIBILITY, not a demand — AE still decides per frame, and
     // expect what_gpu = NONE for thumbnails and heavily downsampled draft
-    // renders even when the GPU path is working perfectly. Raised
-    // unconditionally, matching Adobe's AE GPU sample and EdgeRepair: gating it
-    // on `what_gpu != NONE` deadlocks, because AE offers NONE until it has seen
-    // the flag. Any frame we do not flag renders on the CPU pipeline — the
-    // always-correct reference.
+    // renders even when the GPU path is working perfectly.
+    //
+    // Raised unconditionally EXCEPT for one case the GPU path cannot survive:
+    // a frame whose device scratch will not fit (MEB_GPUBudgetAllows — 641 MB
+    // at 4.6K, more at 8K, all-or-nothing). Declining here costs a CPU render;
+    // discovering it at SMART_RENDER_GPU costs the frame, because by then the
+    // worlds are device memory and there is nothing to fall back to.
+    //
+    // The gate NEVER fires on a frame it could not size — no framework offered
+    // yet, no gpu_data, params unreadable. Withholding the flag out of
+    // ignorance is the deadlock EdgeRepair burned seven experiments on: AE
+    // offers what_gpu = NONE until it has seen the flag, so gating the flag on
+    // `what_gpu != NONE` means it is never raised and never offered a device.
     {
-        const bool gpuPossible = !err;
+        MEB_Params gp; AEFX_CLR_STRUCT(gp);
+        // A param-read failure must not fail PreRender (it never read params
+        // before this gate existed) — it just leaves the frame ungated.
+        const bool haveParams = (ReadParams(in_data, &gp) == PF_Err_NONE);
+
+        const PF_LRect &gpu_req = extra->input->output_request.rect;
+        const bool gpuPossible = !err &&
+            (!haveParams ||
+             MEB_GPUBudgetAllows(extra->input->what_gpu, extra->input->gpu_data,
+                                 gpu_req.right - gpu_req.left,
+                                 gpu_req.bottom - gpu_req.top, gp));
+
         if (gpuPossible)
             extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
         MEB_GPULogPreRenderDecision(extra->input->what_gpu,

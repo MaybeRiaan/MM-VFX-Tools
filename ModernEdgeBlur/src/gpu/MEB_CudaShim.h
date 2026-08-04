@@ -15,7 +15,8 @@
     additionally needs MemcpyHtoDAsync, because Modern Edge Blur uploads its
     Gaussian weights (built on the host in the CPU path's own MakeBlurKernel /
     MakeBlendKernel, so both paths convolve with the same bits — see
-    gpu-kernel-rules.md §3.1).
+    gpu-kernel-rules.md §3.1), and MemGetInfo for PreRender's scratch budget
+    gate (same entry point MM_FreqSep's fs_cuda_shim.h adds for the same job).
 
     Context discipline (per PF_GPUDeviceSuite1's header note): push AE's
     CUcontext around every driver call sequence and pop after — MEB_CudaCtxGuard
@@ -56,6 +57,7 @@ typedef CUresult (__stdcall *MEB_PFN_cuLaunchKernel)(
     void**);                                    /* extra (NULL) */
 typedef CUresult (__stdcall *MEB_PFN_cuMemcpyHtoDAsync)(
     CUdeviceptr, const void*, size_t, CUstream);
+typedef CUresult (__stdcall *MEB_PFN_cuMemGetInfo)(size_t*, size_t*);
 
 /* Loaded once per process; immutable after initialization (write-once, then
    read-only — MFR-safe by the same argument as a const table; the C++11
@@ -69,6 +71,10 @@ struct MEB_CudaApi {
     MEB_PFN_cuModuleGetFunction  ModuleGetFunction = nullptr;
     MEB_PFN_cuLaunchKernel       LaunchKernel      = nullptr;
     MEB_PFN_cuMemcpyHtoDAsync    MemcpyHtoDAsync   = nullptr;
+    /* Soft-optional, deliberately NOT part of the `loaded` gate: a missing
+       symbol must not disable CUDA rendering. Absent -> PreRender's budget
+       gate falls back to a fixed default (ModernEdgeBlur_GPU.cpp). */
+    MEB_PFN_cuMemGetInfo         MemGetInfo        = nullptr;
 
     static const MEB_CudaApi& Get()
     {
@@ -99,6 +105,8 @@ private:
                                   ::GetProcAddress(h, "cuLaunchKernel"));
         a.MemcpyHtoDAsync   = reinterpret_cast<MEB_PFN_cuMemcpyHtoDAsync>(
                                   ::GetProcAddress(h, "cuMemcpyHtoDAsync_v2"));
+        a.MemGetInfo        = reinterpret_cast<MEB_PFN_cuMemGetInfo>(
+                                  ::GetProcAddress(h, "cuMemGetInfo_v2"));
 
         a.loaded = a.CtxPushCurrent && a.CtxPopCurrent &&
                    a.ModuleLoadDataEx && a.ModuleUnload &&

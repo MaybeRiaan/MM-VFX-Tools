@@ -75,6 +75,7 @@
 #include "gpu/MEB_CudaShim.h"      // runtime nvcuda.dll driver-API surface
 #include "core/MEB_CoreMath.h"     // the CPU path's own Gaussian kernel builders
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <mutex>
@@ -192,8 +193,15 @@ struct MEB_GPUData {
     // allocates nothing — the device-side analogue of the CPU path's MEB_Pool,
     // except this one is per DEVICE (guarded by renderLock) rather than per
     // render thread. Freed at device setdown.
-    void            *scratch      = nullptr;
-    size_t           scratchBytes = 0;
+    //
+    // scratchBytes is ATOMIC because PreRender's budget gate reads it without
+    // taking renderLock — blocking a PreRender behind a whole enqueue sequence
+    // to read one size_t would be absurd. The gate only needs it as a hint, and
+    // the hint is safe in the one direction that matters: the block is
+    // grow-only, so a value read at PreRender can only be an UNDER-estimate of
+    // what is held by render time, never an over-estimate.
+    void                *scratch      = nullptr;
+    std::atomic<size_t>  scratchBytes{ 0 };
 };
 
 // Kernel launch params — must match MEB_PassParamsCu in
@@ -569,27 +577,259 @@ static void MEB_BuildLayout(MEB_GPULayout &L, A_long W, A_long H,
     L.total = off;
 }
 
+// ---------------------------------------------------------------------------
+// The frame plan: every host-side decision a GPU render makes before it
+// enqueues anything — which passes run, the Gaussian weights, the morphology
+// geometry, and the scratch layout that follows from all of it.
+//
+// THIS IS THE SINGLE PLANNER. PreRender's budget gate and MEB_RenderCUDA both
+// call it, so the size the gate approves and the size the render allocates come
+// from one MEB_BuildLayout call site and cannot drift apart. (MM_FreqSep states
+// the same property for FS_PlanTiles — ../../docs/gpu-kernel-rules.md §6.)
+// ---------------------------------------------------------------------------
+struct MEB_FramePlan {
+    bool  do_blur     = false;
+    bool  do_blend    = false;
+    bool  do_shift    = false;
+    bool  passthrough = false;
+    bool  erodeActive = false;
+
+    std::vector<float> kBlur, kBlend;
+    int   halfBlur  = 0;
+    int   halfBlend = 0;
+
+    int   morphRi = 0;      // ceil(|Shift Edge|)
+    int   dilate  = 0;      // 1 = grow, 0 = shrink
+    float morphR2 = 0.f;    // |Shift Edge|^2
+
+    int   octAxis = 0;      // octagon structuring element, axis half-length
+    int   octDiag = 0;      // ...and diagonal half-length
+
+    MEB_GPULayout L;
+};
+
+static void MEB_PlanFrame(MEB_FramePlan &P, A_long W, A_long H,
+                          const MEB_Params &prm)
+{
+    // Thresholds copied from SmartRender verbatim, INCLUDING which comparison
+    // is done in double and which in float. They differ, and the difference is
+    // observable: `do_blend` gates the passthrough decision on the double, but
+    // OctagonErode / MakeBlendKernel gate themselves on the float. A radius
+    // that rounds up to exactly 0.5f across that cast takes the erode branch
+    // while `do_blend` is false, and the GPU has to agree.
+    P.do_blur     = (prm.blur_amountF  >= 0.5f);
+    P.do_blend    = (prm.blend_radiusF >= 0.5f);
+    P.do_shift    = (std::abs((float)prm.shift_edgeF) >= 0.5f);
+    P.passthrough = !P.do_blur && !P.do_blend;
+
+    const float blendR = (float)prm.blend_radiusF;
+    P.erodeActive = !P.passthrough && (blendR >= 0.5f);   // <- OctagonErode's own gate
+
+    // Gaussian weights: built by the CPU path's OWN kernel builders and
+    // uploaded verbatim, so both paths convolve with identical bits
+    // (gpu-kernel-rules.md §3.1 — a GPU-side rebuild would diverge in the last
+    // bits and turn the parity gate into a coin flip).
+    if (P.do_blur)     P.kBlur  = MakeBlurKernel((float)prm.blur_amountF);
+    if (P.erodeActive) P.kBlend = MakeBlendKernel(blendR);
+    P.halfBlur  = P.kBlur.empty()  ? 0 : (int)(P.kBlur.size()  / 2);
+    P.halfBlend = P.kBlend.empty() ? 0 : (int)(P.kBlend.size() / 2);
+
+    // Shift Edge geometry, spelled exactly as MorphPlane spells it.
+    const float shiftR = std::abs((float)prm.shift_edgeF);
+    P.morphRi = P.do_shift ? (int)std::ceil(shiftR) : 0;
+    P.morphR2 = shiftR * shiftR;
+    P.dilate  = ((float)prm.shift_edgeF > 0.f) ? 1 : 0;
+
+    // Octagon half-lengths, from the shared helpers so CPU and GPU cannot
+    // disagree about the structuring element's size.
+    P.octAxis = P.erodeActive ? MEB_OctagonAxisHalf(blendR) : 0;
+    P.octDiag = P.erodeActive ? MEB_OctagonDiagHalf(blendR) : 0;
+
+    MEB_BuildLayout(P.L, W, H, P.do_shift, !P.passthrough, P.do_blur,
+                    P.erodeActive, P.kBlur.size(), P.kBlend.size());
+}
+
+// ---------------------------------------------------------------------------
+// PreRender's scratch budget gate.
+//
+// WHY IT EXISTS. The layout above is all-or-nothing for a full frame — 641 MB
+// at 4.6K, 1.5 GB at 8K. If AllocateDeviceMemory refuses it inside
+// SMART_RENDER_GPU the frame FAILS: the input and output worlds are already
+// device memory by then and CPU code cannot address them, so there is nothing
+// to fall back to. The decision has to be taken in PreRender, where declining
+// costs nothing but speed.
+//
+// WHERE IT DIVERGES FROM MM_FreqSep'S (gpu-kernel-rules.md §6), and why. That
+// one budgets a fraction of VRAM and feeds it to a TILE PLANNER, so the number
+// only moves how many bands a frame is cut into — never correctness. Here there
+// is no tiling: the budget is a hard feasibility threshold, so two of its
+// choices do not carry over.
+//
+//   1. NO FIXED UPPER CLAMP. MM_FreqSep clamps to 1 GB because no band ever
+//      needs more and it is polite not to hog the card. The same clamp here
+//      would mean "never GPU-render above about 5K", permanently, on any card —
+//      and 8K comps are precisely the case this gate was written for.
+//   2. MEASURED AGAINST FREE VRAM, PER FRAME. Its DX host takes a quarter of
+//      DEDICATED VRAM once at device setup; its CUDA host already moved to FREE
+//      VRAM, which is the better question, because whatever AE's frame cache is
+//      holding is subtracted for us. This goes one step further and re-measures
+//      at every gated PreRender rather than caching the setup-time answer: the
+//      cache is cold when a device is set up and warm minutes later, so a cached
+//      number is measuring the one moment the answer is least representative.
+//      cuMemGetInfo is a driver query, no sync, microseconds against a render.
+//
+// THE FRACTION IS THE ONE UNMEASURED NUMBER — kept at MM_FreqSep's quarter
+// rather than invented, so the suite has one value to revise, not two. What
+// decides whether a quarter is generous or reckless is whether AE's own
+// allocator competes with its frame cache under pressure, and that needs an
+// in-AE measurement (docs/NEXT_STEPS.md). The log lines below exist to take it:
+// they record free VRAM, the budget, and the requirement at every gated
+// PreRender, and MEB_EnsureScratch records free VRAM either side of the real
+// allocation.
+// ---------------------------------------------------------------------------
+
+// Free device memory in bytes, 0 if unknown. Caller must already hold AE's
+// CUcontext current.
+static size_t MEB_QueryFreeVRAM(const MEB_CudaApi &cu)
+{
+    if (!cu.loaded || !cu.MemGetInfo) return 0;
+    size_t freeBytes = 0, totalBytes = 0;
+    if (cu.MemGetInfo(&freeBytes, &totalBytes) != MEB_CUDA_SUCCESS) return 0;
+    return freeBytes;
+}
+
+// Budget in bytes for ONE scratch allocation. Pushes AE's context itself, so
+// call it from PreRender (nothing is current there), not from inside a render's
+// existing guard.
+static size_t MEB_CudaScratchBudget(const MEB_GPUData *g, size_t *freeOut)
+{
+    // No measurement available (no MemGetInfo, push failed, driver refused):
+    // a fixed default, same value MM_FreqSep falls back to. Big enough for HD
+    // and UHD, too small for 4.6K — the conservative direction.
+    const size_t kFallback  = 384ull << 20;
+    const size_t kMinBudget = 256ull << 20;
+
+    const MEB_CudaApi &cu = MEB_CudaApi::Get();
+    if (!cu.loaded) return kFallback;
+
+    MEB_CudaCtxGuard ctx(cu, g->cuCtx);
+    if (!ctx.pushed) return kFallback;
+
+    const size_t freeBytes = MEB_QueryFreeVRAM(cu);
+    if (freeBytes == 0) return kFallback;
+    if (freeOut) *freeOut = freeBytes;
+
+    size_t budget = freeBytes / 4;
+
+    // Floor, so a momentarily busy card does not refuse work an HD frame (91 MB)
+    // would comfortably fit. Applied only while the card can plausibly serve it:
+    // MM_FreqSep floors unconditionally, which would have us promise 256 MB on a
+    // card with 200 MB free — harmless where the number only picks a band height,
+    // a guaranteed hard frame failure here.
+    if (budget < kMinBudget && freeBytes >= 2u * kMinBudget) budget = kMinBudget;
+
+    return budget;
+}
+
+bool MEB_GPUBudgetAllows(PF_GPU_Framework what_gpu, const void *gpu_dataPV,
+                         A_long W, A_long H, const MEB_Params &prm)
+{
+    // Nothing to size the frame against. Return true — do NOT shut the gate on
+    // ignorance. AE offers what_gpu = NONE at every PreRender until it has seen
+    // GPU_RENDER_POSSIBLE at least once, so a gate that required a known device
+    // to raise the flag would never raise it and never be offered a device: the
+    // deadlock EdgeRepair spent seven experiments on (AE_GPU_Effects.md §2.2,
+    // §2.3 — "unconditional is fine"). This gate exists to decline frames it can
+    // PROVE do not fit, and nothing else.
+    if (!MEB_GPUFrameworkSupported(what_gpu) || !gpu_dataPV) return true;
+    if (W <= 0 || H <= 0) return true;
+
+    const MEB_GPUData *g = static_cast<const MEB_GPUData*>(gpu_dataPV);
+
+    MEB_FramePlan P;
+    MEB_PlanFrame(P, W, H, prm);
+
+    // Worst case on two axes, both erring toward "the render will need less":
+    //   - W x H is the full output REQUEST; the world SmartRender is handed is
+    //     clipped to our result_rect, which PreRender clips into that request.
+    //   - the cached block is grow-only, so it can only be bigger by then.
+    const size_t held = g->scratchBytes.load(std::memory_order_relaxed);
+    const size_t need = (P.L.total <= held) ? 0u : P.L.total;
+
+    size_t freeBytes = 0;
+    const size_t budget = (need == 0u) ? 0u : MEB_CudaScratchBudget(g, &freeBytes);
+
+    // need == 0 means the block we already hold covers this frame: the render
+    // allocates NOTHING, so no budget can refuse it. Worth spelling out because
+    // it is the steady state — after the first frame of a given size, every
+    // later frame of that size passes here for free, and a card whose free
+    // memory has since been eaten by AE's own cache keeps rendering on the GPU
+    // instead of silently reverting to the CPU.
+    const bool fits = (need == 0u) || (need <= budget);
+
+    // free/budget read 0 in the cached case because neither was queried — say
+    // so, or the line looks like a failed cuMemGetInfo.
+    MEB_GPU_LOG_FIRST(s_budget, 10,
+        "[ModernEdgeBlur] PRERENDER budget %ldx%ld need=%.1fMB held=%.1fMB "
+        "free=%.0fMB budget=%.1fMB -> %s\n",
+        (long)W, (long)H,
+        (double)P.L.total / (1024.0 * 1024.0),
+        (double)held      / (1024.0 * 1024.0),
+        (double)freeBytes / (1024.0 * 1024.0),
+        (double)budget    / (1024.0 * 1024.0),
+        (need == 0u) ? "fits (scratch already held, no allocation)"
+                     : (fits ? "fits" : "TOO BIG - CPU"));
+
+    return fits;
+}
+
 // Grow-only device scratch, cached on the per-device gpu_data. Caller holds
 // renderLock. Returns false (and leaves the old block intact) on failure.
+// Note the ordering: the new block is allocated BEFORE the old one is freed, so
+// a growing render transiently holds both. The budget gate is right to compare
+// only the new block against free VRAM — the old block was never part of the
+// free pool it measured.
+//
+// The free-VRAM readings either side of the allocation are the measurement
+// PreRender's gate is still missing (see MEB_GPUBudgetAllows): a drop of
+// roughly `bytes` means AE's allocator took the memory straight from the free
+// pool, while a much larger drop — or a success at a free level below `bytes` —
+// means it is trading against AE's own frame cache, which is what decides
+// whether a quarter of free VRAM is a generous budget or a reckless one.
 static bool MEB_EnsureScratch(PF_ProgPtr effect_ref, PF_GPUDeviceSuite1 *gpuS,
                               MEB_GPUData *g, size_t bytes)
 {
-    if (g->scratch && g->scratchBytes >= bytes) return true;
+    if (g->scratch && g->scratchBytes.load(std::memory_order_relaxed) >= bytes)
+        return true;
+
+#if MEB_GPU_LOG
+    // Diagnostic only — never let the budget measurement cost a driver call in
+    // a build with logging compiled out. The context is already current here.
+    const MEB_CudaApi &cu = MEB_CudaApi::Get();
+    const size_t freeBefore = MEB_QueryFreeVRAM(cu);
+#endif
 
     void *mem = nullptr;
     if (gpuS->AllocateDeviceMemory(effect_ref, g->deviceIndex, bytes, &mem) ||
         !mem) {
         MEB_GPU_LOG_FIRST(s_allocFail, 4,
-            "[ModernEdgeBlur] AllocateDeviceMemory(%zu bytes) FAILED\n", bytes);
+            "[ModernEdgeBlur] AllocateDeviceMemory(%.1f MB) FAILED "
+            "(free before %.0f MB) - frame fails, PreRender's budget gate "
+            "should have caught this\n",
+            (double)bytes / (1024.0 * 1024.0),
+            (double)freeBefore / (1024.0 * 1024.0));
         return false;
     }
     if (g->scratch)
         gpuS->FreeDeviceMemory(effect_ref, g->deviceIndex, g->scratch);
-    g->scratch      = mem;
-    g->scratchBytes = bytes;
+    g->scratch = mem;
+    g->scratchBytes.store(bytes, std::memory_order_relaxed);
     MEB_GPU_LOG_FIRST(s_allocOk, 4,
-        "[ModernEdgeBlur] GPU scratch grown to %.1f MB\n",
-        (double)bytes / (1024.0 * 1024.0));
+        "[ModernEdgeBlur] GPU scratch grown to %.1f MB "
+        "(free %.0f -> %.0f MB)\n",
+        (double)bytes / (1024.0 * 1024.0),
+        (double)freeBefore / (1024.0 * 1024.0),
+        (double)MEB_QueryFreeVRAM(cu) / (1024.0 * 1024.0));
     return true;
 }
 
@@ -668,44 +908,25 @@ static PF_Err MEB_RenderCUDA(PF_InData *in_data, PF_OutData *out_data,
     if (W <= 0 || H <= 0 || srcW <= 0 || srcH <= 0) return PF_Err_NONE;
 
     // ---- Decide the pipeline shape (the CPU path's host-side branches) ----
-    // Thresholds copied from SmartRender verbatim, INCLUDING which comparison
-    // is done in double and which in float. They differ, and the difference is
-    // observable: `do_blend` gates the passthrough decision on the double, but
-    // OctagonErode / MakeBlendKernel gate themselves on the float. A radius
-    // that rounds up to exactly 0.5f across that cast takes the erode branch
-    // while `do_blend` is false, and the GPU has to agree.
-    const bool  do_blur     = (prm.blur_amountF  >= 0.5f);
-    const bool  do_blend    = (prm.blend_radiusF >= 0.5f);
-    const bool  do_shift    = (std::abs((float)prm.shift_edgeF) >= 0.5f);
-    const bool  passthrough = !do_blur && !do_blend;
-    const float blendR      = (float)prm.blend_radiusF;
-    const bool  erodeActive = !passthrough && (blendR >= 0.5f);   // <- OctagonErode's own gate
+    // Same planner PreRender's budget gate ran, on the real (<= worst-case)
+    // geometry, so gate and render cannot disagree about what this frame costs.
+    MEB_FramePlan P;
+    MEB_PlanFrame(P, W, H, prm);
 
-    // Gaussian weights: built by the CPU path's OWN kernel builders and
-    // uploaded verbatim, so both paths convolve with identical bits
-    // (gpu-kernel-rules.md §3.1 — a GPU-side rebuild would diverge in the last
-    // bits and turn the parity gate into a coin flip).
-    const std::vector<float> kBlur  = do_blur     ? MakeBlurKernel((float)prm.blur_amountF)
-                                                  : std::vector<float>();
-    const std::vector<float> kBlend = erodeActive ? MakeBlendKernel(blendR)
-                                                  : std::vector<float>();
-    const int halfBlur  = kBlur.empty()  ? 0 : (int)(kBlur.size()  / 2);
-    const int halfBlend = kBlend.empty() ? 0 : (int)(kBlend.size() / 2);
-
-    // Shift Edge geometry, spelled exactly as MorphPlane spells it.
-    const float shiftR  = std::abs((float)prm.shift_edgeF);
-    const int   morphRi = do_shift ? (int)std::ceil(shiftR) : 0;
-    const float morphR2 = shiftR * shiftR;
-    const int   dilate  = ((float)prm.shift_edgeF > 0.f) ? 1 : 0;
-
-    // Octagon half-lengths, from the shared helpers so CPU and GPU cannot
-    // disagree about the structuring element's size.
-    const int octAxis = erodeActive ? MEB_OctagonAxisHalf(blendR) : 0;
-    const int octDiag = erodeActive ? MEB_OctagonDiagHalf(blendR) : 0;
-
-    MEB_GPULayout L;
-    MEB_BuildLayout(L, W, H, do_shift, !passthrough, do_blur, erodeActive,
-                    kBlur.size(), kBlend.size());
+    const bool  do_blur     = P.do_blur;
+    const bool  do_shift    = P.do_shift;
+    const bool  passthrough = P.passthrough;
+    const bool  erodeActive = P.erodeActive;
+    const std::vector<float> &kBlur  = P.kBlur;
+    const std::vector<float> &kBlend = P.kBlend;
+    const int   halfBlur  = P.halfBlur;
+    const int   halfBlend = P.halfBlend;
+    const int   morphRi   = P.morphRi;
+    const float morphR2   = P.morphR2;
+    const int   dilate    = P.dilate;
+    const int   octAxis   = P.octAxis;
+    const int   octDiag   = P.octDiag;
+    const MEB_GPULayout &L = P.L;
 
     MEB_GPU_LOG_FIRST(s_plan, 6,
         "[ModernEdgeBlur] GPU plan out=%ldx%ld src=%ldx%ld shift=%d(ri=%d) "
