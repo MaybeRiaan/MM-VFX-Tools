@@ -123,7 +123,8 @@ struct FS_DXData {
 // scalars, sequential; HLSL packs contiguous scalars tightly, so a plain C
 // struct of int32/float maps 1:1 onto the root constants).
 // ---------------------------------------------------------------------------
-struct PPass    { INT32 W, H, R, horiz; };                       // gauss + guided box/squares
+struct PPass    { INT32 W, H, R, horiz; };                       // gauss + guided box
+struct PDims    { INT32 W, H; };                                 // fs_guided_squares
 struct PAB      { INT32 W, H; float eps; };                      // fs_guided_ab
 struct PFinal   { INT32 W, H; float invCount; };                 // fs_guided_final
 struct PCompose { INT32 outW, outH, srcW, srcOX, srcOY, view; float texGain, mix; };
@@ -486,8 +487,8 @@ PF_Err FS_DXRender(PF_InData *in_data, PF_OutData *out_data,
 					};
 
 					{	// squares: A → L  (L is dead until final writes it)
-						PPass p = { job.srcW, rows, 0, 0 };
-						FS_Dispatch(cl.Get(), data->pso[FS_PSO_GSQUARES].Get(), &p, 4,
+						PDims p = { job.srcW, rows };
+						FS_Dispatch(cl.Get(), data->pso[FS_PSO_GSQUARES].Get(), &p, 2,
 							&vaA, 1, &vaL, 1, job.srcW, rows);
 					}
 					box(vaL, P3, job.guidedRx, 1);   // box(sq) H

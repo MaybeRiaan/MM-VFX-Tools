@@ -21,6 +21,8 @@
       u0  gDst    output-sized premultiplied ARGB
 */
 
+KERNEL_BEGIN(fs_compose)
+
 BUF_IN (gSrc,   0);
 BUF_IN (gLo,    1);
 BUF_IN (gMatte, 2);
@@ -128,3 +130,5 @@ KERNEL_ENTRY(fs_compose)
         }
     }
 }
+
+KERNEL_END(fs_compose)

@@ -62,6 +62,8 @@ AE-free headers"), extended one axis: **AE-free → also platform-free.**
 MM_FreqSep/src/gpu/          (MM_Qualify/src/gpu/ mirrors this, qk_* prefix)
   kernels/
     fs_prologue_hlsl.h      HLSL spellings of the shared vocabulary
+    fs_prologue_cuda.h      CUDA spellings of the SAME vocabulary
+    fs_prologue_host.h      host-C++ spellings — layout mirror + type-check
     fs_prologue_metal.h     MSL spellings of the SAME vocabulary   [TODO: Metal]
     fs_gauss.kernel         separable Gaussian     — math only
     fs_guided.kernel        guided filter          — math only
@@ -73,10 +75,20 @@ MM_FreqSep/src/gpu/          (MM_Qualify/src/gpu/ mirrors this, qk_* prefix)
                             dxc compiles each entry point (-E) at BUILD time
                             into DXIL embedded as C headers (no runtime
                             compiler, no loose .cso next to the .aex)
+  cuda/
+    fs_kernels.cu           one shim, ALL kernel files; nvcc emits one PTX
+                            carrying every entry point, deployed as
+                            CUDA_Assets/ next to the .aex and loaded with
+                            cuModuleLoadDataEx (EdgeRepair's arrangement)
+    fs_kernel_args.h        the same kernel files through fs_prologue_host.h:
+                            the launch-argument structs, compiled FROM the
+                            kernels so the host cannot drift from them (§2.1)
   mm_gpu_host.h             AE-facing, platform-free, header-only: the band
                             tile planner + FS_GPUJob description. ALL tiling
                             arithmetic lives here so tests can prove it with
                             no GPU (see §5); platform hosts only execute it.
+                            Also owns the framework→backend dispatch helpers.
+  mm_gpu_cuda.cpp           CUDA host: PTX module, launcher, cached scratch
   mm_gpu_dx.cpp             DX12 host: root sig, PSOs, dispatch, fence
   mm_gpu_metal.mm           Metal host: pipeline state, encoder, dispatch [TODO]
 ```
@@ -96,17 +108,55 @@ the swizzle is index reversal `(3 - c)`.
 
 Every kernel is written against these names only. The prologue defines them.
 
-| Vocabulary        | HLSL                              | MSL (planned)                          |
-|-------------------|-----------------------------------|----------------------------------------|
-| `KERNEL_ENTRY(n)` | `[numthreads(8,8,1)] void n(...)` | `kernel void n(...)`                    |
-| `GID_X` / `GID_Y` | `tid.x` / `tid.y` (SV_DispatchThreadID) | `gid.x` / `gid.y` (thread_position_in_grid) |
-| `BUF_IN(n, i)`    | `RWStructuredBuffer<float>` @ `u(i)`   | `device const float*` @ `buffer(i)`     |
-| `BUF_OUT(n, i)`   | `RWStructuredBuffer<float>` @ `u(4+i)` | `device float*` @ `buffer(4+i)`         |
-| `PARAM_BLOCK`     | `cbuffer` @ `b0` (root constants) | `constant ...&` argument                |
-| `KF_EXP(x)`       | `exp(x)`                          | `metal::exp(x)`                         |
+| Vocabulary        | HLSL                              | CUDA                               | MSL (planned)                          |
+|-------------------|-----------------------------------|------------------------------------|----------------------------------------|
+| `KERNEL_BEGIN(n)` | *(nothing)*                       | `namespace fsk_n { struct Args {`  | same as CUDA                            |
+| `KERNEL_ENTRY(n)` | `[numthreads(8,8,1)] void n(...)` | `__device__ void run(int,int) const` | `void run(...)` on the arg struct     |
+| `KERNEL_END(n)`   | *(nothing)*                       | `}; }` + `__global__` trampoline   | `}; }` + `kernel void` trampoline       |
+| `GID_X` / `GID_Y` | `tid.x` / `tid.y` (SV_DispatchThreadID) | `run()`'s two int params     | `gid.x` / `gid.y` (thread_position_in_grid) |
+| `BUF_IN(n, i)`    | `RWStructuredBuffer<float>` @ `u(i)`   | `const float *n;` member — i'th declared | `device const float*` @ `buffer(i)` |
+| `BUF_OUT(n, i)`   | `RWStructuredBuffer<float>` @ `u(4+i)` | `float *n;` member               | `device float*` @ `buffer(4+i)`         |
+| `PARAM_BLOCK`     | `cbuffer` @ `b0` (root constants) | plain members of the same struct   | `constant ...&` argument                |
+| `KF_EXP(x)`       | `exp(x)`                          | `::expf(x)`                        | `metal::exp(x)`                         |
 
 **The register/index map IS the binding contract:** inputs occupy slots 0–3,
-outputs 4–7, on both platforms. Order, not spelling, must match.
+outputs 4–7, on every platform. Order, not spelling, must match.
+
+### 2.1 Why entry points are BRACKETED — the rule that makes §0 achievable
+
+HLSL binds buffers by **register at file scope**: a `RWStructuredBuffer` sits
+outside every entry point and all of them see it. **CUDA and Metal do not have
+that.** In both, a kernel's buffers and constants are its *function parameters*
+(`__global__ void k(Args)`, `device float* b [[buffer(0)]]`), and neither can
+reference a file-scope buffer declaration at all.
+
+So a kernel written only against the file-scope form is expressible **in HLSL
+and nowhere else** — and §0's promise, that a kernel validated on DirectX is
+already validated on Metal modulo host plumbing, is not reachable. This is not a
+CUDA quirk; HLSL is the outlier.
+
+`KERNEL_BEGIN(name)` / `KERNEL_END(name)` bracket each entry point so its
+`BUF_*` and `PARAM_BLOCK` declarations — unchanged, in their original order —
+become the **members of one per-entry argument struct**, and the body becomes a
+method on it. The body then reads `gSrc` and `gW` as inherited scope, exactly as
+it read the HLSL globals; binding order is preserved because declaration order
+is preserved. The HLSL prologue expands both brackets to **nothing**, so the
+preprocessed HLSL is what it always was.
+
+Two consequences worth stating outright:
+
+- **Every entry point must be self-contained.** Under HLSL, cbuffer members land
+  in one global scope, so an entry could silently borrow a sibling's
+  `PARAM_BLOCK` — `fs_guided_squares` did. Nothing leaks between argument
+  structs, so each entry now declares its own. Prefix param names per entry
+  (`gSqW`, not a second `gW`) and the HLSL side stays legal too.
+- **The host builds the same structs.** `cuda/fs_kernel_args.h` includes the
+  same `.kernel` files through `fs_prologue_host.h`, so the launch arguments are
+  compiled *from* the kernel declarations rather than hand-mirrored beside them.
+  There is one declaration, compiled twice; there is nothing left to keep in
+  sync. That header also type-checks every kernel body as ordinary C++ on every
+  build, with no GPU and no toolkit — the C++ counterpart of the always-compiled
+  HLSL entry in `AE_GPU_Effects.md` §4.5.
 
 **Why inputs are `RW` on HLSL:** everything binds as a UAV, always. AE owns
 the state of its world/scratch resources, and D3D12 buffers implicitly
@@ -168,6 +218,19 @@ Metal prologue can substitute a compensated (Kahan) float sum, since Apple GPUs
 do not support `double` in shaders. A `control:` test in
 `MM_FreqSep/tests/gpu_parity_test.cpp` asserts the float variant still drifts — if that
 test ever starts passing trivially, this hazard has stopped being covered.
+
+> **`double` is affordable only while the sum is O(1) per pixel.** Consumer
+> GeForce cards run fp64 at **1/64** of fp32 rate (0.34 vs 21.7 TFLOPS on the
+> RTX 3070 Ti test box); CUDA carries the identical penalty, so this is not a
+> DX-only concern. `fs_guided.kernel` deliberately trades the CPU's O(1) sliding
+> window for an O(r) direct sum to parallelise, justified in its header against
+> `GuidedRadius(sigma=8) ≈ 9`. But the radius follows the separation sigma —
+> `GuidedRadius(σ) = 0.5(√(1+6σ²)−1)`, so σ=90 gives **r ≈ 110**, a 221-tap
+> window. That is ~110× the CPU's work at ~3× the throughput: the GPU box pass
+> lands *slower than the CPU it replaces*, and more so the larger the radius.
+> The accumulator is not the bug — the O(r) shape is. See the MM FreqSep plan's
+> Phase 5 for the chunked sliding-window fix, which restores O(1) and keeps
+> `double` cheap on every backend.
 
 **3.6 — `fma` contraction is allowed to differ; tolerance absorbs it.**
 Do not chase bit-exactness across platforms. Target max-abs ≤ 1e-5 against the

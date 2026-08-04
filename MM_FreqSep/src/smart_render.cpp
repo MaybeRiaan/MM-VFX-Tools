@@ -276,8 +276,9 @@ FS_PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
 	}
 
 	// GPU render offer. PF_RenderOutputFlag_GPU_RENDER_POSSIBLE is set only
-	// when (a) AE is driving the DirectX pipeline and device setup succeeded
-	// (gpu_data non-null — it stays null on non-DX frameworks and on devices
+	// when (a) AE is driving a framework this build hosts and device setup
+	// succeeded (gpu_data non-null — it stays null on unhandled frameworks, on
+	// machines with no CUDA driver, when the PTX is missing, and on DX devices
 	// without shader doubles), and (b) the WORST-CASE tile plan for this
 	// request fits the device scratch budget — the same FS_PlanTiles the
 	// render will run, fed the same budget, so gate and render cannot
@@ -286,12 +287,13 @@ FS_PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
 	// 6K+ footage on a small-VRAM card.)
 #ifdef _WIN32
 	if (!err &&
-		extra->input->what_gpu == PF_GPU_Framework_DIRECTX &&
+		fsgpu::FS_FrameworkSupported(extra->input->what_gpu) &&
 		extra->input->gpu_data) {
 		const PF_LRect &rq = extra->input->output_request.rect;
 		const int outW = rq.right - rq.left;
 		const int outH = rq.bottom - rq.top;
-		const size_t budget = fsgpu::FS_DXScratchBudget(extra->input->gpu_data);
+		const size_t budget = fsgpu::FS_ScratchBudget(extra->input->what_gpu,
+		                                              extra->input->gpu_data);
 		if (outW > 0 && outH > 0 && budget > 0) {
 			// Worst case: the layer honors the full inflation on both axes
 			// (real checkouts can only come back smaller). inflateY is
@@ -658,7 +660,7 @@ FS_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra 
 #else
 	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
 
-	if (extra->input->what_gpu != PF_GPU_Framework_DIRECTX ||
+	if (!fsgpu::FS_FrameworkSupported(extra->input->what_gpu) ||
 		!extra->input->gpu_data)
 		return PF_Err_UNRECOGNIZED_PARAM_TYPE;
 
@@ -674,8 +676,9 @@ FS_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra 
 	if (err || !wsP || !src_world || !out_world) goto cleanup;
 
 	{
-		// GPU worlds are 32f BGRA on the DirectX pipeline — anything else
-		// means the contract changed under us; refuse rather than misrender.
+		// GPU worlds are 32f BGRA on every framework AE offers (rules §1) —
+		// anything else means the contract changed under us; refuse rather
+		// than misrender.
 		PF_PixelFormat fmt = PF_PixelFormat_INVALID;
 		ERR(wsP->PF_GetPixelFormat(out_world, &fmt));
 		if (err) goto cleanup;
@@ -744,7 +747,8 @@ FS_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra 
 		// real (≤ worst-case) geometry, so this cannot newly fail.
 		const int marginY = fsgpu::FS_TileMarginY(job.guided, job.sepRy,
 			job.guidedRy, job.smoothRy);
-		const size_t budget = fsgpu::FS_DXScratchBudget(extra->input->gpu_data);
+		const size_t budget = fsgpu::FS_ScratchBudget(extra->input->what_gpu,
+		                                              extra->input->gpu_data);
 		if (!fsgpu::FS_PlanTiles(job.outH, job.srcH, job.srcOY, marginY,
 				fsgpu::FS_TileBytesPerRow(job.guided, job.srcW),
 				fsgpu::FS_OutBytesPerRow(job.outW), budget, &job.plan)) {
@@ -788,8 +792,16 @@ FS_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra 
 			}
 		}
 
-		ERR(fsgpu::FS_DXRender(in_data, out_data, extra->input->gpu_data,
-			extra->input->device_index, job, src_world, out_world, matte_world));
+		// One job, one plan, one backend call. The hosts take identical
+		// arguments precisely so this stays a dispatch and never grows
+		// framework-specific setup of its own.
+		if (extra->input->what_gpu == PF_GPU_Framework_CUDA) {
+			ERR(fsgpu::FS_CudaRender(in_data, out_data, extra->input->gpu_data,
+				extra->input->device_index, job, src_world, out_world, matte_world));
+		} else {
+			ERR(fsgpu::FS_DXRender(in_data, out_data, extra->input->gpu_data,
+				extra->input->device_index, job, src_world, out_world, matte_world));
+		}
 	}
 
 cleanup:
@@ -799,16 +811,21 @@ cleanup:
 }
 
 // ---------------------------------------------------------------------------
-// GPU device setup/setdown — platform dispatch. Frameworks without a host
-// here (OpenCL, CUDA, Metal-for-now) get gpu_data == null with PF_Err_NONE:
-// AE then simply never offers this effect GPU render, and the CPU reference
-// carries the frame. Metal's entry lands in this switch when mm_gpu_metal.mm
-// is written.
+// GPU device setup/setdown — platform dispatch. CUDA is what After Effects
+// offers on Windows/NVIDIA and DirectX is what Premiere offers there; both are
+// hosted. Frameworks without a host (OpenCL, Metal-for-now) get gpu_data ==
+// null with PF_Err_NONE: AE then simply never offers this effect GPU render on
+// such a device, and the CPU reference carries the frame. So does a CUDA device
+// on a machine with no NVIDIA driver or no deployed PTX — those decline inside
+// FS_CudaDeviceSetup for the same reason and with the same result.
+// Metal's entry lands in this switch when mm_gpu_metal.mm is written.
 // ---------------------------------------------------------------------------
 PF_Err
 FS_GPUDeviceSetup(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetupExtra *extra)
 {
 #ifdef _WIN32
+	if (extra->input->what_gpu == PF_GPU_Framework_CUDA)
+		return fsgpu::FS_CudaDeviceSetup(in_data, out_data, extra);
 	if (extra->input->what_gpu == PF_GPU_Framework_DIRECTX)
 		return fsgpu::FS_DXDeviceSetup(in_data, out_data, extra);
 #endif
@@ -820,6 +837,8 @@ PF_Err
 FS_GPUDeviceSetdown(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetdownExtra *extra)
 {
 #ifdef _WIN32
+	if (extra->input->what_gpu == PF_GPU_Framework_CUDA)
+		return fsgpu::FS_CudaDeviceSetdown(in_data, out_data, extra);
 	if (extra->input->what_gpu == PF_GPU_Framework_DIRECTX)
 		return fsgpu::FS_DXDeviceSetdown(in_data, out_data, extra);
 #endif

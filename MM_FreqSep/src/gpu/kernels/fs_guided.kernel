@@ -55,6 +55,8 @@
 // Separable: dispatched once horizontally, once vertically.
 // ===========================================================================
 
+KERNEL_BEGIN(fs_guided_box)
+
 BUF_IN (gBoxSrc, 0);
 BUF_OUT(gBoxDst, 0);
 
@@ -101,18 +103,32 @@ KERNEL_ENTRY(fs_guided_box)
     gBoxDst[o + 3] = ACC_GET(a3);
 }
 
+KERNEL_END(fs_guided_box)
+
 // ===========================================================================
 // Stage 2 — squares: src -> s2 = [a, a*p^2]  (guided.cpp:118-138)
 // a*p^2 == premult^2 / a.
 // ===========================================================================
 
+KERNEL_BEGIN(fs_guided_squares)
+
 BUF_IN (gSqSrc, 0);
 BUF_OUT(gSqDst, 0);
 
+// Own param block, own names. This stage used to borrow stage 1's gW/gH — legal
+// under HLSL, where cbuffer members land in one global scope, but impossible for
+// CUDA/Metal, where every entry point's parameters are ITS OWN argument struct
+// and nothing leaks in from a sibling. Every entry is now self-contained, which
+// is the invariant KERNEL_BEGIN/KERNEL_END exist to enforce.
+PARAM_BLOCK_BEGIN
+    int gSqW;
+    int gSqH;
+PARAM_BLOCK_END
+
 KERNEL_ENTRY(fs_guided_squares)
 {
-    FS_GUARD(gW, gH)
-    const int o = FS_IDX(GID_X, GID_Y, gW);
+    FS_GUARD(gSqW, gSqH)
+    const int o = FS_IDX(GID_X, GID_Y, gSqW);
 
     const float a = gSqSrc[o + 0];
     gSqDst[o + 0] = a;
@@ -128,11 +144,15 @@ KERNEL_ENTRY(fs_guided_squares)
     }
 }
 
+KERNEL_END(fs_guided_squares)
+
 // ===========================================================================
 // Stage 3 — linear coefficients: (src, s1, s2) -> sa/sb  (guided.cpp:143-172)
 // Carried as [a, a*A] / [a, a*B] so the NEXT box pass aggregates them
 // alpha-weighted (transparent centres don't vote).
 // ===========================================================================
+
+KERNEL_BEGIN(fs_guided_ab)
 
 BUF_IN (gABSrc, 0);
 BUF_IN (gABm1,  1);   // s1 = box(src)     = [box(a), box(a*p)]
@@ -172,12 +192,16 @@ KERNEL_ENTRY(fs_guided_ab)
     }
 }
 
+KERNEL_END(fs_guided_ab)
+
 // ===========================================================================
 // Stage 4 — final: (src, boxed sa/sb) -> dst  (guided.cpp:177-202)
 // q = meanA*p + meanB in straight colour, re-premultiplied by the windowed
 // mean coverage, so the caller's renormalize-by-blurred-alpha compose consumes
 // this identically to the Gaussian path (rules §3.5).
 // ===========================================================================
+
+KERNEL_BEGIN(fs_guided_final)
 
 BUF_IN (gFinSrc, 0);
 BUF_IN (gFinSa,  1);
@@ -211,3 +235,5 @@ KERNEL_ENTRY(fs_guided_final)
         for (int c = 0; c < 4; ++c) gFinDst[o + c] = 0.0f;  // caller falls back to src
     }
 }
+
+KERNEL_END(fs_guided_final)

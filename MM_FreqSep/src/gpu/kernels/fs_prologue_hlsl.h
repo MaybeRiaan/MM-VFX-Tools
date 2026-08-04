@@ -33,6 +33,23 @@
     [numthreads(FS_TG_X, FS_TG_Y, 1)]          \
     void name(uint3 fs_tid : SV_DispatchThreadID)
 
+// ---------------------------------------------------------------------------
+// Entry-point brackets. KERNEL_BEGIN precedes an entry's BUF_*/PARAM_BLOCK
+// declarations; KERNEL_END follows its body. Both expand to NOTHING here, so
+// the preprocessed HLSL is byte-for-byte what it was before the brackets
+// existed — HLSL binds buffers by REGISTER at file scope and needs no help.
+//
+// They exist for CUDA and Metal, which both bind buffers as kernel ARGUMENTS
+// and therefore cannot reference a file-scope buffer declaration at all. Those
+// prologues expand this pair into a per-entry argument struct whose members are
+// exactly the BUF_*/PARAM_BLOCK declarations, which the body then reads by the
+// same bare names. Without the brackets, rules §0's promise ("validated on
+// DirectX == validated on Metal modulo host plumbing") is unreachable: the
+// vocabulary would be expressible only in HLSL.
+// ---------------------------------------------------------------------------
+#define KERNEL_BEGIN(name)
+#define KERNEL_END(name)
+
 #define GID_X (int)fs_tid.x
 #define GID_Y (int)fs_tid.y
 

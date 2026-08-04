@@ -42,6 +42,8 @@
 #define FS_MT_FIT_CENTER  2
 #define FS_MT_FIT_TOPLEFT 3
 
+KERNEL_BEGIN(fs_matte)
+
 BUF_IN (gMtWorld, 0);
 BUF_OUT(gMtDst,   0);
 
@@ -142,3 +144,5 @@ KERNEL_ENTRY(fs_matte)
 
     gMtDst[GID_Y * gMtOutW + ox] = wgt;
 }
+
+KERNEL_END(fs_matte)

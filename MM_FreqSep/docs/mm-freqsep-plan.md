@@ -134,10 +134,52 @@ Edge correctness: blur must be alpha-weighted (normalize by blurred alpha) or fr
   reference — multi-band, world-edge-clipped margins, HDR, all View modes —
   **bit-exact (0.000e+00)**. 48/48 tests green. Any in-AE mismatch is now
   D3D12 plumbing by elimination.
+- [x] **CUDA host** (`src/gpu/mm_gpu_cuda.cpp`, 2026-08-03) — the backend AE
+  actually offers on Windows/NVIDIA (`../../docs/AE_GPU_Effects.md` §1.1–1.2).
+  Written as a line-for-line translation of the DX12 host's pass sequence, over
+  the same `FS_GPUJob` and the same `FS_PlanTiles` band plan, dispatching the
+  same `.kernel` bodies via PTX. Runtime `nvcuda.dll` shim
+  (`src/gpu/fs_cuda_shim.h`, from EdgeRepair) so the host side needs no CUDA
+  toolkit to build or run; only the `.cu` → PTX step needs nvcc, and without it
+  the plugin still builds and AE renders on the CPU.
+  - Two deliberate divergences from the DX host, both documented in the file
+    header: scratch is **cached per device** (grow-only, freed at setdown,
+    `renderLock` around the enqueue sequence — EdgeRepair's arrangement) rather
+    than allocated per render, because FreqSep's scratch reaches ~1GB at 6K and
+    a per-frame allocation of that size would eat the win; and there is no
+    shader-doubles device gate, because every CUDA-capable NVIDIA GPU has fp64.
+  - `GPU_DEVICE_SETUP` re-affirms `out_flags2 = SUPPORTS_GPU_RENDER_F32` by
+    plain assignment (`AE_GPU_Effects.md` §2.2) — the omission that cost the
+    suite seven failed experiments. The DX host never had to face it, having
+    never been called by AE.
+- [x] **Entry-point brackets** (`KERNEL_BEGIN`/`KERNEL_END`) — the kernel
+  vocabulary was HLSL-shaped and could not express CUDA *or* Metal, both of
+  which bind buffers as kernel arguments. See `../../docs/gpu-kernel-rules.md`
+  §2.1. Two added lines per entry point, nothing existing moved; 7 of 10 DXIL
+  blobs are byte-identical afterwards and the other 3 differ only in an
+  auto-generated cbuffer name and its hash (same size, same `Offset: 0`, same
+  `cb0`). All 27 parity tests still 0.000e+00.
 - [ ] **In-AE validation** (hands-on, needs eyes on a monitor): View-popup
-  band diff GPU vs Software-Only per `docs/phase6-validation.md`. Milestone 1
-  = Gaussian end-to-end; the build deployed to AE 2026 carries the full path.
-- [ ] Metal prologue + host (deferred until Mac access)
+  band diff GPU vs Software-Only per `docs/phase6-validation.md`, now on CUDA.
+  Milestone 1 = Gaussian end-to-end. **Nothing here has yet rendered a frame in
+  After Effects** — until it does, treat "CUDA host" as written-and-compiling,
+  not working.
+- [ ] **Guided box: chunked sliding window** — sequenced deliberately AFTER the
+  in-AE Gaussian validation, for the same reason the IIR CPU Gaussian is
+  deferred below: landing it mid-port would make every GPU-vs-CPU mismatch
+  ambiguous between a host bug and a kernel bug. `fs_guided.kernel`'s O(r)
+  direct sum is ~110 taps at the radii real use reaches and accumulates in
+  `double`, which GeForce runs at 1/64 rate — together that makes the GPU box
+  pass slower than the CPU sliding window it replaces (`gpu-kernel-rules.md`
+  §3.7). Fix: chunked sliding window, one thread per run of ~128–256 px,
+  restoring O(1) per pixel at full occupancy. Bit-exactness survives because the
+  sums are stored as `float` and a `double` accumulation over a ~6000-element
+  row carries ~1e-12 relative error, three orders below float's resolution — any
+  summation order rounds to the same float, which is why the existing test
+  already finds direct-sum and sliding-window identical. Benefits DX equally.
+- [ ] Metal prologue + host (deferred until Mac access) — now a smaller job
+  than it was: the brackets mean the argument-struct shape Metal needs already
+  exists and is proven by two backends.
 - [ ] IIR recursive Gaussian on CPU (**deferred** — see tradeoff note below;
   stays sequenced AFTER the in-AE GPU validation for the same reason)
 

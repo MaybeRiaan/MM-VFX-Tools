@@ -28,6 +28,8 @@
 // gLdPitch is the world row pitch in FLOATS (rowbytes / 4).
 // ===========================================================================
 
+KERNEL_BEGIN(fs_load_tile)
+
 BUF_IN (gLdWorld, 0);
 BUF_OUT(gLdTile,  0);
 
@@ -52,9 +54,13 @@ KERNEL_ENTRY(fs_load_tile)
     gLdTile[t + 3] = gLdWorld[w + 0];
 }
 
+KERNEL_END(fs_load_tile)
+
 // ===========================================================================
 // Store: packed ARGB tile → world rows [gStWorldY0 .. +gStH), swizzling back.
 // ===========================================================================
+
+KERNEL_BEGIN(fs_store_tile)
 
 BUF_IN (gStTile,  0);
 BUF_OUT(gStWorld, 0);
@@ -80,12 +86,16 @@ KERNEL_ENTRY(fs_store_tile)
     gStWorld[w + 3] = gStTile[t + 0];
 }
 
+KERNEL_END(fs_store_tile)
+
 // ===========================================================================
 // Fill: constant 1.0 over a single-float plane. Used for the matte weight
 // plane while no matte layer is connected (matte == 1.0 everywhere, matching
 // fs::SampleMatte's inactive behaviour). Replaced by a real fs_matte kernel
 // when the matte driver moves onto the GPU.
 // ===========================================================================
+
+KERNEL_BEGIN(fs_fill_ones)
 
 BUF_OUT(gFillDst, 0);
 
@@ -99,3 +109,5 @@ KERNEL_ENTRY(fs_fill_ones)
     FS_GUARD(gFillW, gFillH)
     gFillDst[GID_Y * gFillW + GID_X] = 1.0f;
 }
+
+KERNEL_END(fs_fill_ones)

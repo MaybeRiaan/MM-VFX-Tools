@@ -44,8 +44,8 @@ set(SDK_SOURCES
     ${SDK_ROOT}/Util/Smart_Utils.cpp
 )
 
-# Plugin's own translation units. mm_gpu_dx.cpp (DX12 host) is appended in
-# the Windows branch; the Metal host joins the Apple branch when written.
+# Plugin's own translation units. The CUDA and DX12 hosts are appended in the
+# Windows branch; the Metal host joins the Apple branch when written.
 set(FS_SOURCES
     ${SRC_DIR}/main.cpp
     ${SRC_DIR}/smart_render.cpp
@@ -176,10 +176,112 @@ if(WIN32)
 
     add_custom_target(fs_shaders DEPENDS ${FS_DXIL_HEADERS})
 
-    list(APPEND FS_SOURCES ${SRC_DIR}/gpu/mm_gpu_dx.cpp)
+    # =======================================================================
+    # CUDA backend — the framework After Effects actually offers on
+    # Windows/NVIDIA (../docs/AE_GPU_Effects.md §1.1). The HOST side needs no
+    # toolkit at all: src/gpu/fs_cuda_shim.h loads nvcuda.dll (a DRIVER
+    # component) at runtime. Only the .cu -> PTX step needs nvcc, and when the
+    # toolkit is absent this whole block SKIPS: no PTX ships, device setup
+    # declines CUDA at runtime, AE falls back to the CPU reference. A build
+    # machine without CUDA therefore still produces a working plugin — one that
+    # renders on the CPU.
+    #
+    # PTX targets compute_75 (Turing/RTX-class baseline; the test box is an RTX
+    # 3070 Ti, sm_86). PTX is a text format the driver JIT-compiles forward for
+    # newer GPUs, so one asset serves every card from Turing up.
+    #
+    # This mirrors EdgeRepair/CMakeLists.txt, the suite's GPU reference — see
+    # there for the full reasoning behind the -ccbin dance below.
+    # =======================================================================
+    file(GLOB FS_NVCC_CANDIDATES
+        "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*/bin/nvcc.exe")
+    if(FS_NVCC_CANDIDATES)
+        list(SORT FS_NVCC_CANDIDATES)
+        list(GET FS_NVCC_CANDIDATES -1 FS_NVCC_EXE)
+    else()
+        find_program(FS_NVCC_EXE nvcc)
+    endif()
+
+    if(FS_NVCC_EXE)
+        message(STATUS "nvcc: ${FS_NVCC_EXE} - building CUDA_Assets PTX")
+
+        # CUDA 12.8's nvcc cannot digest VS 2026's newest STL (hard
+        # static_assert: "expected CUDA 13.2 or newer", plus EDG chokes on its
+        # C++23 patterns). VS 2026 installs older MSVC toolsets side-by-side —
+        # hand nvcc the OLDEST 14.4x (VS 2022-era v143) via -ccbin. If none
+        # exists the flag is omitted and nvcc uses the default cl, which may
+        # fail; install the "MSVC v143" component or CUDA 13.2+ in that case.
+        file(GLOB FS_CUDA_CCBIN_CANDIDATES
+            "C:/Program Files/Microsoft Visual Studio/*/*/VC/Tools/MSVC/14.4*/bin/Hostx64/x64/cl.exe")
+        set(FS_NVCC_CCBIN "")
+        set(FS_NVCC_ENV "")
+        if(FS_CUDA_CCBIN_CANDIDATES)
+            list(SORT FS_CUDA_CCBIN_CANDIDATES)
+            list(GET FS_CUDA_CCBIN_CANDIDATES 0 FS_CUDA_CCBIN)
+            message(STATUS "nvcc host compiler (ccbin): ${FS_CUDA_CCBIN}")
+            set(FS_NVCC_CCBIN -ccbin "${FS_CUDA_CCBIN}")
+
+            # ccbin alone is not enough: the build environment's INCLUDE (set by
+            # vcvars for the NEWEST toolset) would still hand the old cl the new
+            # STL. Rebuild INCLUDE for the nvcc step from the chosen toolset's
+            # own headers plus the newest installed Windows SDK.
+            get_filename_component(FS_CCBIN_DIR "${FS_CUDA_CCBIN}" DIRECTORY)
+            get_filename_component(FS_MSVC_ROOT "${FS_CCBIN_DIR}/../../.." ABSOLUTE)
+            file(GLOB FS_WINSDK_INC_CANDIDATES
+                "C:/Program Files (x86)/Windows Kits/10/Include/10.*")
+            list(SORT FS_WINSDK_INC_CANDIDATES)
+            list(GET FS_WINSDK_INC_CANDIDATES -1 FS_WINSDK_INC)
+            file(TO_NATIVE_PATH "${FS_MSVC_ROOT}/include" FS_INC_MSVC)
+            file(TO_NATIVE_PATH "${FS_WINSDK_INC}/ucrt"   FS_INC_UCRT)
+            file(TO_NATIVE_PATH "${FS_WINSDK_INC}/shared" FS_INC_SHARED)
+            file(TO_NATIVE_PATH "${FS_WINSDK_INC}/um"     FS_INC_UM)
+            file(TO_NATIVE_PATH "${FS_MSVC_ROOT}"  FS_MSVC_ROOT_NATIVE)
+            file(TO_NATIVE_PATH "${FS_CCBIN_DIR}"  FS_CCBIN_DIR_NATIVE)
+            # nvcc's own VS detection always lands on the NEWEST toolset, so
+            # give it a fully consistent 14.4x environment instead:
+            # --use-local-env makes it trust INCLUDE; VCToolsInstallDir covers
+            # its VS probing; the PATH prepend satisfies its cl-in-PATH ==
+            # ccbin consistency check.
+            set(FS_NVCC_ENV ${CMAKE_COMMAND} -E env
+                --modify "PATH=path_list_prepend:${FS_CCBIN_DIR_NATIVE}"
+                "INCLUDE=${FS_INC_MSVC}\;${FS_INC_UCRT}\;${FS_INC_SHARED}\;${FS_INC_UM}"
+                "VCToolsInstallDir=${FS_MSVC_ROOT_NATIVE}\\")
+        endif()
+
+        set(FS_CUDA_ASSETS "${CMAKE_CURRENT_BINARY_DIR}/CUDA_Assets")
+        add_custom_command(
+            OUTPUT "${FS_CUDA_ASSETS}/MM_FreqSep_Kernels.ptx"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${FS_CUDA_ASSETS}"
+            COMMAND ${FS_NVCC_ENV} "${FS_NVCC_EXE}" -ptx -arch=compute_75
+                    --use-local-env
+                    -allow-unsupported-compiler ${FS_NVCC_CCBIN} -o
+                    "${FS_CUDA_ASSETS}/MM_FreqSep_Kernels.ptx"
+                    "${SRC_DIR}/gpu/cuda/fs_kernels.cu"
+            # Same dependency set as the DXIL rule: one edit to a .kernel body
+            # must rebuild BOTH backends, or they silently drift apart.
+            DEPENDS "${SRC_DIR}/gpu/cuda/fs_kernels.cu"
+                    "${SRC_DIR}/gpu/kernels/fs_prologue_cuda.h"
+                    ${FS_KERNEL_FILES}
+            COMMENT "nvcc: fs_kernels.cu -> CUDA_Assets/MM_FreqSep_Kernels.ptx"
+            VERBATIM
+        )
+        add_custom_target(fs_cuda_ptx
+            DEPENDS "${FS_CUDA_ASSETS}/MM_FreqSep_Kernels.ptx")
+    else()
+        message(STATUS "nvcc not found - CUDA_Assets PTX will NOT be built. "
+                       "The plugin still builds and runs; After Effects will "
+                       "render it on the CPU (GPU device setup declines).")
+    endif()
+
+    list(APPEND FS_SOURCES
+        ${SRC_DIR}/gpu/mm_gpu_cuda.cpp
+        ${SRC_DIR}/gpu/mm_gpu_dx.cpp)
 
     add_library(${TARGET} MODULE ${FS_SOURCES} ${SDK_SOURCES} ${PIPL_RC})
     add_dependencies(${TARGET} fs_shaders)
+    if(FS_NVCC_EXE)
+        add_dependencies(${TARGET} fs_cuda_ptx)
+    endif()
     target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
     target_link_libraries(${TARGET} PRIVATE d3d12.lib dxgi.lib)
 
@@ -196,6 +298,19 @@ if(WIN32)
             "if (Test-Path '${AE_PLUGINS_DIR}') { Copy-Item -Path '$<TARGET_FILE:${TARGET}>' -Destination '${AE_PLUGINS_DIR}/${TARGET}.aex' -Force; Write-Host 'Deployed ${TARGET} to AE plugins folder' } else { Write-Host 'AE plugins folder not found; skipping deploy' }"
         COMMENT "Installing ${TARGET} to After Effects plugins folder"
         VERBATIM)
+
+    # Kernel assets must sit NEXT TO the .aex, in AE's own Plug-ins folder —
+    # not Common/Plug-ins/7.0/MediaCore, which is Premiere's
+    # (../docs/AE_GPU_Effects.md §2.5). A stale PTX here is the classic
+    # half-finished deploy: device setup fails to resolve an entry point and
+    # declines the whole backend rather than discovering it mid-render.
+    if(FS_NVCC_EXE)
+        add_custom_command(TARGET ${TARGET} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${FS_CUDA_ASSETS}" "${AE_PLUGINS_DIR}/CUDA_Assets"
+            COMMENT "Installing ${TARGET} CUDA_Assets next to the deployed .aex"
+            VERBATIM)
+    endif()
 
     message(STATUS "${TARGET}.aex -> ${AE_PLUGINS_DIR}")
 

@@ -179,11 +179,31 @@ struct FS_GPUJob {
 };
 
 // ---------------------------------------------------------------------------
-// Platform hosts. DX12 today; Metal later adds the matching three calls.
-// Setup returns gpu_data == null (with PF_Err_NONE) for frameworks it does
-// not support — AE then simply never offers GPU render for this effect.
+// Platform hosts. Each exposes the same three calls and consumes the same
+// FS_GPUJob; smart_render.cpp picks one on extra->input->what_gpu and knows
+// nothing else about them. Setup returns gpu_data == null (with PF_Err_NONE)
+// for frameworks it does not handle — AE then simply never offers GPU render
+// on devices of that framework, and the CPU reference takes the frame.
+//
+// CUDA is the backend After Effects actually offers on Windows/NVIDIA and the
+// one this suite maintains; DirectX serves Premiere hosts, where DX12 IS the
+// Windows renderer. See ../../docs/AE_GPU_Effects.md §1.1–1.2. Metal later adds
+// a third set with the same signatures.
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
+// --- CUDA (mm_gpu_cuda.cpp) — the After Effects path --------------------
+PF_Err FS_CudaDeviceSetup(PF_InData *in_data, PF_OutData *out_data,
+                          PF_GPUDeviceSetupExtra *extra);
+PF_Err FS_CudaDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
+                            PF_GPUDeviceSetdownExtra *extra);
+size_t FS_CudaScratchBudget(const void *gpu_data);
+PF_Err FS_CudaRender(PF_InData *in_data, PF_OutData *out_data,
+                     const void *gpu_data, A_u_long device_index,
+                     const FS_GPUJob &job,
+                     PF_EffectWorld *srcWorld, PF_EffectWorld *outWorld,
+                     PF_EffectWorld *matteWorld);
+
+// --- DirectX 12 (mm_gpu_dx.cpp) — the Premiere path ---------------------
 PF_Err FS_DXDeviceSetup(PF_InData *in_data, PF_OutData *out_data,
                         PF_GPUDeviceSetupExtra *extra);
 PF_Err FS_DXDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
@@ -199,6 +219,24 @@ PF_Err FS_DXRender(PF_InData *in_data, PF_OutData *out_data,
                    const FS_GPUJob &job,
                    PF_EffectWorld *srcWorld, PF_EffectWorld *outWorld,
                    PF_EffectWorld *matteWorld);
+
+// --- Framework dispatch -------------------------------------------------
+// The ONE place that maps a PF_GPU_Framework onto a backend. Everything else
+// in smart_render.cpp asks these rather than testing frameworks itself, so
+// adding Metal touches this header and nothing in the render path.
+inline bool FS_FrameworkSupported(PF_GPU_Framework what_gpu)
+{
+	return what_gpu == PF_GPU_Framework_CUDA ||
+	       what_gpu == PF_GPU_Framework_DIRECTX;
+}
+
+inline size_t FS_ScratchBudget(PF_GPU_Framework what_gpu, const void *gpu_data)
+{
+	if (!gpu_data) return 0;
+	if (what_gpu == PF_GPU_Framework_CUDA)    return FS_CudaScratchBudget(gpu_data);
+	if (what_gpu == PF_GPU_Framework_DIRECTX) return FS_DXScratchBudget(gpu_data);
+	return 0;
+}
 #endif // _WIN32
 
 } // namespace fsgpu

@@ -27,6 +27,8 @@
       u0  gDst     output plane
 */
 
+KERNEL_BEGIN(fs_gauss_pass)
+
 BUF_IN (gSrc,    0);
 BUF_IN (gKernel, 1);
 BUF_OUT(gDst,    0);
@@ -90,3 +92,5 @@ KERNEL_ENTRY(fs_gauss_pass)
     gDst[o + 2] = g;
     gDst[o + 3] = b;
 }
+
+KERNEL_END(fs_gauss_pass)
