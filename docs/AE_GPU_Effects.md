@@ -77,8 +77,8 @@ plugins in this suite are in that position today:
 |---|---|---|
 | EdgeRepair | CUDA **or** DIRECTX (`EdgeRepair/src/EdgeRepair_GPU.cpp:264`) | ✅ yes, via CUDA |
 | ModernEdgeBlur | CUDA only (`ModernEdgeBlur/src/ModernEdgeBlur_GPU.cpp`) | ⏳ built to this decision; in-AE A/B still pending |
-| MM_FreqSep | DIRECTX only (`MM_FreqSep/src/gpu/mm_gpu_dx.cpp:179`) | ❌ no — declines, falls back to CPU |
-| MM_Qualify | DIRECTX only (`MM_Qualify/src/gpu/mm_gpu_dx.cpp:159`) | ❌ no — declines, falls back to CPU |
+| MM_FreqSep | CUDA **and** DIRECTX (`MM_FreqSep/src/gpu/mm_gpu_cuda.cpp`, `mm_gpu_dx.cpp`) | ⏳ CUDA host added 2026-08-04; in-AE A/B pending |
+| MM_Qualify | CUDA **and** DIRECTX (`MM_Qualify/src/gpu/qk_gpu_cuda.cpp`, `mm_gpu_dx.cpp`) | ⏳ CUDA host added 2026-08-04; in-AE A/B pending |
 
 Modern Edge Blur (ported 2026-08-03) is the first plugin written against §1.2
 from the start: CUDA only, DIRECTX **declined** rather than served a passthrough
@@ -86,10 +86,34 @@ host — a passthrough would render the effect as a silent no-op in Premiere,
 which is worse than falling back to the correct CPU path. Its HLSL wrapper still
 exists and is still compiled every build, purely for the §4 item 5 type-check.
 
-Both DX12 hosts are validated bit-exact against their CPU references in their
-AE-free harnesses, so **the kernels are not in question — the backend choice
-is.** Their remaining "first in-AE GPU validation" step cannot pass on this
-hardware as built.
+Both DX12 hosts were validated bit-exact against their CPU references in their
+AE-free harnesses, so **the kernels were never in question — the backend choice
+was.** Both have since been given a CUDA host behind those same kernels
+(MM_FreqSep 2026-08-04, MM_Qualify 2026-08-04); their DX12 hosts stay
+maintained as the Premiere path. The table row above is what the *code* now
+offers; the ⏳ is the in-AE measurement, which is the only thing that promotes
+it to ✅.
+
+**Both MM_Qualify and MM_FreqSep carried a second, independent copy of the
+§2.2/§2.3 failure, and it is worth naming** because it does not look like §2.2
+at first glance and it survives an otherwise perfect CUDA port. Their PreRender
+raised `GPU_RENDER_POSSIBLE` only when the offered framework was already known
+(`what_gpu == PF_GPU_Framework_DIRECTX` in MM_Qualify's case,
+`FS_FrameworkSupported(what_gpu) && gpu_data` in MM_FreqSep's). AE offers
+`what_gpu = NONE` with `gpu_data = null` until it has *seen* that flag at least
+once, so a gate conditioned on a known device never raises the flag and is
+therefore never offered a device — it deadlocks itself shut. Both were fixed
+2026-08-04.
+
+**The rule, and it is not "raise unconditionally":** a gate may decline a frame
+it can PROVE does not fit — run the same tile planner the render runs. It must
+never withhold the flag on a frame it *could not size*. See §2.3 and
+ModernEdgeBlur's `MEB_GPUBudgetAllows`, which returns true on every path where
+it lacks the information to decide.
+
+All four GPU plugins were audited against the §2 checklist on 2026-08-04 and
+are green on all four items; the audit table lives in
+[`gpu-validation-checklist.md`](gpu-validation-checklist.md) §1.
 
 ### 1.2 DECISION (2026-08-02): CUDA is the backend this suite maintains
 

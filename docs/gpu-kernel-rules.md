@@ -12,7 +12,8 @@ written.** These rules exist so that writing it later is a mechanical port,
 not a re-derivation.
 
 This document is the **suite reference** for kernel structure. MM_Qualify
-already follows it (`MM_Qualify/src/gpu/`); EdgeRepair reaches the same
+follows it fully (`MM_Qualify/src/gpu/`, all four prologues as of 2026-08-04 —
+HLSL, CUDA, host-C++; Metal still to write); EdgeRepair reaches the same
 discipline through a single shared header instead of a prologue split — see
 `AE_GPU_Effects.md` §4.6, which reconciles the two and recommends **this**
 layout for new kernel work. (Explicitly *not* MasterFilm; see the Phase 5 note
@@ -26,10 +27,12 @@ in `MM_FreqSep/docs/mm-freqsep-plan.md` for why it is not applicable.)
 > rendered a frame in AE**, because none of the rules here matter until the
 > host gate is open — and see its §1.1 before choosing a backend: the DX12
 > hosts described in §6 below are, on the current test box, **never exercised
-> by After Effects**, which offers CUDA on Windows/NVIDIA. That does not
-> invalidate anything in this document; the kernels are bit-exact and the
-> layout is sound. It means the DX12 *host* is currently a Premiere-host path,
-> and AE coverage needs a CUDA backend behind the same kernels.
+> by After Effects**, which offers CUDA on Windows/NVIDIA. That did not
+> invalidate anything in this document; the kernels were bit-exact and the
+> layout sound. It meant the DX12 *host* is a Premiere-host path, and that AE
+> coverage needed a CUDA backend behind the same kernels. **Both plugins now
+> have one** (2026-08-04) — and §6's decisions were backend-independent enough
+> to carry over unchanged, which is the clearest evidence the layout was right.
 
 Paths in this document are relative to the **suite root** unless they name a
 project folder explicitly; where a rule cites `blur.cpp` or `guided.cpp`
@@ -79,10 +82,16 @@ MM_FreqSep/src/gpu/          (MM_Qualify/src/gpu/ mirrors this, qk_* prefix)
     fs_kernels.cu           one shim, ALL kernel files; nvcc emits one PTX
                             carrying every entry point, deployed as
                             CUDA_Assets/ next to the .aex and loaded with
-                            cuModuleLoadDataEx (EdgeRepair's arrangement)
+                            cuModuleLoadDataEx (EdgeRepair's arrangement).
+                            CMake SKIPS this step when the toolkit is absent:
+                            no PTX ships, device setup declines CUDA, AE
+                            renders on the CPU — the plugin still builds.
     fs_kernel_args.h        the same kernel files through fs_prologue_host.h:
                             the launch-argument structs, compiled FROM the
-                            kernels so the host cannot drift from them (§2.1)
+                            kernels so the host cannot drift from them (§2.1),
+                            and — because a body compiled here is ordinary,
+                            runnable C++ — what the AE-free tests EXECUTE
+                            instead of a transcription (§5)
   mm_gpu_host.h             AE-facing, platform-free, header-only: the band
                             tile planner + FS_GPUJob description. ALL tiling
                             arithmetic lives here so tests can prove it with
@@ -116,8 +125,15 @@ Every kernel is written against these names only. The prologue defines them.
 | `GID_X` / `GID_Y` | `tid.x` / `tid.y` (SV_DispatchThreadID) | `run()`'s two int params     | `gid.x` / `gid.y` (thread_position_in_grid) |
 | `BUF_IN(n, i)`    | `RWStructuredBuffer<float>` @ `u(i)`   | `const float *n;` member — i'th declared | `device const float*` @ `buffer(i)` |
 | `BUF_OUT(n, i)`   | `RWStructuredBuffer<float>` @ `u(4+i)` | `float *n;` member               | `device float*` @ `buffer(4+i)`         |
-| `PARAM_BLOCK`     | `cbuffer` @ `b0` (root constants) | plain members of the same struct   | `constant ...&` argument                |
+| `PARAM_BLOCK_BEGIN` / `PARAM_BLOCK_END` | `cbuffer` @ `b0` (root constants) `{` … `};` | *(nothing)* — the params become plain members of the same struct | `constant ...&` argument |
 | `KF_EXP(x)`       | `exp(x)`                          | `::expf(x)`                        | `metal::exp(x)`                         |
+
+> **Why the param block is a BEGIN/END pair and not a single `PARAM_BLOCK`.**
+> An earlier revision of this table named one token. It cannot be one: on HLSL
+> the block has to *bracket* its declarations (`cbuffer Name : register(b0) {`
+> … `};`), and a single macro cannot open a scope that the kernel's own field
+> list then closes. Both plugins have always spelled it `PARAM_BLOCK_BEGIN` /
+> `PARAM_BLOCK_END`; the table was the thing that was wrong. Fixed 2026-08-04.
 
 **The register/index map IS the binding contract:** inputs occupy slots 0–3,
 outputs 4–7, on every platform. Order, not spelling, must match.
@@ -283,21 +299,51 @@ Known gap, accepted deliberately: 5.2 is a *development-time* check, not a
 regression gate — GPU rendering needs a live AE-hosted device. 5.1 is the
 regression gate, and it covers everything except the D3D12 API layer itself.
 
-**Parked, as of 2026-08-02:** step 5.2 cannot be run in After Effects for
-either DX12 plugin. AE offers `what_gpu = CUDA` on the test box and these hosts
-accept DIRECTX only, so they decline the device and AE renders them on the CPU
-— silently and correctly. Per the decision in `AE_GPU_Effects.md` §1.2, CUDA is
-the backend this suite maintains and these two plugins are re-examined after
-unification. 5.1 is unaffected and remains the regression gate; what is missing
-is real-silicon confirmation, and it will come via a CUDA host.
+**Was parked 2026-08-02, unparked 2026-08-04.** Step 5.2 could not be run in
+After Effects for either DX12 plugin: AE offers `what_gpu = CUDA` on the test
+box and both hosts accepted DIRECTX only, so they declined the device and AE
+rendered them on the CPU — silently and correctly. Both now have a CUDA host
+behind the same kernels (`MM_FreqSep/src/gpu/mm_gpu_cuda.cpp`,
+`MM_Qualify/src/gpu/qk_gpu_cuda.cpp`), so 5.2 is reachable and is the
+outstanding step for each. 5.1 was unaffected throughout and remains the
+regression gate.
 
-## 6. DX12 host decisions (parked — see §5.2)
+**MM_Qualify additionally closed 5.1's own gap.** Its harness proved *tiling*
+but not kernel bodies — both sides called the same `qk_core.h`, so the pixel
+math was never independently exercised. Adding `qk_prologue_host.h` (§1) made
+the bodies compile as ordinary C++ and therefore RUNNABLE, so
+`MM_Qualify/tests/kernel_test.cpp` now runs every entry point against the CPU
+reference at exactly `0.0`, and `pipeline_test.cpp`'s tiled side runs those
+same real kernels through the real planner rather than a hand-written stand-in.
+That is the arrangement to copy: a transcription can rot silently against the
+kernel it mirrors (`MM_FreqSep/tests/gpu_parity_test.cpp` still transcribes, and
+its own header notes the prologue is what lets that be deleted).
 
-Kept in full. These decisions were sound engineering against the wrong target,
+## 6. DX12 host decisions (Premiere's path — see §5.2)
+
+Kept in full. These decisions were sound engineering against the wrong *host*,
 and most of them are backend-independent: the budget gate, the tile planner,
-the scratch-plane scheduling and the MFR-safety argument all carry over to a
-CUDA host unchanged. Read this section as "how the host side was reasoned
-about", not as "what to build next".
+the scratch-plane scheduling and the MFR-safety argument **did** carry over to
+the CUDA hosts unchanged, which is now demonstrated rather than predicted. Read
+this section as "how the host side was reasoned about".
+
+What a CUDA host changes, and nothing else did:
+
+- **No UAV barriers.** Launches on one CUDA stream execute in issue order with
+  an implicit dependency; D3D12 gives no such guarantee for UAV writes, which
+  is why the DX hosts barrier after every dispatch.
+- **Scratch is cached per device, not per render** (EdgeRepair's arrangement),
+  so a steady-state render allocates nothing. That makes it shared between
+  concurrent MFR renders, so a mutex covers the whole ENQUEUE sequence — and
+  because the stream is FIFO, serializing enqueue serializes execution.
+- **Kernels ship as PTX in `CUDA_Assets/` next to the `.aex`**, not embedded,
+  because `nvcc` produces it and the driver JITs it. Resolve every entry point
+  at device setup and decline the whole backend if one is missing — a stale
+  PTX is the classic half-finished deploy, and there is no CPU fallback once a
+  render is underway.
+- **The doubles device gate is MM_FreqSep's alone.** It exists for
+  `fs_guided.kernel`'s box sums (§3.7). MM_Qualify has no box sums and gates on
+  nothing; do not copy it reflexively.
 
 - **Shaders compile at BUILD time** (dxc from the Windows SDK, one `-E` per
   entry point) into DXIL embedded as C headers. No runtime compiler DLL, no
