@@ -18,6 +18,10 @@ An After Effects plugin that softens the edges of keyed or masked layers with a 
 - Composites the original sharp layer on top
 - Blend Radius controls how wide the soft edge transition is — eroding the sharp layer's alpha inward to reveal the blurred plate underneath
 - At Blur Amount = 0 / Blend Radius = 0: pure passthrough, no processing
+- **GPU accelerated (CUDA)** when After Effects offers it, on the same pipeline —
+  see [docs/Architecture.md](docs/Architecture.md#gpu-path-added-2026-08-03).
+  AE chooses per frame; the CPU path is the always-correct fallback and is
+  unchanged by the port.
 
 ## Parameters
 
@@ -44,12 +48,32 @@ via the `AE_SDK_ROOT` cache var (default
 the SDK's own `Resources/`. SDKs are never committed — the license prohibits
 redistribution.
 
+Optional for the GPU path: the **CUDA Toolkit** (nvcc), needed only to build the
+PTX. Without it the build skips that step, `GPU_DEVICE_SETUP` declines quietly
+at runtime, and AE renders on the CPU exactly as before. The host side needs no
+toolkit — it loads `nvcuda.dll` (which ships with the NVIDIA driver) at runtime.
+
 ## Build
 
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
+
+The post-build step also installs `CUDA_Assets/ModernEdgeBlur_Kernels.ptx` next
+to the `.aex` — AE loads kernel assets from beside the plugin, so a deploy that
+copies only the `.aex` leaves a stale or missing PTX and the GPU path declines.
+
+## Tests
+
+```powershell
+.\tests\build_tests.ps1
+```
+
+Headless, no AE SDK and no GPU: compiles both the CPU math (`src/core/`) and the
+GPU kernel math (`src/gpu/`) as host C++ and diffs them with `==`. Run it after
+any change to a formula in either — that is the only thing standing between a
+one-line edit and a silent CPU/GPU divergence.
 
 Post-build step installs `ModernEdgeBlur.aex` to:
 `C:\Program Files\Adobe\Adobe After Effects 2026\Support Files\Plug-ins\`

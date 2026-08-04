@@ -14,8 +14,10 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/MMSuite.cmake" OPTIONAL)
 # from this same file, which is why the build logic used to be wrapped in an
 # add_meb_plugin() function; Edge Repair now lives in ../EdgeRepair with its
 # own CMakeLists, and the two share no code at all. Modern Edge Blur's own
-# sources include nothing but their own header and the STL — that independence
-# is what made the split mechanical, and it is worth preserving.
+# sources include nothing but their own headers, the AE SDK and the STL — that
+# independence is what made the split mechanical, and it is worth preserving.
+# (The GPU path added in 2026-08 keeps it: its CUDA host side is a runtime
+# nvcuda.dll shim, so it links nothing extra and needs no toolkit to build.)
 # ---------------------------------------------------------------------------
 
 # The AE SDK lives OUTSIDE this repo and is never committed (its license
@@ -107,6 +109,7 @@ endif()
 add_library(ModernEdgeBlur MODULE
     "${SRC_DIR}/ModernEdgeBlur.cpp"
     "${SRC_DIR}/ModernEdgeBlur_Strings.cpp"
+    "${SRC_DIR}/ModernEdgeBlur_GPU.cpp"
     ${SDK_SOURCES}
     ${PIPL_RC}
 )
@@ -138,5 +141,141 @@ add_custom_command(TARGET ModernEdgeBlur POST_BUILD
     COMMENT "Installing ModernEdgeBlur to ${AE_PLUGINS_DIR}"
     VERBATIM
 )
+
+# ---------------------------------------------------------------------------
+# GPU backend - CUDA.
+#
+# CUDA is the framework After Effects actually offers effects on Windows/NVIDIA
+# (measured 2026-07-23) and the one this suite maintains; see
+# ../docs/AE_GPU_Effects.md SS1.1-1.2. The HOST side needs NO toolkit - it goes
+# through a runtime nvcuda.dll shim (src/gpu/MEB_CudaShim.h) and links nothing
+# extra - so ModernEdgeBlur_GPU.cpp is always compiled in. Only the .cu -> PTX
+# step below needs nvcc, and when the CUDA toolkit is absent this whole block
+# SKIPS gracefully: no PTX ships, device setup declines CUDA at runtime, and AE
+# renders on the CPU exactly as it does today.
+#
+# PTX targets compute_75 (Turing/RTX-class baseline; the test box is an RTX 3070
+# Ti, sm_86) - PTX is a text format the driver JIT-compiles forward for newer
+# GPUs. -allow-unsupported-compiler: CUDA 12.8 predates VS 2026's MSVC and
+# hard-errors on its version check; safe here because nvcc only emits device PTX
+# (no host code is kept). The -ccbin / INCLUDE dance below is the same recipe
+# EdgeRepair/CMakeLists.txt documents - see there for why each piece is needed.
+# ---------------------------------------------------------------------------
+file(GLOB NVCC_CANDIDATES
+    "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*/bin/nvcc.exe")
+if(NVCC_CANDIDATES)
+    list(SORT NVCC_CANDIDATES)
+    list(GET NVCC_CANDIDATES -1 NVCC_EXE)
+else()
+    find_program(NVCC_EXE nvcc)
+endif()
+
+if(NVCC_EXE)
+    message(STATUS "nvcc: ${NVCC_EXE} - building CUDA_Assets PTX")
+
+    file(GLOB MEB_CUDA_CCBIN_CANDIDATES
+        "C:/Program Files/Microsoft Visual Studio/*/*/VC/Tools/MSVC/14.4*/bin/Hostx64/x64/cl.exe")
+    set(MEB_NVCC_CCBIN "")
+    set(MEB_NVCC_ENV "")
+    if(MEB_CUDA_CCBIN_CANDIDATES)
+        list(SORT MEB_CUDA_CCBIN_CANDIDATES)
+        list(GET MEB_CUDA_CCBIN_CANDIDATES 0 MEB_CUDA_CCBIN)
+        message(STATUS "nvcc host compiler (ccbin): ${MEB_CUDA_CCBIN}")
+        set(MEB_NVCC_CCBIN -ccbin "${MEB_CUDA_CCBIN}")
+
+        get_filename_component(MEB_CCBIN_DIR "${MEB_CUDA_CCBIN}" DIRECTORY)
+        get_filename_component(MEB_MSVC_ROOT "${MEB_CCBIN_DIR}/../../.." ABSOLUTE)
+        file(GLOB MEB_WINSDK_INC_CANDIDATES
+            "C:/Program Files (x86)/Windows Kits/10/Include/10.*")
+        list(SORT MEB_WINSDK_INC_CANDIDATES)
+        list(GET MEB_WINSDK_INC_CANDIDATES -1 MEB_WINSDK_INC)
+        file(TO_NATIVE_PATH "${MEB_MSVC_ROOT}/include" MEB_INC_MSVC)
+        file(TO_NATIVE_PATH "${MEB_WINSDK_INC}/ucrt"   MEB_INC_UCRT)
+        file(TO_NATIVE_PATH "${MEB_WINSDK_INC}/shared" MEB_INC_SHARED)
+        file(TO_NATIVE_PATH "${MEB_WINSDK_INC}/um"     MEB_INC_UM)
+        file(TO_NATIVE_PATH "${MEB_MSVC_ROOT}" MEB_MSVC_ROOT_NATIVE)
+        file(TO_NATIVE_PATH "${MEB_CCBIN_DIR}" MEB_CCBIN_DIR_NATIVE)
+        set(MEB_NVCC_ENV ${CMAKE_COMMAND} -E env
+            --modify "PATH=path_list_prepend:${MEB_CCBIN_DIR_NATIVE}"
+            "INCLUDE=${MEB_INC_MSVC}\;${MEB_INC_UCRT}\;${MEB_INC_SHARED}\;${MEB_INC_UM}"
+            "VCToolsInstallDir=${MEB_MSVC_ROOT_NATIVE}\\")
+    endif()
+
+    set(MEB_CUDA_ASSETS "${CMAKE_CURRENT_BINARY_DIR}/CUDA_Assets")
+    add_custom_command(
+        OUTPUT "${MEB_CUDA_ASSETS}/ModernEdgeBlur_Kernels.ptx"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${MEB_CUDA_ASSETS}"
+        COMMAND ${MEB_NVCC_ENV} "${NVCC_EXE}" -ptx -arch=compute_75
+                --use-local-env
+                -allow-unsupported-compiler ${MEB_NVCC_CCBIN} -o
+                "${MEB_CUDA_ASSETS}/ModernEdgeBlur_Kernels.ptx"
+                "${SRC_DIR}/gpu/ModernEdgeBlurKernels.cu"
+        DEPENDS "${SRC_DIR}/gpu/ModernEdgeBlurKernels.cu"
+                "${SRC_DIR}/gpu/MEB_KernelPasses.h"
+                "${SRC_DIR}/gpu/MEB_KernelMath.h"
+        COMMENT "nvcc: ModernEdgeBlurKernels.cu -> CUDA_Assets/ModernEdgeBlur_Kernels.ptx"
+        VERBATIM
+    )
+    add_custom_target(ModernEdgeBlurCudaPTX
+        DEPENDS "${MEB_CUDA_ASSETS}/ModernEdgeBlur_Kernels.ptx")
+    add_dependencies(ModernEdgeBlur ModernEdgeBlurCudaPTX)
+
+    # Kernel assets must sit NEXT TO the .aex (AE_GPU_Effects.md SS2.5).
+    # copy_directory MERGES, so this coexists with EdgeRepair's own
+    # CUDA_Assets deploy into the same folder - the two PTX files have
+    # different names by design.
+    add_custom_command(TARGET ModernEdgeBlur POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${MEB_CUDA_ASSETS}" "${AE_PLUGINS_DIR}/CUDA_Assets"
+        COMMENT "Installing ModernEdgeBlur CUDA_Assets next to the deployed .aex"
+        VERBATIM
+    )
+else()
+    message(STATUS "nvcc not found - CUDA PTX not built (CUDA declines at runtime; CPU only)")
+endif()
+
+# ---------------------------------------------------------------------------
+# HLSL validation pass. There is NO DirectX 12 host for this plugin and the
+# .cso produced here is deliberately NOT deployed - nothing loads it.
+#
+# It is compiled anyway because fxc type-checks the WHOLE translation unit, so
+# one compiled entry point validates the entire shared kernel math header
+# against HLSL's rules on every build (../docs/AE_GPU_Effects.md SS4 item 5).
+# That has already caught, in EdgeRepair, a construct CUDA and C++ both accept
+# and HLSL rejects. It is a compile-time assertion, not an asset - which is
+# also why a failure here is a real failure worth stopping the build for.
+# ---------------------------------------------------------------------------
+file(GLOB FXC_CANDIDATES
+    "C:/Program Files (x86)/Windows Kits/10/bin/10.*/x64/fxc.exe")
+if(FXC_CANDIDATES)
+    list(SORT FXC_CANDIDATES)
+    list(GET FXC_CANDIDATES -1 FXC_EXE)
+else()
+    find_program(FXC_EXE fxc)
+endif()
+
+if(FXC_EXE)
+    message(STATUS "fxc: ${FXC_EXE} - validating the shared kernel math against HLSL")
+    set(MEB_HLSL "${SRC_DIR}/gpu/ModernEdgeBlurKernels.hlsl")
+    set(MEB_HLSL_CHECK "${CMAKE_CURRENT_BINARY_DIR}/hlsl_check")
+    add_custom_command(
+        OUTPUT "${MEB_HLSL_CHECK}/ModernEdgeBlur_Passthrough.cso"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${MEB_HLSL_CHECK}"
+        COMMAND "${FXC_EXE}" -nologo -T cs_5_1 -E MEB_Passthrough
+                -I "${SRC_DIR}/gpu"
+                -Fo "${MEB_HLSL_CHECK}/ModernEdgeBlur_Passthrough.cso" "${MEB_HLSL}"
+        COMMAND "${FXC_EXE}" -nologo -T rootsig_1_0 -E MEB_ROOT_SIGNATURE
+                -I "${SRC_DIR}/gpu"
+                -Fo "${MEB_HLSL_CHECK}/ModernEdgeBlur_Passthrough.rs" "${MEB_HLSL}"
+        DEPENDS "${MEB_HLSL}" "${SRC_DIR}/gpu/MEB_KernelMath.h"
+        COMMENT "fxc: type-checking MEB_KernelMath.h against HLSL"
+        VERBATIM
+    )
+    add_custom_target(ModernEdgeBlurHLSLCheck
+        DEPENDS "${MEB_HLSL_CHECK}/ModernEdgeBlur_Passthrough.cso")
+    add_dependencies(ModernEdgeBlur ModernEdgeBlurHLSLCheck)
+else()
+    message(STATUS "fxc not found - skipping the HLSL type-check of the shared kernel math")
+endif()
 
 message(STATUS "ModernEdgeBlur.aex -> ${AE_PLUGINS_DIR}")

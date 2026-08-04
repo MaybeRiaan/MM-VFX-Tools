@@ -63,13 +63,24 @@ resource 'PiPL' (16000) {
 		// "global outflags mismatch". See ModernEdgeBlur.cpp GlobalSetup.
 		// out_flags  = DEEP_COLOR_AWARE | PIX_INDEPENDENT | USE_OUTPUT_EXTENT
 		//            = 0x02000000 | 0x400 | 0x40 = 0x02000440
+		// (USE_OUTPUT_EXTENT is deliberately kept even though Adobe's AE GPU
+		//  sample omits it — ../../docs/AE_GPU_Effects.md §8 records that it was
+		//  tested and is irrelevant to the GPU gate, and it is part of how this
+		//  effect's render region already behaves.)
 		AE_Effect_Global_OutFlags {
 		0x02000440
 		},
-		// out_flags2 = FLOAT_COLOR_AWARE | SUPPORTS_SMART_RENDER | SUPPORTS_THREADED_RENDERING
-		//            = 0x1000 | 0x400 | 0x08000000 = 0x08001400
+		// out_flags2 = FLOAT_COLOR_AWARE | SUPPORTS_SMART_RENDER
+		//            | SUPPORTS_THREADED_RENDERING | SUPPORTS_GPU_RENDER_F32
+		//            | SUPPORTS_DIRECTX_RENDERING
+		//            = 0x1000 | 0x400 | 0x08000000 | 0x02000000 | 0x20000000
+		//            = 0x2A001400
+		// The PiPL declares the SUPERSET: GlobalSetup only ORs the two GPU bits
+		// in for non-Premiere hosts, and AE tolerates the PiPL being wider than
+		// the runtime flags. It does NOT tolerate the reverse — any narrower and
+		// AE rejects the plugin at load with "global outflags mismatch" (25::16).
 		AE_Effect_Global_OutFlags_2 {
-		0x08001400
+		0x2A001400
 		},
 		/* [11] */
 		AE_Effect_Match_Name {

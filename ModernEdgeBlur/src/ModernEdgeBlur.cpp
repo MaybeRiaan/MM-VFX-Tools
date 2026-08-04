@@ -21,6 +21,13 @@
                        lerp in the interior; drops the sharp term where sharp coverage is 0.
                        out_alpha = A_alpha  (blurred alpha = soft feathered edge, unchanged by Blend Radius)
 
+    GPU: the same pipeline, pass for pass, in src/ModernEdgeBlur_GPU.cpp (CUDA —
+         the framework AE-on-Windows actually offers effects). AE picks; when it
+         picks the CPU, this file runs unchanged. Every formula the two paths
+         share now lives in core/MEB_CoreMath.h (CPU) and src/gpu/MEB_KernelMath.h
+         + MEB_KernelPasses.h (GPU), and tests/test_gpuparity.cpp diffs them with
+         `==`. A formula changes in BOTH in the same commit, or not at all.
+
     Passthrough: Blur=0 and Blend=0 → input copied directly to output, held RGB preserved.
     Premult: preserve_rgb_of_zero_alpha=FALSE on checkout, PLUS an explicit zero-RGB-
              where-alpha-is-0 pass on sharp_buf right after unpacking. The checkout flag
@@ -42,6 +49,15 @@
 
 #define NOMINMAX
 #include "ModernEdgeBlur.h"
+#include "ModernEdgeBlur_GPU.h"   // device lifecycle + GPU SmartRender
+
+// Every per-pixel formula this file evaluates now lives here, AE-free, so the
+// GPU path can be diffed against the REAL CPU code with no AE SDK in the loop
+// (tests/test_gpuparity.cpp). Nothing about the pipeline changed: the callbacks
+// below keep their thread_local scratch, their column blocking and MEB_Pool
+// exactly as before — only the innermost arithmetic became a call.
+#include "core/MEB_CoreMath.h"
+
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -52,19 +68,11 @@
 #include <chrono>
 #include <new>
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-static inline A_long clampL(A_long v, A_long lo, A_long hi)
-{
-    return v < lo ? lo : (v > hi ? hi : v);
-}
-
-static inline float clampF(float v, float lo, float hi)
-{
-    return v < lo ? lo : (v > hi ? hi : v);
-}
+// MEB_CoreMath.h spells A_long as its own MEB_Long so it can stay free of the
+// AE SDK. If a future SDK ever widened one of them, every index in the shared
+// math would silently truncate.
+static_assert(sizeof(A_long) == sizeof(MEB_Long),
+              "MEB_Long must match A_long — see src/core/MEB_CoreMath.h");
 
 // ---------------------------------------------------------------------------
 // Per-render-thread buffer pool. SmartRender previously allocated ~640MB of
@@ -151,40 +159,8 @@ static void PackRow(const float *src, void *dstRow, A_long W, PF_PixelFormat fmt
     }
 }
 
-// ---------------------------------------------------------------------------
-// Morphological min/max filter on a single float plane (circular kernel,
-// brute-force). dilate=true grows the plane (max filter); dilate=false
-// shrinks it (min filter / erosion). Shared by ShiftEdgeAlpha (Phase 1) and
-// the Blend Radius alpha erosion (Phase 3).
-// ---------------------------------------------------------------------------
-static void MorphPlane(const float *in, float *out, A_long W, A_long H, float radius, bool dilate)
-{
-    const float r = std::abs(radius);
-    if (r < 0.5f) {
-        std::memcpy(out, in, sizeof(float) * (size_t)W * H);
-        return;
-    }
-
-    const int   ri = (int)std::ceil(r);
-    const float r2 = r * r;
-
-    for (A_long y = 0; y < H; ++y) {
-        for (A_long x = 0; x < W; ++x) {
-            float best = dilate ? 0.f : 1.f;
-            for (int dy = -ri; dy <= ri; ++dy) {
-                for (int dx = -ri; dx <= ri; ++dx) {
-                    if ((float)(dx*dx + dy*dy) > r2) continue;
-                    const A_long sx = clampL(x + dx, 0, W - 1);
-                    const A_long sy = clampL(y + dy, 0, H - 1);
-                    const float  a  = in[(size_t)sy * W + sx];
-                    if (dilate) { if (a > best) best = a; }
-                    else        { if (a < best) best = a; }
-                }
-            }
-            out[(size_t)y * W + x] = best;
-        }
-    }
-}
+// MorphPlane — the circular min/max filter behind Shift Edge — now lives in
+// core/MEB_CoreMath.h, alongside every other formula the GPU has to match.
 
 // ---------------------------------------------------------------------------
 // Phase 1: Morphological shift on alpha.
@@ -240,22 +216,8 @@ static PF_Err
 MEB_DirMinRow(void *refconPV, A_long /*thread_indexL*/, A_long y, A_long /*iterationsL*/)
 {
     const MEB_DirMinRefcon *rc = static_cast<const MEB_DirMinRefcon*>(refconPV);
-    const A_long W       = rc->W;
-    const int    dx      = rc->dx;
-    const int    dy      = rc->dy;
-    const int    halfLen = rc->halfLen;
-    float       *outRow  = rc->out + (size_t)y * W;
-
-    for (A_long x = 0; x < W; ++x) {
-        float m = 1.f;
-        for (int t = -halfLen; t <= halfLen; ++t) {
-            const A_long sx = clampL(x + t * dx, 0, W - 1);
-            const A_long sy = clampL(y + t * dy, 0, rc->H - 1);
-            const float  a  = rc->in[(size_t)sy * W + sx];
-            if (a < m) m = a;
-        }
-        outRow[x] = m;
-    }
+    MEB_DirMinRowInline(rc->in, rc->out + (size_t)y * rc->W,
+                        rc->W, rc->H, y, rc->dx, rc->dy, rc->halfLen);
     return PF_Err_NONE;
 }
 
@@ -276,19 +238,9 @@ static void DirectionalMinFilter(const float *in, float *out, A_long W, A_long H
         if ((*in_data->utils->iterate_generic)(H, &rc, MEB_DirMinRow) == PF_Err_NONE) return;
     }
 
-    // Serial fallback.
-    for (A_long y = 0; y < H; ++y) {
-        for (A_long x = 0; x < W; ++x) {
-            float m = 1.f;
-            for (int t = -halfLen; t <= halfLen; ++t) {
-                const A_long sx = clampL(x + t * dx, 0, W - 1);
-                const A_long sy = clampL(y + t * dy, 0, H - 1);
-                const float  a  = in[(size_t)sy * W + sx];
-                if (a < m) m = a;
-            }
-            out[(size_t)y * W + x] = m;
-        }
-    }
+    // Serial fallback — same row body as the threaded callback above.
+    for (A_long y = 0; y < H; ++y)
+        MEB_DirMinRowInline(in, out + (size_t)y * W, W, H, y, dx, dy, halfLen);
 }
 
 // Approximate circular erosion of a float alpha plane via 4-direction octagon
@@ -301,11 +253,10 @@ static void OctagonErode(const float *in, float *out, A_long W, A_long H,
         return;
     }
 
-    // Clamp axis half-length to >=1 so any radius past the 0.5 threshold
-    // erodes by at least one pixel (avoids a dead zone at very low radius,
-    // where sqrt(2)-1 * radius would otherwise round down to 0).
-    const int a = std::max(1, (int)std::lround(radius * 0.41421356f)); // sqrt(2)-1
-    const int c =              (int)std::lround(radius * 0.29289322f); // 1-1/sqrt(2)
+    // Half-lengths come from the shared helpers (core/MEB_CoreMath.h) so the
+    // GPU pass sequence cannot disagree with this one about the octagon's size.
+    const int a = MEB_OctagonAxisHalf(radius);   // sqrt(2)-1, clamped to >=1
+    const int c = MEB_OctagonDiagHalf(radius);   // 1-1/sqrt(2), may be 0
 
     // Grow-once per render thread, reused every frame (see MEB_Pool comment).
     thread_local std::vector<float> tmp;
@@ -324,46 +275,11 @@ static void OctagonErode(const float *in, float *out, A_long W, A_long H,
 // Strategy: blur each channel plane independently using the same kernel.
 // ---------------------------------------------------------------------------
 
-// Build a 1-D Gaussian kernel (normalised).
-// sigma = radius/2, support = ceil(3*sigma) — support must reach ~3 sigma or
-// the clipped tails make the blur read visibly smaller than its sigma.
-// (Was radius/4, tuned by eye against the old premult bug whose darkening
-// made the blur LOOK wider than it was; with honest colour that mapping
-// reads far too small next to Red Giant Edge Blur at the same value.)
-static std::vector<float> MakeBlurKernel(float radius)
-{
-    if (radius < 0.5f) return {};
-    const float sigma = radius * 0.5f;
-    const int   half  = (int)std::ceil(3.f * sigma);
-    const int   size  = 2 * half + 1;
-    std::vector<float> k(size);
-    float sum = 0.f;
-    for (int i = 0; i < size; ++i) {
-        float x = (float)(i - half);
-        k[i] = std::exp(-(x * x) / (2.f * sigma * sigma));
-        sum += k[i];
-    }
-    for (auto &v : k) v /= sum;
-    return k;
-}
-
-// sigma = radius, support = ceil(radius*3) — wide, aggressive edge erosion.
-static std::vector<float> MakeBlendKernel(float radius)
-{
-    if (radius < 0.5f) return {};
-    const float sigma = radius;
-    const int   half  = (int)std::ceil(radius * 3.f);
-    const int   size  = 2 * half + 1;
-    std::vector<float> k(size);
-    float sum = 0.f;
-    for (int i = 0; i < size; ++i) {
-        float x = (float)(i - half);
-        k[i] = std::exp(-(x * x) / (2.f * sigma * sigma));
-        sum += k[i];
-    }
-    for (auto &v : k) v /= sum;
-    return k;
-}
+// MakeBlurKernel (sigma = radius/2, support ceil(3 sigma)) and MakeBlendKernel
+// (sigma = radius, support ceil(3*radius)) now live in core/MEB_CoreMath.h.
+// The GPU path calls those same builders on the host and uploads the resulting
+// float array verbatim, so both paths convolve with identical bits — see
+// gpu-kernel-rules.md §3.1 for why a GPU-side rebuild is not acceptable.
 
 // ---------------------------------------------------------------------------
 // iterate_generic infrastructure for the separable Gaussian (GaussBlurPlane).
@@ -415,13 +331,7 @@ MEB_HBlurRow(void *refconPV, A_long /*thread_indexL*/, A_long i, A_long /*iterat
     thread_local std::vector<float> tmp;
     if ((A_long)tmp.size() < W) tmp.resize((size_t)W);
 
-    for (A_long x = 0; x < W; ++x) {
-        float acc = 0.f;
-        for (int t = -half; t <= half; ++t) {
-            acc += row[clampL(x + t, 0, W - 1)] * rc->kdata[t + half];
-        }
-        tmp[x] = acc;
-    }
+    MEB_BlurRowPlane(row, tmp.data(), W, rc->kdata, half);
     for (A_long x = 0; x < W; ++x) row[x] = tmp[x];
     return PF_Err_NONE;
 }
@@ -455,12 +365,7 @@ MEB_VBlurCols(void *refconPV, A_long /*thread_indexL*/, A_long i, A_long /*itera
 
     float acc[MEB_PLANE_VBLOCK];
     for (A_long y = 0; y < H; ++y) {
-        for (A_long c = 0; c < nc; ++c) acc[c] = 0.f;
-        for (int t = -half; t <= half; ++t) {
-            const float *p  = tmp.data() + (size_t)clampL(y + t, 0, H - 1) * nc;
-            const float  kw = rc->kdata[t + half];
-            for (A_long c = 0; c < nc; ++c) acc[c] += p[c] * kw;
-        }
+        MEB_BlurColsPlane(tmp.data(), y, H, nc, rc->kdata, half, acc);
         std::memcpy(rc->buf + (size_t)y * W + c0, acc, sizeof(float) * nc);
     }
     return PF_Err_NONE;
@@ -494,19 +399,14 @@ static void GaussBlurPlane(float *buf, A_long W, A_long H, const std::vector<flo
         // partially blurred; the serial path overwrites it cleanly.
     }
 
-    // Serial fallback.
+    // Serial fallback — same row/column bodies as the threaded callbacks, with
+    // the vertical pass degenerating to a single-column block (nc = 1).
     std::vector<float> tmp((size_t)std::max(W, H));
 
     // Horizontal pass
     for (A_long y = 0; y < H; ++y) {
         float *row = buf + (size_t)y * W;
-        for (A_long x = 0; x < W; ++x) {
-            float acc = 0.f;
-            for (int t = -half; t <= half; ++t) {
-                acc += row[clampL(x + t, 0, W - 1)] * k[t + half];
-            }
-            tmp[x] = acc;
-        }
+        MEB_BlurRowPlane(row, tmp.data(), W, k.data(), half);
         for (A_long x = 0; x < W; ++x) row[x] = tmp[x];
     }
 
@@ -514,10 +414,8 @@ static void GaussBlurPlane(float *buf, A_long W, A_long H, const std::vector<flo
     for (A_long x = 0; x < W; ++x) {
         for (A_long y = 0; y < H; ++y) tmp[y] = buf[(size_t)y * W + x];
         for (A_long y = 0; y < H; ++y) {
-            float acc = 0.f;
-            for (int t = -half; t <= half; ++t) {
-                acc += tmp[clampL(y + t, 0, H - 1)] * k[t + half];
-            }
+            float acc;
+            MEB_BlurColsPlane(tmp.data(), y, H, 1, k.data(), half, &acc);
             buf[(size_t)y * W + x] = acc;
         }
     }
@@ -654,17 +552,7 @@ MEB_HBlurRowRGBA(void *refconPV, A_long /*thread_indexL*/, A_long i, A_long /*it
     thread_local std::vector<float> tmp;
     if ((A_long)tmp.size() < W * 4) tmp.resize((size_t)W * 4);
 
-    for (A_long x = 0; x < W; ++x) {
-        float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
-        for (int t = -half; t <= half; ++t) {
-            const float *p  = row + (size_t)clampL(x + t, 0, W - 1) * 4;
-            const float  kw = rc->kdata[t + half];
-            acc0 += p[0] * kw; acc1 += p[1] * kw;
-            acc2 += p[2] * kw; acc3 += p[3] * kw;
-        }
-        float *o = tmp.data() + (size_t)x * 4;
-        o[0] = acc0; o[1] = acc1; o[2] = acc2; o[3] = acc3;
-    }
+    MEB_BlurRowRGBA(row, tmp.data(), W, rc->kdata, half);
     std::memcpy(row, tmp.data(), sizeof(float) * (size_t)W * 4);
     return PF_Err_NONE;
 }
@@ -690,20 +578,7 @@ MEB_VBlurColsRGBA(void *refconPV, A_long /*thread_indexL*/, A_long i, A_long /*i
 
     float acc[MEB_RGBA_VBLOCK * 4];
     for (A_long y = 0; y < H; ++y) {
-        for (A_long j = 0; j < nf; ++j) acc[j] = 0.f;
-        for (int t = -half; t <= half; ++t) {
-            const float *p  = tmp.data() + (size_t)clampL(y + t, 0, H - 1) * nf;
-            const float  kw = rc->kdata[t + half];
-            for (A_long j = 0; j < nf; ++j) acc[j] += p[j] * kw;
-        }
-        if (rc->unpremult) {
-            for (A_long c = 0; c < nc; ++c) {
-                const float inv = 1.f / std::max(acc[c * 4 + 0], 1e-4f);
-                acc[c * 4 + 1] *= inv;
-                acc[c * 4 + 2] *= inv;
-                acc[c * 4 + 3] *= inv;
-            }
-        }
+        MEB_BlurColsRGBA(tmp.data(), y, H, nf, rc->kdata, half, rc->unpremult, acc);
         std::memcpy(rc->buf + ((size_t)y * W + c0) * 4, acc, sizeof(float) * nf);
     }
     return PF_Err_NONE;
@@ -731,22 +606,13 @@ static void GaussBlurRGBA(float *buf, A_long W, A_long H, const std::vector<floa
         // On failure of either pass, fall through to serial below.
     }
 
-    // Serial fallback.
+    // Serial fallback — same row/column bodies as the threaded callbacks, with
+    // the vertical pass degenerating to a single-pixel-wide block (nf = 4).
     std::vector<float> tmp((size_t)std::max(W, H) * 4);
 
     for (A_long y = 0; y < H; ++y) {
         float *row = buf + (size_t)y * W * 4;
-        for (A_long x = 0; x < W; ++x) {
-            float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
-            for (int t = -half; t <= half; ++t) {
-                const float *p  = row + (size_t)clampL(x + t, 0, W - 1) * 4;
-                const float  kw = k[t + half];
-                acc0 += p[0] * kw; acc1 += p[1] * kw;
-                acc2 += p[2] * kw; acc3 += p[3] * kw;
-            }
-            float *o = tmp.data() + (size_t)x * 4;
-            o[0] = acc0; o[1] = acc1; o[2] = acc2; o[3] = acc3;
-        }
+        MEB_BlurRowRGBA(row, tmp.data(), W, k.data(), half);
         std::memcpy(row, tmp.data(), sizeof(float) * (size_t)W * 4);
     }
 
@@ -757,19 +623,10 @@ static void GaussBlurRGBA(float *buf, A_long W, A_long H, const std::vector<floa
             o[0] = p[0]; o[1] = p[1]; o[2] = p[2]; o[3] = p[3];
         }
         for (A_long y = 0; y < H; ++y) {
-            float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
-            for (int t = -half; t <= half; ++t) {
-                const float *p  = tmp.data() + (size_t)clampL(y + t, 0, H - 1) * 4;
-                const float  kw = k[t + half];
-                acc0 += p[0] * kw; acc1 += p[1] * kw;
-                acc2 += p[2] * kw; acc3 += p[3] * kw;
-            }
-            if (unpremult_after) {
-                const float inv = 1.f / std::max(acc0, 1e-4f);
-                acc1 *= inv; acc2 *= inv; acc3 *= inv;
-            }
+            float acc[4];
+            MEB_BlurColsRGBA(tmp.data(), y, H, 4, k.data(), half, unpremult_after, acc);
             float *dst = buf + ((size_t)y * W + x) * 4;
-            dst[0] = acc0; dst[1] = acc1; dst[2] = acc2; dst[3] = acc3;
+            dst[0] = acc[0]; dst[1] = acc[1]; dst[2] = acc[2]; dst[3] = acc[3];
         }
     }
 }
@@ -802,23 +659,8 @@ static void GaussBlurRGBA(float *buf, A_long W, A_long H, const std::vector<floa
 // vertical pass (MEB_VBlurColsRGBA), which touches every pixel anyway.
 // ---------------------------------------------------------------------------
 
-// Zero RGB at the a<=0 cliff and derive optional per-frame buffers from one
-// sharp row. blurred/alpha may be null. premult_blurred selects a*rgb (Blur
-// Amount active) vs a plain straight copy (blend-only frames).
-static inline void MEB_DeriveRowInline(float *sh, float *bl, float *al, A_long W, bool premult_blurred)
-{
-    for (A_long x = 0; x < W; ++x, sh += 4) {
-        const float a = sh[0];
-        if (a <= 0.f) { sh[1] = 0.f; sh[2] = 0.f; sh[3] = 0.f; }
-        if (bl) {
-            bl[0] = a;
-            if (premult_blurred) { bl[1] = sh[1] * a; bl[2] = sh[2] * a; bl[3] = sh[3] * a; }
-            else                 { bl[1] = sh[1];     bl[2] = sh[2];     bl[3] = sh[3];     }
-            bl += 4;
-        }
-        if (al) *al++ = a;
-    }
-}
+// MEB_DeriveRowInline — zero RGB at the a<=0 cliff and derive the per-frame
+// buffers — now lives in core/MEB_CoreMath.h.
 
 struct MEB_IngestRefcon {
     const PF_EffectWorld *world;
@@ -902,21 +744,7 @@ MEB_CompositeRow(void *refconPV, A_long /*thread_indexL*/, A_long y, A_long /*it
     float *dst = rowv.data();
 
     for (A_long x = 0; x < W; ++x) {
-        const float w     = clampF(wt[x], 0.f, 1.f);
-        const float sw    = w * sh[0];
-        const float bw    = (1.f - w) * bl[0];
-        const float denom = sw + bw;
-        dst[0] = bl[0];
-        if (denom > 1e-6f) {
-            const float norm = 1.f / denom;
-            dst[1] = (sh[1] * sw + bl[1] * bw) * norm;
-            dst[2] = (sh[2] * sw + bl[2] * bw) * norm;
-            dst[3] = (sh[3] * sw + bl[3] * bw) * norm;
-        } else {
-            dst[1] = bl[1];
-            dst[2] = bl[2];
-            dst[3] = bl[3];
-        }
+        MEB_CompositePixel(sh, bl, wt[x], dst);
         sh += 4; bl += 4; dst += 4;
     }
 
@@ -970,12 +798,46 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 {
     out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION,
                                       STAGE_VERSION, BUILD_VERSION);
+
+    // These must match resources/ModernEdgeBlurPiPL.r literally, or AE rejects
+    // the plugin at load with "global outflags mismatch" (25::16).
+    //
+    // USE_OUTPUT_EXTENT is KEPT. AE_GPU_Effects.md §2.1 says not to set it,
+    // because Adobe's AE GPU sample declares 0x02000400 — but §8 hypothesis 5
+    // records that it was actually tested and is irrelevant to the GPU gate
+    // ("wrong both ways"). It IS part of how this effect's render region
+    // behaves today, so it stays; the GPU path is additive here, not a
+    // rewrite.
     out_data->out_flags  = PF_OutFlag_DEEP_COLOR_AWARE |
                            PF_OutFlag_PIX_INDEPENDENT  |
                            PF_OutFlag_USE_OUTPUT_EXTENT;
     out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE       |
                            PF_OutFlag2_SUPPORTS_SMART_RENDER    |
                            PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
+
+    // GPU declaration, exactly as Adobe's AE GPU sample does it: announce F32 +
+    // DIRECTX for every host EXCEPT Premiere, which wants pixel formats instead
+    // and which this plugin does not target (its flags stay as they were).
+    //
+    // SUPPORTS_DIRECTX_RENDERING does NOT force the effect onto DirectX — Adobe
+    // sets it unconditionally in this same branch and still receives
+    // what_gpu = CUDA. If AE ever did offer DIRECTX, MEB_GPUDeviceSetup declines
+    // it quietly and the CPU path renders the frame.
+    //
+    // Two more pieces are required and both are easy to miss: PreRender must
+    // raise GPU_RENDER_POSSIBLE per frame, and GPU_DEVICE_SETUP must RE-AFFIRM
+    // SUPPORTS_GPU_RENDER_F32 (see MEB_GPUDeviceSetup). Without the second, AE
+    // offers what_gpu = NONE at every PreRender, forever, with no error — the
+    // silent failure AE_GPU_Effects.md §2.2 was written about.
+    //
+    // Do NOT add SUPPORTS_QUERY_DYNAMIC_FLAGS: it is not part of the GPU recipe
+    // and mishandling PF_Cmd_QUERY_DYNAMIC_FLAGS raises an unsuppressable AE
+    // error 25::228 on EVERY apply.
+    if (in_data->appl_id != 'PrMr') {
+        out_data->out_flags2 |= PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 |
+                                PF_OutFlag2_SUPPORTS_DIRECTX_RENDERING;
+    }
+
     return PF_Err_NONE;
 }
 
@@ -1056,6 +918,26 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
     extra->output->result_rect.right  = std::min(extra->output->result_rect.right,  out_req.right);
     extra->output->result_rect.bottom = std::min(extra->output->result_rect.bottom, out_req.bottom);
 
+    // Allow the GPU render for this frame. Without this per-frame flag AE never
+    // takes the GPU path, even with SUPPORTS_GPU_RENDER_F32 declared. It
+    // declares POSSIBILITY, not a demand — AE still decides per frame, and
+    // expect what_gpu = NONE for thumbnails and heavily downsampled draft
+    // renders even when the GPU path is working perfectly. Raised
+    // unconditionally, matching Adobe's AE GPU sample and EdgeRepair: gating it
+    // on `what_gpu != NONE` deadlocks, because AE offers NONE until it has seen
+    // the flag. Any frame we do not flag renders on the CPU pipeline — the
+    // always-correct reference.
+    {
+        const bool gpuPossible = !err;
+        if (gpuPossible)
+            extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+        MEB_GPULogPreRenderDecision(extra->input->what_gpu,
+                                    extra->input->gpu_data, gpuPossible,
+                                    (int)extra->input->bitdepth,
+                                    (int)in_data->downsample_x.num,
+                                    (int)in_data->downsample_x.den);
+    }
+
     return err;
 }
 
@@ -1080,16 +962,32 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
     if (err || !wsP || !src_world || !out_world) goto cleanup;
 
     {
+        // Params are read BEFORE the CPU/GPU fork: both paths need the same
+        // values, and PF_CHECKOUT_PARAM is a host call that must not behave
+        // differently against GPU worlds.
+        MEB_Params p; AEFX_CLR_STRUCT(p);
+        ERR(ReadParams(in_data, &p));
+        if (err) goto cleanup;
+
+        // -----------------------------------------------------------------
+        // GPU render. AE hands GPU effect worlds (BGRA128 float, on the
+        // device) when PreRender raised GPU_RENDER_POSSIBLE and it chose the
+        // GPU for this frame; everything below this branch is the CPU
+        // pipeline and never sees a GPU world. Do NOT fall back to the CPU
+        // path on a GPU error — CPU code cannot address device memory.
+        // -----------------------------------------------------------------
+        if (extra->input->what_gpu != PF_GPU_Framework_NONE) {
+            err = MEB_SmartRenderGPU(in_data, out_data, extra,
+                                     src_world, out_world, p);
+            goto cleanup;
+        }
+
         PF_PixelFormat fmt = PF_PixelFormat_INVALID;
         ERR(wsP->PF_GetPixelFormat(out_world, &fmt));
         if (err) goto cleanup;
 
         const A_long outW = out_world->width;
         const A_long outH = out_world->height;
-
-        MEB_Params p; AEFX_CLR_STRUCT(p);
-        ERR(ReadParams(in_data, &p));
-        if (err) goto cleanup;
 
         // No inflation — src_world is exactly output size.
         const size_t outN = (size_t)outW * outH;
@@ -1388,6 +1286,17 @@ PF_Err EffectMain(PF_Cmd cmd, PF_InData *in_data, PF_OutData *out_data,
             case PF_Cmd_PARAMS_SETUP:     err = ParamsSetup(in_data, out_data, params, output);        break;
             case PF_Cmd_SMART_PRE_RENDER: err = PreRender(in_data, out_data, (PF_PreRenderExtra*)extra); break;
             case PF_Cmd_SMART_RENDER:     err = SmartRender(in_data, out_data, (PF_SmartRenderExtra*)extra); break;
+            // GPU renders arrive on their OWN command — the enum is
+            // SMART_RENDER_GPU, not GPU_SMART_RENDER, which is exactly why it
+            // is easy to omit and why the effect then renders on the CPU with
+            // no error at all. Same PF_SmartRenderExtra payload; SmartRender's
+            // what_gpu fork routes it to MEB_SmartRenderGPU.
+            case PF_Cmd_SMART_RENDER_GPU: err = SmartRender(in_data, out_data, (PF_SmartRenderExtra*)extra); break;
+            // Per-GPU-device lifecycle (ModernEdgeBlur_GPU.cpp). Setup declines
+            // quietly for frameworks this build does not render on, which is
+            // how AE falls back to the CPU pipeline cleanly.
+            case PF_Cmd_GPU_DEVICE_SETUP:   err = MEB_GPUDeviceSetup(in_data, out_data, (PF_GPUDeviceSetupExtra*)extra);     break;
+            case PF_Cmd_GPU_DEVICE_SETDOWN: err = MEB_GPUDeviceSetdown(in_data, out_data, (PF_GPUDeviceSetdownExtra*)extra); break;
         }
     } catch (PF_Err &e) { err = e; }
     return err;

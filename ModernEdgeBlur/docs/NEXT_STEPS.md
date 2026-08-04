@@ -1,5 +1,38 @@
 # Modern Edge Blur — Next Steps
 
+> **STATUS 2026-08-03 — GPU (CUDA) port landed, code-complete, not yet run in AE.**
+>
+> The whole pipeline now exists on CUDA, pass for pass, in
+> `src/ModernEdgeBlur_GPU.cpp` + `src/gpu/`. **The CPU pipeline is unchanged** —
+> same phases, same threading, same `MEB_Pool`, same numbers. What did change in
+> `ModernEdgeBlur.cpp`: its per-pixel formulas moved verbatim into the new
+> AE-free `src/core/MEB_CoreMath.h` (so the parity gate can diff against the real
+> code rather than a transcription), and the GPU plumbing was added — GlobalSetup
+> flags, PreRender's `GPU_RENDER_POSSIBLE`, the `what_gpu` fork in SmartRender,
+> and three new `EffectMain` cases. PiPL `out_flags2` → `0x2A001400`.
+>
+> Full write-up: [Architecture.md → GPU path](Architecture.md#gpu-path-added-2026-08-03).
+>
+> **NEXT, in order:**
+> 1. **Build it.** Nothing here has been compiled yet. The nvcc PTX step and the
+>    fxc type-check step are both new in CMakeLists.txt and both skip gracefully
+>    if their tool is missing.
+> 2. **Run the parity gate:** `.\tests\build_tests.ps1`. Headless, no AE, no GPU.
+>    It must pass before any in-AE testing is worth doing.
+> 3. **Spot-check CPU perf** on the 4.6K comp against the numbers below
+>    (TOTAL avg 351 ms, worst 580 ms). The extraction into `MEB_CoreMath.h` is
+>    inline + `__restrict` and should be free, but the blocked vertical loops are
+>    exactly the ones whose auto-vectorisation earned that 4x, so confirm rather
+>    than assume.
+> 4. **First in-AE GPU render.** Check `%TEMP%\ModernEdgeBlur_gpu.log` FIRST:
+>    `what_gpu=3` at PreRender and `SMART_RENDER GPU` lines mean the gate is open.
+>    `what_gpu=0` at every PreRender means it is shut — go to
+>    `../../docs/AE_GPU_Effects.md` §2.2 before theorising. Then A/B the same
+>    frame against Mercury → *Software Only*; target max-abs ≤ 1e-5.
+> 5. Only then: consider the perf levers noted in Architecture.md (shared-memory
+>    blur tiles; fusing the vertical blur with the composite to save a full
+>    frame of bandwidth).
+
 > **STATUS 2026-07-06, end of session — v1.3 core is DONE and verified. Blur Amount and Blend Radius are correct, halo-free, and ~4x faster on worst-case frames. All work committed to main.**
 >
 > **This session completed (all user-verified in AE):**
@@ -96,6 +129,50 @@ Timing labels changed: `Unpack`→`Ingest`, `ZeroRGB` gone (fused), `Composite` 
 ## Priority 4 — EdgeRepair suite plugin
 
 A second plugin (`EdgeRepair.aex`) was prototyped in an earlier session but removed in the clean-slate rebuild. It will be reintroduced as a separate `add_meb_plugin` entry in CMakeLists.txt once ModernEdgeBlur v1 is fully validated. The `add_meb_plugin` CMake function already supports multiple targets.
+
+## Priority 5 — GPU scratch budget gate in PreRender (TODO, 2026-08-03)
+
+**Deferred deliberately.** Planned for the session that also revisits MM_FreqSep,
+because that plugin already has the thing to copy.
+
+**The problem.** The GPU path asks AE for one scratch block sized to the frame
+and the active parameters — 11 floats/pixel at the defaults, 12 with Shift Edge
+active (per-buffer table in [Architecture.md](Architecture.md) → "Device memory"):
+
+| Frame | default | + Shift Edge | passthrough |
+|---|---|---|---|
+| HD 1920×1080 | 91 MB | 100 MB | 8 MB |
+| UHD 3840×2160 | 365 MB | 398 MB | 33 MB |
+| 4.6K 4608×3164 | 641 MB | 700 MB | 58 MB |
+
+If `AllocateDeviceMemory` refuses, `MEB_RenderCUDA` returns
+`PF_Err_OUT_OF_MEMORY` and **the frame fails** — it does not fall back to the CPU
+pipeline. It cannot: by the time `PF_Cmd_SMART_RENDER_GPU` runs, AE has already
+handed over input and output worlds that live in device memory, and CPU code
+cannot address them. The decision has to be taken earlier, in PreRender, where
+declining costs nothing.
+
+**The fix.** What MM_FreqSep already does and calls its "budget gate"
+(`../../docs/gpu-kernel-rules.md` §6): compute the worst-case scratch size in
+PreRender and raise `PF_RenderOutputFlag_GPU_RENDER_POSSIBLE` only when it fits a
+budget. Infeasible frames then render on the CPU — slower, never wrong. Two
+properties of that version are worth copying rather than reinventing:
+
+- **The gate and the render must run the SAME size calculation**, so they cannot
+  disagree about whether a frame fits. Here that means calling `MEB_BuildLayout`
+  from PreRender too — it already takes nothing but `W`, `H`, four booleans and
+  the two kernel sizes, so it is a lift, not a rewrite.
+- MM_FreqSep budgets **¼ of dedicated VRAM, clamped to [256 MB, 1 GB]**. That
+  fraction is a judgement call rather than a measurement, which is the main
+  reason this is deferred instead of guessed at now.
+
+**Measure before picking a fraction:** whether AE's `AllocateDeviceMemory`
+already degrades gracefully under pressure, or whether it competes with AE's own
+frame cache. The answer decides whether ¼ of VRAM is generous or reckless.
+
+**Why it is not urgent.** On the test box (RTX 3070 Ti, 8 GB) even 4.6K with
+Shift Edge is ~700 MB, comfortable. It matters for 8K comps, laptop GPUs, and
+comps stacking several GPU-accelerated effects.
 
 ## Known working state (v1.2 / v1.3-in-progress)
 

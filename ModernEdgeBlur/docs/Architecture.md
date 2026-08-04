@@ -84,7 +84,158 @@ Two separate kernels, tuned independently:
 
 `AE_Effect_Global_OutFlags` / `AE_Effect_Global_OutFlags_2` in the PiPL must match the bitmasks set by `GlobalSetup` at runtime. Current values:
 - `out_flags  = 0x02000440` (DEEP_COLOR_AWARE | PIX_INDEPENDENT | USE_OUTPUT_EXTENT)
-- `out_flags2 = 0x08001400` (FLOAT_COLOR_AWARE | SUPPORTS_SMART_RENDER | SUPPORTS_THREADED_RENDERING)
+- `out_flags2 = 0x2A001400` (FLOAT_COLOR_AWARE | SUPPORTS_SMART_RENDER | SUPPORTS_THREADED_RENDERING | SUPPORTS_GPU_RENDER_F32 | SUPPORTS_DIRECTX_RENDERING)
+
+The PiPL declares the **superset**: `GlobalSetup` only ORs the two GPU bits in
+for non-Premiere hosts, and AE tolerates the PiPL being wider than the runtime
+flags. It does not tolerate the reverse — any narrower and AE rejects the plugin
+at load with *"global outflags mismatch"* (25::16).
+
+## GPU path (added 2026-08-03)
+
+The same pipeline, pass for pass, on CUDA. After Effects picks per frame; when
+it picks the CPU, everything above runs unchanged. **The CPU pipeline is
+untouched by the port** — same phases, same threading, same buffer pool, same
+numbers.
+
+### Why CUDA only
+
+AE 2026 on Windows/NVIDIA hands effects `what_gpu = CUDA` and never probes
+DirectX, even with `SUPPORTS_DIRECTX_RENDERING` declared — measured on this box
+2026-07-23 while bringing up Edge Repair. See [`AE_GPU_Effects.md`](../../docs/AE_GPU_Effects.md)
+§1.1–1.2, which makes CUDA the backend this suite maintains. DirectX is
+**declined** at `GPU_DEVICE_SETUP` rather than served a passthrough host: a
+passthrough would render the effect as a silent no-op in Premiere, which is
+worse than falling back to the correct CPU path.
+
+Metal has no wrapper yet, but the shared headers carry its shim spellings so a
+Mac build is a toolchain step rather than a port.
+
+### Layout
+
+```
+src/core/MEB_CoreMath.h            CPU pixel math, AE-free  ← lifted out of ModernEdgeBlur.cpp
+src/gpu/MEB_KernelMath.h           GPU formulas   (CUDA / HLSL / Metal / host C++)
+src/gpu/MEB_KernelPasses.h         GPU pass bodies (CUDA / host C++; see note)
+src/gpu/ModernEdgeBlurKernels.cu   CUDA entry points — 11 kernels, thin wrappers
+src/gpu/ModernEdgeBlurKernels.hlsl HLSL passthrough entry — build-time type-check only
+src/gpu/MEB_CudaShim.h             runtime nvcuda.dll driver surface (no toolkit needed)
+src/ModernEdgeBlur_GPU.{h,cpp}     device lifecycle + the GPU pass sequence
+tests/test_gpuparity.cpp           the gate: CoreMath == KernelMath, exact
+```
+
+`MEB_KernelPasses.h` is split from `MEB_KernelMath.h` because its functions take
+`const float*` parameters, which HLSL has no equivalent for. Bringing DX12 or
+Metal up means adding `MEB_RBUF`/`MEB_LOAD`/`MEB_STORE` macros to the one shim
+block and respelling the buffer accesses — no math work.
+
+The `.hlsl` file has no host behind it and its `.cso` is **not** deployed. It is
+compiled every build because fxc type-checks the whole translation unit, so one
+entry point validates the entire shared math header against HLSL's rules
+(AE_GPU_Effects.md §4 item 5).
+
+### Pass sequence
+
+| Pass | Runs when | CPU twin |
+|---|---|---|
+| `MEB_ExtractAlpha` | always | the alpha-plane half of ingest |
+| `MEB_Morph` | Shift Edge ≠ 0 | `ShiftEdgeAlpha` / `MorphPlane` |
+| `MEB_Passthrough` | Blur = 0 and Blend = 0 | the passthrough pack |
+| `MEB_Derive` | otherwise | `MEB_DeriveRowInline` |
+| `MEB_BlurHRGBA` / `MEB_BlurVRGBA` | Blur Amount ≥ 0.5 | `GaussBlurRGBA` (+ unpremultiply) |
+| `MEB_DirMin` ×4 / `MEB_CopyPlane` | Blend Radius ≥ 0.5 | `OctagonErode` |
+| `MEB_BlurHPlane` / `MEB_BlurVPlane` | Blend Radius ≥ 0.5 | `GaussBlurPlane` |
+| `MEB_Composite` | otherwise | `MEB_CompositeRow` |
+
+No host-side readback anywhere: unlike Edge Repair, no pass here asks a question
+between passes, so no device flags buffer is needed. Every branch is a slider
+decision the host already knows.
+
+### Two shape differences from the CPU path (both exact, neither visible)
+
+1. **No `sharp_buf`.** The CPU materialises the sharp layer into a full-frame
+   RGBA plane at ingest. The GPU recomputes it from the source world plus the
+   alpha plane at the two points that consume it — same values, one fewer
+   16-bytes-per-pixel plane resident.
+2. **Ping-pong instead of in-place.** A dispatch cannot read and write one plane
+   at once, so each blur pass reads one buffer and writes another. Tap order,
+   clamped edge sampling and accumulation type are identical.
+
+The one thing that *would* change numbers — the Gaussian weights — is not
+recomputed on the device at all. `MakeBlurKernel` / `MakeBlendKernel` build them
+on the host for both paths and the float array is uploaded verbatim
+([`gpu-kernel-rules.md`](../../docs/gpu-kernel-rules.md) §3.1).
+
+Note also that Modern Edge Blur **clamps** edge taps (the weight sum stays 1.0
+at the border), which is the opposite of MM_FreqSep's skip-and-renormalise rule
+in gpu-kernel-rules.md §3.2. That is this plugin's own convention and the GPU
+mirrors it exactly — it is not a bug to be "fixed".
+
+### Device memory
+
+One `AllocateDeviceMemory` block per device, sub-divided, grow-only, cached
+across frames, freed at `GPU_DEVICE_SETDOWN`. Only what the current parameters
+need is reserved:
+
+| Buffer | floats/px | Reserved when |
+|---|---|---|
+| `alpha` | 1 | always |
+| `alphaShift` | 1 | Shift Edge ≠ 0 |
+| `planeA` | 4 | anything but passthrough |
+| `planeB` | 4 | Blur Amount ≥ 0.5 (the blur's ping-pong) |
+| `weight` | 1 | anything but passthrough |
+| `tmp` | 1 | Blend Radius ≥ 0.5 |
+
+So **11 floats/px at the defaults** (Shift Edge 0, Blur and Blend both on), 12
+with Shift Edge active:
+
+| Frame | default | + Shift Edge | passthrough |
+|---|---|---|---|
+| HD 1920×1080 | 91 MB | 100 MB | 8 MB |
+| UHD 3840×2160 | 365 MB | 398 MB | 33 MB |
+| 4.6K 4608×3164 | 641 MB | 700 MB | 58 MB |
+
+Same order as the CPU path's thread-local pool, and per *device* rather than per
+render thread — so Multi-Frame Rendering does not multiply it. A mutex serialises
+scratch growth and the whole enqueue sequence; AE's stream is FIFO, so
+serialising enqueue serialises execution (AE_GPU_Effects.md §4).
+
+If the allocation is refused the render fails rather than degrading silently:
+once the worlds are on the device there is no CPU fallback.
+
+### Validation
+
+- **Automated gate:** `tests/build_tests.ps1` compiles both math headers as host
+  C++ and diffs them with `==` — per-formula, per-pass, and over the whole
+  multi-pass schedule for 13 parameter combinations × 4 source images. Run it
+  after **any** change to a formula in either header. A formula changes in both,
+  in the same commit, or not at all.
+- **In AE:** log check first (`%TEMP%\ModernEdgeBlur_gpu.log`, `MEB_GPU_LOG`) —
+  `what_gpu=3` at PreRender and `SMART_RENDER GPU` entries mean the gate is
+  open; `what_gpu=0` at every PreRender means it is shut, and
+  AE_GPU_Effects.md §2.2 is the first place to look. Then A/B the same frame
+  against Mercury → *Software Only*. Target max-abs ≤ 1e-5 per channel: fma
+  contraction on real silicon lands well inside that.
+- **Not yet done:** the in-AE A/B. Everything above it is code-complete and
+  gated AE-free.
+
+### The six things that make AE dispatch at all
+
+All six are in place; missing any one fails **silently** (the effect renders on
+the CPU, correctly, with no error):
+
+1. `GlobalSetup` declares `SUPPORTS_GPU_RENDER_F32 | SUPPORTS_DIRECTX_RENDERING`
+   for non-Premiere hosts.
+2. `GPU_DEVICE_SETUP` **re-affirms** `out_flags2 = SUPPORTS_GPU_RENDER_F32` —
+   a plain assignment, not an OR. This is the one that cost Edge Repair seven
+   failed experiments.
+3. `PreRender` raises `GPU_RENDER_POSSIBLE` unconditionally.
+4. `PF_Cmd_SMART_RENDER_GPU` is handled — it is a **separate command** from
+   `PF_Cmd_SMART_RENDER`.
+5. The `.aex` and `CUDA_Assets/` install to **AE's** Plug-ins folder, not
+   MediaCore.
+6. The PiPL's `AE_Effect_Global_OutFlags_2` matches (as a superset) what
+   `GlobalSetup` sets — `0x2A001400`.
 
 ## Known limitations / v2 roadmap
 

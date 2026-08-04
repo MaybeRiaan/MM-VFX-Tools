@@ -76,8 +76,15 @@ plugins in this suite are in that position today:
 | Plugin | GPU host accepts | Exercised by AE on the test box? |
 |---|---|---|
 | EdgeRepair | CUDA **or** DIRECTX (`EdgeRepair/src/EdgeRepair_GPU.cpp:264`) | ✅ yes, via CUDA |
+| ModernEdgeBlur | CUDA only (`ModernEdgeBlur/src/ModernEdgeBlur_GPU.cpp`) | ⏳ built to this decision; in-AE A/B still pending |
 | MM_FreqSep | DIRECTX only (`MM_FreqSep/src/gpu/mm_gpu_dx.cpp:179`) | ❌ no — declines, falls back to CPU |
 | MM_Qualify | DIRECTX only (`MM_Qualify/src/gpu/mm_gpu_dx.cpp:159`) | ❌ no — declines, falls back to CPU |
+
+Modern Edge Blur (ported 2026-08-03) is the first plugin written against §1.2
+from the start: CUDA only, DIRECTX **declined** rather than served a passthrough
+host — a passthrough would render the effect as a silent no-op in Premiere,
+which is worse than falling back to the correct CPU path. Its HLSL wrapper still
+exists and is still compiled every build, purely for the §4 item 5 type-check.
 
 Both DX12 hosts are validated bit-exact against their CPU references in their
 AE-free harnesses, so **the kernels are not in question — the backend choice
