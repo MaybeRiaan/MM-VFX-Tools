@@ -19,6 +19,8 @@
 
 #include "../../qk_core.h"
 
+KERNEL_BEGIN(qk_compose)
+
 BUF_IN (gCSrc,   0);
 BUF_IN (gCMatte, 1);
 BUF_IN (gCQual,  2);
@@ -67,3 +69,5 @@ KERNEL_ENTRY(qk_compose)
     gCOut[oo + 2] = og;
     gCOut[oo + 3] = ob;
 }
+
+KERNEL_END(qk_compose)

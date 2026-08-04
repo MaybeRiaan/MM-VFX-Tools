@@ -8,37 +8,78 @@
       qk_load_tile   world rows [worldY0, worldY0+rows) -> packed ARGB tile
       qk_store_tile  packed ARGB tile -> world rows [worldY0, ...)
       qk_fill_ones   fill an f1 plane with 1.0 (inactive garbage weights)
+
+    Load and Store shared one BUF/PARAM_BLOCK set while HLSL's file scope was
+    the only target. They now declare their own: an argument struct inherits
+    nothing from a sibling (rules §2.1), so every entry is self-contained and
+    its names are prefixed per entry to keep the HLSL side legal too. The
+    layouts are unchanged — four ints in the same order — so both still take
+    the host's single PMove/ArgsMove shape.
 */
 
-BUF_IN (gMoveIn,  0);
-BUF_OUT(gMoveOut, 0);
+/* ===========================================================================
+   Load: world rows [gLdWorldY0 .. +gLdRows) -> packed ARGB tile, swizzling.
+   gLdPitch is the world row pitch in FLOATS (rowbytes / 4).
+   =========================================================================== */
+
+KERNEL_BEGIN(qk_load_tile)
+
+BUF_IN (gLdWorld, 0);
+BUF_OUT(gLdTile,  0);
 
 PARAM_BLOCK_BEGIN
-    int gW;         /* pixels per row               */
-    int gRows;      /* rows to move                 */
-    int gWorldY0;   /* first world row              */
-    int gPitch;     /* world pitch, in floats       */
+    int gLdW;         /* pixels per row               */
+    int gLdRows;      /* rows to move                 */
+    int gLdWorldY0;   /* first world row              */
+    int gLdPitch;     /* world pitch, in floats       */
 PARAM_BLOCK_END
 
 KERNEL_ENTRY(qk_load_tile)
 {
-    QK_GUARD(gW, gRows)
+    QK_GUARD(gLdW, gLdRows)
     const int x = GID_X, y = GID_Y;
-    const int wo = (gWorldY0 + y) * gPitch + x * 4;
-    const int to = QK_IDX(x, y, gW);
+    const int wo = (gLdWorldY0 + y) * gLdPitch + x * 4;
+    const int to = QK_IDX(x, y, gLdW);
     for (int c = 0; c < 4; ++c)
-        gMoveOut[to + c] = gMoveIn[wo + (3 - c)];
+        gLdTile[to + c] = gLdWorld[wo + (3 - c)];
 }
+
+KERNEL_END(qk_load_tile)
+
+/* ===========================================================================
+   Store: packed ARGB tile -> world rows [gStWorldY0 .. +gStRows), reversed.
+   =========================================================================== */
+
+KERNEL_BEGIN(qk_store_tile)
+
+BUF_IN (gStTile,  0);
+BUF_OUT(gStWorld, 0);
+
+PARAM_BLOCK_BEGIN
+    int gStW;
+    int gStRows;
+    int gStWorldY0;
+    int gStPitch;
+PARAM_BLOCK_END
 
 KERNEL_ENTRY(qk_store_tile)
 {
-    QK_GUARD(gW, gRows)
+    QK_GUARD(gStW, gStRows)
     const int x = GID_X, y = GID_Y;
-    const int to = QK_IDX(x, y, gW);
-    const int wo = (gWorldY0 + y) * gPitch + x * 4;
+    const int to = QK_IDX(x, y, gStW);
+    const int wo = (gStWorldY0 + y) * gStPitch + x * 4;
     for (int c = 0; c < 4; ++c)
-        gMoveOut[wo + (3 - c)] = gMoveIn[to + c];
+        gStWorld[wo + (3 - c)] = gStTile[to + c];
 }
+
+KERNEL_END(qk_store_tile)
+
+/* ===========================================================================
+   Fill: constant 1.0 over a single-float plane — the garbage weight plane
+   while no garbage layer is connected (qk::SampleGarbage's inactive value).
+   =========================================================================== */
+
+KERNEL_BEGIN(qk_fill_ones)
 
 BUF_OUT(gFillDst, 0);
 
@@ -52,3 +93,5 @@ KERNEL_ENTRY(qk_fill_ones)
     QK_GUARD(gFW, gFRows)
     gFillDst[GID_Y * gFW + GID_X] = 1.0f;
 }
+
+KERNEL_END(qk_fill_ones)

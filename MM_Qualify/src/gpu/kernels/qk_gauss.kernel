@@ -13,74 +13,107 @@
     Weights arrive from the host — the EXACT CPU-built kernels
     (BuildGaussianKernel, double-accumulated, rules §3.1). Never rebuilt.
 
-    Buffer slots (order is contract):
-      u0  gGSrc    input plane
-      u1  gGKern   2R+1 weights, centered at [R]
-      u4  gGDst    output plane
+    Buffer slots (order is contract, per entry):
+      u0  ...Src    input plane
+      u1  ...Kern   2R+1 weights, centered at [R]
+      u4  ...Dst    output plane
+
+    The two entries shared one BUF/PARAM_BLOCK set while HLSL's file scope was
+    the only target; an argument struct inherits nothing from a sibling
+    (rules §2.1), so each now declares its own with per-entry name prefixes.
+    Both keep the same four-int param layout, so the host's single PGauss /
+    ArgsGauss shape still serves both.
 */
 
-BUF_IN (gGSrc,  0);
-BUF_IN (gGKern, 1);
-BUF_OUT(gGDst,  0);
+/* ===========================================================================
+   Premultiplied ARGB pass. Taps skipped at the buffer edge; NOT renormalized.
+   =========================================================================== */
+
+KERNEL_BEGIN(qk_gauss_rgba)
+
+BUF_IN (gRgSrc,  0);
+BUF_IN (gRgKern, 1);
+BUF_OUT(gRgDst,  0);
 
 PARAM_BLOCK_BEGIN
-    int gGW;       /* plane width (pixels)          */
-    int gGRows;    /* plane rows                    */
-    int gGR;       /* kernel support radius         */
-    int gGHoriz;   /* 1 = convolve along x, 0 = y   */
+    int gRgW;       /* plane width (pixels)          */
+    int gRgRows;    /* plane rows                    */
+    int gRgR;       /* kernel support radius         */
+    int gRgHoriz;   /* 1 = convolve along x, 0 = y   */
 PARAM_BLOCK_END
 
 KERNEL_ENTRY(qk_gauss_rgba)
 {
-    QK_GUARD(gGW, gGRows)
+    QK_GUARD(gRgW, gRgRows)
     const int x = GID_X, y = GID_Y;
 
     int i0, i1, stride;
-    if (gGHoriz != 0) {
-        i0 = (x - gGR < 0)        ? -x               : -gGR;
-        i1 = (x + gGR > gGW - 1)  ? (gGW - 1 - x)    :  gGR;
+    if (gRgHoriz != 0) {
+        i0 = (x - gRgR < 0)         ? -x                : -gRgR;
+        i1 = (x + gRgR > gRgW - 1)  ? (gRgW - 1 - x)    :  gRgR;
         stride = 4;
     } else {
-        i0 = (y - gGR < 0)        ? -y               : -gGR;
-        i1 = (y + gGR > gGRows-1) ? (gGRows - 1 - y) :  gGR;
-        stride = gGW * 4;
+        i0 = (y - gRgR < 0)          ? -y                 : -gRgR;
+        i1 = (y + gRgR > gRgRows-1)  ? (gRgRows - 1 - y)  :  gRgR;
+        stride = gRgW * 4;
     }
 
     float a = 0.0f, r = 0.0f, g = 0.0f, b = 0.0f;
-    int p = QK_IDX(x, y, gGW) + i0 * stride;
+    int p = QK_IDX(x, y, gRgW) + i0 * stride;
     for (int i = i0; i <= i1; ++i, p += stride) {
-        const float w = gGKern[i + gGR];
-        a += w * gGSrc[p + 0];
-        r += w * gGSrc[p + 1];
-        g += w * gGSrc[p + 2];
-        b += w * gGSrc[p + 3];
+        const float w = gRgKern[i + gRgR];
+        a += w * gRgSrc[p + 0];
+        r += w * gRgSrc[p + 1];
+        g += w * gRgSrc[p + 2];
+        b += w * gRgSrc[p + 3];
     }
-    const int o = QK_IDX(x, y, gGW);
-    gGDst[o + 0] = a; gGDst[o + 1] = r; gGDst[o + 2] = g; gGDst[o + 3] = b;
+    const int o = QK_IDX(x, y, gRgW);
+    gRgDst[o + 0] = a; gRgDst[o + 1] = r; gRgDst[o + 2] = g; gRgDst[o + 3] = b;
 }
+
+KERNEL_END(qk_gauss_rgba)
+
+/* ===========================================================================
+   Single-float matte pass. Taps skipped AND renormalized — edge-neutral.
+   =========================================================================== */
+
+KERNEL_BEGIN(qk_gauss_f1)
+
+BUF_IN (gF1Src,  0);
+BUF_IN (gF1Kern, 1);
+BUF_OUT(gF1Dst,  0);
+
+PARAM_BLOCK_BEGIN
+    int gF1W;
+    int gF1Rows;
+    int gF1R;
+    int gF1Horiz;
+PARAM_BLOCK_END
 
 KERNEL_ENTRY(qk_gauss_f1)
 {
-    QK_GUARD(gGW, gGRows)
+    QK_GUARD(gF1W, gF1Rows)
     const int x = GID_X, y = GID_Y;
 
     int i0, i1, stride;
-    if (gGHoriz != 0) {
-        i0 = (x - gGR < 0)        ? -x               : -gGR;
-        i1 = (x + gGR > gGW - 1)  ? (gGW - 1 - x)    :  gGR;
+    if (gF1Horiz != 0) {
+        i0 = (x - gF1R < 0)         ? -x                : -gF1R;
+        i1 = (x + gF1R > gF1W - 1)  ? (gF1W - 1 - x)    :  gF1R;
         stride = 1;
     } else {
-        i0 = (y - gGR < 0)        ? -y               : -gGR;
-        i1 = (y + gGR > gGRows-1) ? (gGRows - 1 - y) :  gGR;
-        stride = gGW;
+        i0 = (y - gF1R < 0)          ? -y                 : -gF1R;
+        i1 = (y + gF1R > gF1Rows-1)  ? (gF1Rows - 1 - y)  :  gF1R;
+        stride = gF1W;
     }
 
     float s = 0.0f, ws = 0.0f;
-    int p = y * gGW + x + i0 * stride;
+    int p = y * gF1W + x + i0 * stride;
     for (int i = i0; i <= i1; ++i, p += stride) {
-        const float w = gGKern[i + gGR];
-        s  += w * gGSrc[p];
+        const float w = gF1Kern[i + gF1R];
+        s  += w * gF1Src[p];
         ws += w;
     }
-    gGDst[y * gGW + x] = (ws > 0.0f) ? s / ws : 0.0f;
+    gF1Dst[y * gF1W + x] = (ws > 0.0f) ? s / ws : 0.0f;
 }
+
+KERNEL_END(qk_gauss_f1)

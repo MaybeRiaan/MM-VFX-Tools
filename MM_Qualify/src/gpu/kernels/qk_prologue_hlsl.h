@@ -25,6 +25,25 @@
     [numthreads(QK_TG_X, QK_TG_Y, 1)]          \
     void name(uint3 qk_tid : SV_DispatchThreadID)
 
+/* ---- entry-point brackets ------------------------------------------------
+   KERNEL_BEGIN precedes an entry's BUF_* and PARAM_BLOCK declarations,
+   KERNEL_END follows its body. Both expand to NOTHING here, so the
+   preprocessed HLSL is byte-for-byte what it was before the brackets
+   existed — HLSL binds buffers by REGISTER at file scope and needs no help.
+
+   They exist for CUDA and Metal, which bind buffers as kernel ARGUMENTS and
+   cannot reference a file-scope buffer declaration at all. Those prologues
+   expand this pair into a per-entry argument struct whose members are
+   exactly the BUF_* and PARAM_BLOCK declarations, read by the body under the
+   same bare names. Without them the vocabulary is expressible in HLSL and
+   nowhere else, and gpu-kernel-rules §0's promise is unreachable — see its
+   §2.1. Consequence: every entry point must be SELF-CONTAINED. Nothing
+   leaks between argument structs, so an entry may not borrow a sibling's
+   PARAM_BLOCK from HLSL's shared global scope; param names are prefixed
+   per entry so the HLSL side stays legal too.                             */
+#define KERNEL_BEGIN(name)
+#define KERNEL_END(name)
+
 #define GID_X (int)qk_tid.x
 #define GID_Y (int)qk_tid.y
 

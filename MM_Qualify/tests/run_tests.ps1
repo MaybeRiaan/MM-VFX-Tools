@@ -22,6 +22,10 @@ $vcvars = Join-Path $vsInstall "VC\Auxiliary\Build\vcvars64.bat"
 $outDir = Join-Path $PSScriptRoot "out"
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
 $coreExe = Join-Path $outDir "core_test.exe"
+# GPU kernel bodies: the real .kernel files are compiled as ordinary C++ through
+# src/gpu/kernels/qk_prologue_host.h and RUN, then diffed against the CPU
+# reference. No GPU, no CUDA toolkit, no DX12 device.
+$kernExe = Join-Path $outDir "kernel_test.exe"
 $pipeExe = Join-Path $outDir "pipeline_test.exe"
 
 $bat = @"
@@ -32,6 +36,11 @@ cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
    /I "$SdkRoot\Headers" /I "$SdkRoot\Headers\SP" /I "$SdkRoot\Util" /I "$Root\src" ^
    "$PSScriptRoot\core_test.cpp" ^
    /Fe:"$coreExe"
+if errorlevel 1 exit /b 1
+cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
+   /I "$SdkRoot\Headers" /I "$SdkRoot\Headers\SP" /I "$SdkRoot\Util" /I "$Root\src" ^
+   "$PSScriptRoot\kernel_test.cpp" "$Root\src\blur.cpp" "$Root\src\garbage.cpp" "$Root\src\qk_common.cpp" ^
+   /Fe:"$kernExe"
 if errorlevel 1 exit /b 1
 cl /nologo /EHsc /O2 /std:c++17 /DMSWindows /D_WINDOWS ^
    /I "$SdkRoot\Headers" /I "$SdkRoot\Headers\SP" /I "$SdkRoot\Util" /I "$Root\src" ^
@@ -52,8 +61,12 @@ Write-Host ""
 & $coreExe
 $coreCode = $LASTEXITCODE
 Write-Host ""
+& $kernExe
+$kernCode = $LASTEXITCODE
+Write-Host ""
 & $pipeExe
 $pipeCode = $LASTEXITCODE
 
 if ($coreCode -ne 0) { exit $coreCode }
+if ($kernCode -ne 0) { exit $kernCode }
 exit $pipeCode

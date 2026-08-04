@@ -254,31 +254,66 @@ QK_PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
 		}
 	}
 
-	// GPU render offer: only when AE drives the DirectX pipeline, device
-	// setup succeeded, and the WORST-CASE tile plan for this request fits
-	// the device scratch budget — the same planner the render runs, so gate
-	// and render cannot disagree. Anything else renders on the CPU path:
-	// slower, never wrong.
+	// GPU render offer (../docs/AE_GPU_Effects.md §2.3). Raised on EVERY frame
+	// except one this host can PROVE will not fit: a worst-case tile plan that
+	// does not fit the device scratch budget, run through the SAME QK_PlanTiles
+	// the render runs so gate and render cannot disagree. Declining here costs
+	// a CPU render — slower, never wrong. Discovering it at SMART_RENDER_GPU
+	// costs the frame, because by then the worlds are device memory and there
+	// is nothing to fall back to.
+	//
+	// THE GATE NEVER FIRES ON A FRAME IT COULD NOT SIZE — no framework offered
+	// yet, no gpu_data, no budget reading, degenerate rect. Withholding the
+	// flag out of ignorance is the deadlock EdgeRepair spent seven experiments
+	// on: AE offers what_gpu = NONE at every PreRender until it has SEEN this
+	// flag, so a gate conditioned on a known device would never raise it and
+	// never be offered a device. This file's previous revision gated on
+	// `what_gpu == PF_GPU_Framework_DIRECTX`, which is exactly that deadlock —
+	// and it is the second reason (after the DX-only host) that AE never
+	// GPU-rendered this effect.
 #ifdef _WIN32
-	if (!err &&
-		extra->input->what_gpu == PF_GPU_Framework_DIRECTX &&
-		extra->input->gpu_data) {
+	if (!err) {
 		const PF_LRect &rq = extra->input->output_request.rect;
 		const int outW = rq.right - rq.left;
 		const int outH = rq.bottom - rq.top;
-		const size_t budget = qkgpu::QK_DXScratchBudget(extra->input->gpu_data);
-		if (outW > 0 && outH > 0 && budget > 0) {
+
+		bool   fits     = true;          // cannot size it -> do NOT withhold
+		double needMB   = 0.0;
+		double budgetMB = 0.0;
+
+		const size_t budget = qkgpu::QK_ScratchBudget(extra->input->what_gpu,
+		                                              extra->input->gpu_data);
+		if (qkgpu::QK_FrameworkSupported(extra->input->what_gpu) &&
+			extra->input->gpu_data && budget > 0 && outW > 0 && outH > 0) {
+			budgetMB = (double)budget / (1024.0 * 1024.0);
+
 			const bool denoise  = qk::GaussianSupport(dnX) > 0 || qk::GaussianSupport(dnY) > 0;
 			const bool temporal = (p.temporalL != 0);
+			// Worst case on both axes, erring toward "the render will need
+			// less": the world SmartRender is handed is clipped to our
+			// result_rect, which is itself clipped into this request.
 			const int srcW = outW + 2 * inflateX;
 			const int srcH = outH + 2 * inflateY;
+			const int marginY = qkgpu::QK_TileMarginY(
+				(int)qk::GaussianSupport(dnY), (int)blSupY);
+
+			const size_t bytesTile = qkgpu::QK_TileBytesPerRow(denoise, temporal, srcW);
+			const size_t bytesOut  = qkgpu::QK_OutBytesPerRow(outW);
+
 			qkgpu::QK_TilePlan plan;
-			if (qkgpu::QK_PlanTiles(outH, srcH, inflateY, inflateY,
-					qkgpu::QK_TileBytesPerRow(denoise, temporal, srcW),
-					qkgpu::QK_OutBytesPerRow(outW), budget, &plan)) {
-				extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
-			}
+			fits = qkgpu::QK_PlanTiles(outH, srcH, inflateY, marginY,
+			                           bytesTile, bytesOut, budget, &plan);
+			if (fits)
+				needMB = (double)((size_t)plan.tileRowsMax * bytesTile +
+				                  (size_t)plan.bandHMax * bytesOut)
+				         / (1024.0 * 1024.0);
 		}
+
+		if (fits)
+			extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+
+		qkgpu::QK_GPULogPreRenderDecision(extra->input->what_gpu,
+			extra->input->gpu_data, fits, outW, outH, needMB, budgetMB);
 	}
 #endif
 
@@ -648,9 +683,10 @@ cleanup:
 // ---------------------------------------------------------------------------
 // SmartRender — GPU (PF_Cmd_SMART_RENDER_GPU). Assembles the platform-free
 // QK_GPUJob — geometry, CPU-built Gaussian weights, gate block, tile plan,
-// garbage mapping, history worlds — and hands it to the DX12 host. Every
-// DECISION here is the same code the CPU render runs, so the paths can only
-// diverge inside kernel execution.
+// garbage mapping, history worlds — and hands it to whichever backend AE
+// offered: CUDA on Windows/NVIDIA (the AE path), DirectX 12 under Premiere.
+// Every DECISION here is the same code the CPU render runs, so the paths can
+// only diverge inside kernel execution.
 // ---------------------------------------------------------------------------
 PF_Err
 QK_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra)
@@ -660,7 +696,9 @@ QK_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra 
 #else
 	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
 
-	if (extra->input->what_gpu != PF_GPU_Framework_DIRECTX ||
+	// Same question QK_GPUDeviceSetup answered, asked in the same place, so a
+	// framework can never be accepted at setup and refused here.
+	if (!qkgpu::QK_FrameworkSupported(extra->input->what_gpu) ||
 		!extra->input->gpu_data)
 		return PF_Err_UNRECOGNIZED_PARAM_TYPE;
 
@@ -733,7 +771,8 @@ QK_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra 
 		// Tile plan — same planner and budget the PreRender gate ran.
 		const bool denoise = (job.dnRx > 0 || job.dnRy > 0);
 		const int marginY = qkgpu::QK_TileMarginY(job.dnRy, job.blRy);
-		const size_t budget = qkgpu::QK_DXScratchBudget(extra->input->gpu_data);
+		const size_t budget = qkgpu::QK_ScratchBudget(extra->input->what_gpu,
+		                                             extra->input->gpu_data);
 		if (!qkgpu::QK_PlanTiles(job.outH, job.srcH, job.srcOY, marginY,
 				qkgpu::QK_TileBytesPerRow(denoise, job.temporal, job.srcW),
 				qkgpu::QK_OutBytesPerRow(job.outW), budget, &job.plan)) {
@@ -791,9 +830,17 @@ QK_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra 
 			}
 		}
 
-		ERR(qkgpu::QK_DXRender(in_data, out_data, extra->input->gpu_data,
-			extra->input->device_index, job, src_world, out_world,
-			garb_world, histWorlds));
+		// Dispatch to the backend AE actually handed us. CUDA is the AE path
+		// on Windows/NVIDIA; DIRECTX is Premiere's, kept and kept building.
+		if (extra->input->what_gpu == PF_GPU_Framework_CUDA) {
+			ERR(qkgpu::QK_CudaRender(in_data, out_data, extra->input->gpu_data,
+				extra->input->device_index, job, src_world, out_world,
+				garb_world, histWorlds));
+		} else {
+			ERR(qkgpu::QK_DXRender(in_data, out_data, extra->input->gpu_data,
+				extra->input->device_index, job, src_world, out_world,
+				garb_world, histWorlds));
+		}
 	}
 
 cleanup:
@@ -811,6 +858,11 @@ PF_Err
 QK_GPUDeviceSetup(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetupExtra *extra)
 {
 #ifdef _WIN32
+	// Each host re-affirms out_flags2 = SUPPORTS_GPU_RENDER_F32 on success —
+	// see AE_GPU_Effects.md §2.2. Skipping it is the single mistake that makes
+	// AE offer what_gpu = NONE forever while everything else looks fine.
+	if (extra->input->what_gpu == PF_GPU_Framework_CUDA)
+		return qkgpu::QK_CudaDeviceSetup(in_data, out_data, extra);
 	if (extra->input->what_gpu == PF_GPU_Framework_DIRECTX)
 		return qkgpu::QK_DXDeviceSetup(in_data, out_data, extra);
 #endif
@@ -822,6 +874,8 @@ PF_Err
 QK_GPUDeviceSetdown(PF_InData *in_data, PF_OutData *out_data, PF_GPUDeviceSetdownExtra *extra)
 {
 #ifdef _WIN32
+	if (extra->input->what_gpu == PF_GPU_Framework_CUDA)
+		return qkgpu::QK_CudaDeviceSetdown(in_data, out_data, extra);
 	if (extra->input->what_gpu == PF_GPU_Framework_DIRECTX)
 		return qkgpu::QK_DXDeviceSetdown(in_data, out_data, extra);
 #endif

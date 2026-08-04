@@ -182,9 +182,57 @@ struct QK_GPUJob {
 };
 
 // ---------------------------------------------------------------------------
-// Platform hosts. DX12 today; a Metal host adds the matching three calls.
+// Platform hosts.
+//
+// CUDA is the backend After Effects actually offers on Windows/NVIDIA and the
+// one this suite maintains (../../docs/AE_GPU_Effects.md §1.1-§1.2). The DX12
+// host is kept and kept building — it is the Premiere path, where DX12 IS the
+// Windows renderer — but AE never reaches it on the test box. A Metal host
+// adds the matching three calls.
+//
+// Both hosts execute the SAME QK_GPUJob through the SAME QK_PlanTiles plan and
+// dispatch the SAME .kernel bodies; the pass sequences are meant to stay
+// line-for-line identical, and tests/pipeline_test.cpp runs that sequence on
+// the CPU so "identical" is checkable without a GPU.
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
+
+// garbWorld may be null (== job.garbage.active false). histWorlds is in
+// oldest-first order (t-N .. t-1); null entries are skipped — the IIR
+// warm-starts at the first non-null world, exactly like the CPU path.
+//
+// TEMPORAL LIFETIME (this plugin's own problem — no other effect in the suite
+// has one): the IIR state plane lives for exactly ONE render call. PreRender
+// checks out t-1..t-N, SmartRender folds them oldest->newest inside that call,
+// and every output frame is therefore a pure function of its own checked-out
+// frames. There is no ordering relationship between renders for Multi-Frame
+// Rendering to violate. See smart_render.cpp's TEMPORAL STABILIZE block (the
+// CPU original) and qk_gpu_cuda.cpp's header note (why a cached, shared state
+// plane is still safe).
+
+// ---- CUDA (the AE path) ----
+PF_Err QK_CudaDeviceSetup(PF_InData *in_data, PF_OutData *out_data,
+                          PF_GPUDeviceSetupExtra *extra);
+PF_Err QK_CudaDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
+                            PF_GPUDeviceSetdownExtra *extra);
+size_t QK_CudaScratchBudget(const void *gpu_data);
+PF_Err QK_CudaRender(PF_InData *in_data, PF_OutData *out_data,
+                     const void *gpu_data, A_u_long device_index,
+                     const QK_GPUJob &job,
+                     PF_EffectWorld *srcWorld, PF_EffectWorld *outWorld,
+                     PF_EffectWorld *garbWorld,
+                     const std::vector<PF_EffectWorld*> &histWorlds);
+
+// Records the per-frame PreRender GPU decision to
+// %TEMP%\MM_Qualify_gpu.log — what AE offered, what the frame needs, and
+// whether GPU_RENDER_POSSIBLE was raised. The GPU failure mode is SILENT (the
+// effect renders correctly on the CPU), so this log is the decisive signal
+// (AE_GPU_Effects.md §5.1). No-op when logging is compiled out.
+void QK_GPULogPreRenderDecision(PF_GPU_Framework what_gpu, const void *gpu_data,
+                                bool raised, int outW, int outH,
+                                double scratchMB, double budgetMB);
+
+// ---- DirectX 12 (the Premiere path; parked for AE, still built) ----
 PF_Err QK_DXDeviceSetup(PF_InData *in_data, PF_OutData *out_data,
                         PF_GPUDeviceSetupExtra *extra);
 PF_Err QK_DXDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
@@ -194,15 +242,30 @@ PF_Err QK_DXDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
 // created at setup. 0 means the device data is unusable — no GPU render.
 size_t QK_DXScratchBudget(const void *gpu_data);
 
-// garbWorld may be null (== job.garbage.active false). histWorlds is in
-// oldest-first order (t-N .. t-1); null entries are skipped — the IIR
-// warm-starts at the first non-null world, exactly like the CPU path.
 PF_Err QK_DXRender(PF_InData *in_data, PF_OutData *out_data,
                    const void *gpu_data, A_u_long device_index,
                    const QK_GPUJob &job,
                    PF_EffectWorld *srcWorld, PF_EffectWorld *outWorld,
                    PF_EffectWorld *garbWorld,
                    const std::vector<PF_EffectWorld*> &histWorlds);
+
+// ---- framework dispatch ----------------------------------------------------
+// The one place that answers "do we have a host for this framework?". Keep
+// PreRender, GPU_DEVICE_SETUP/SETDOWN and SMART_RENDER_GPU all asking THIS,
+// so a framework can never be accepted at setup and refused at render.
+inline bool QK_FrameworkSupported(PF_GPU_Framework what_gpu)
+{
+	return what_gpu == PF_GPU_Framework_CUDA ||
+	       what_gpu == PF_GPU_Framework_DIRECTX;
+}
+
+inline size_t QK_ScratchBudget(PF_GPU_Framework what_gpu, const void *gpu_data)
+{
+	if (!gpu_data) return 0;
+	if (what_gpu == PF_GPU_Framework_CUDA)    return QK_CudaScratchBudget(gpu_data);
+	if (what_gpu == PF_GPU_Framework_DIRECTX) return QK_DXScratchBudget(gpu_data);
+	return 0;
+}
 #endif // _WIN32
 
 } // namespace qkgpu

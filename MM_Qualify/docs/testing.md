@@ -14,8 +14,9 @@ cd tests
 .\run_tests.ps1      # exit 0 = all pass
 ```
 
-Compiles and runs two suites against the vendored SDK headers (for the
-`A_long`/`PF` typedefs only) — no AE host, no GPU device, no Mac required.
+Compiles and runs three suites against the vendored SDK headers (for the
+`A_long`/`PF` typedefs only) — no AE host, no GPU device, **no CUDA toolkit**,
+no Mac required.
 
 ### `core_test.cpp` — shared per-pixel math (`src/qk_core.h`)
 95 assertions over the exact functions the CPU render **and** the GPU
@@ -36,30 +37,61 @@ kernels compile. Focus = the plan's stated risks (§6):
 - Output-mode compose: keyed = premult·matte, matte/inverted/raw views,
   highlight (grey when unselected, image when selected).
 
+### `kernel_test.cpp` — the GPU kernel BODIES
+23 cases, one or more per entry point. This does not *transcribe* the kernels,
+it **compiles them**: `src/gpu/cuda/qk_kernel_args.h` pulls the real `.kernel`
+files through `src/gpu/kernels/qk_prologue_host.h` — the same vocabulary
+`qk_prologue_cuda.h` defines with CUDA spellings — so
+`qkk_<entry>::Args{...}.run(x, y)` executes the shipped kernel source on the
+CPU. A hand transcription can rot silently against the kernel it mirrors; this
+cannot, because it *is* the kernel.
+
+Covers all nine entry points: `qk_load_tile` / `qk_store_tile` (BGRA↔ARGB
+swizzle with a row pitch deliberately wider than the width — deriving pitch
+from width is the classic AE-GPU-world bug), `qk_fill_ones`, both Gaussian
+passes against the real `blur.cpp` (including a support wider than the plane,
+where the skip-don't-clamp rule of `../../docs/gpu-kernel-rules.md` §3.2 is the
+only thing holding parity), `qk_matte`, `qk_garbage` against the real
+`qk::SampleGarbage` under a non-identity Fit mapping on all four channels,
+`qk_iir` seeded from a deliberately **poisoned** state plane, and `qk_compose`
+in all five output modes.
+
+Tolerance is **exact (0.0)**, not an epsilon: same source, same arithmetic,
+same order. The ≤ 1e-5 in `gpu-kernel-rules.md` §3.6 is for real silicon,
+where fma contraction legitimately differs; it has no business here.
+
 ### `pipeline_test.cpp` — tiled-vs-untiled parity
-10 end-to-end cases. Two **independent** implementations of the whole chain
-(denoise → gates+cleanup → temporal IIR → matte blur → ratio+compose) run on
-the same synthetic multi-frame input:
+12 end-to-end cases. The whole chain (denoise → gates+cleanup → temporal IIR →
+matte blur → ratio+compose) is run two ways on the same synthetic multi-frame
+input:
 
-- an **untiled** CPU reference (whole frame at once), and
-- a **tiled** pipeline driven by the **real** tile planner
-  (`qkgpu::QK_PlanTiles`) — the same code `mm_gpu_dx.cpp` uses to cut bands,
-  compute per-band margins, and offset the compose addressing.
+- an **untiled** CPU reference — the real `qk::GaussianBlurARGB`,
+  `qk::GaussianBlurF1`, `qk::SampleGarbage` and `qk_core.h`, whole frame at
+  once; and
+- the **tiled GPU pipeline**: the **real kernels** (as above), driven by the
+  **real** tile planner (`qkgpu::QK_PlanTiles`), in the exact pass sequence and
+  plane schedule `qk_gpu_cuda.cpp` and `mm_gpu_dx.cpp` enqueue — BGRA world
+  load/store through a wide pitch, the denoise A→T→Q plane roles, history
+  frames streamed oldest-first through one IIR state plane (pre-filled with
+  garbage), and the matte-blur ping-pong that keeps `in != out` on every pass.
 
-Both call the same `qk_core.h` math (the test proves the *tiling and data
-movement*, which is where a hand-written GPU host diverges — not the pixel
-math, which layer 1 already covers). Cases sweep denoise/blur/temporal/
-garbage on-off, all five output modes, an interior + world-edge band split,
-and HDR (superwhite) input.
+Cases sweep denoise/blur/temporal/garbage on-off, single-axis blur on **each**
+axis (the ping-pong picks a different destination plane in each case, which is
+where an aliasing bug would hide), garbage under a non-identity Fit mapping,
+all five output modes, an interior + world-edge band split, and HDR
+(superwhite) input.
 
-**Current result: 105/105 pass. Every pipeline case at `max-abs = 0.000e+00`**
-(identical float ops in identical order). Consequence: band margins, offsets,
-the compose addressing, the matte stages and the garbage channel math are
-*proven* before AE runs — so any in-AE GPU mismatch is D3D12 plumbing
-(bindings, barriers, sync) by elimination, exactly as with MM FreqSep.
+**Current result: 128/128 pass — 93 core + 23 kernel + 12 pipeline. Every GPU
+case at `max-abs = 0.000e+00`.** Together, `kernel_test` and `pipeline_test`
+close the loop `../../docs/AE_GPU_Effects.md` §4.3 asks for: the per-pixel
+formulas *and* their composition. Consequence: band margins, offsets, compose
+addressing, the swizzle, the matte stages, the garbage mapping and every
+kernel body are *proven* before AE runs — so an in-AE mismatch is backend
+plumbing (module load, bindings, launch config) by elimination.
 
-Known gap (accepted, same as MM FreqSep): layer 1 does not exercise the
-D3D12 API layer itself — that needs a live AE-hosted device (layer 2).
+Known gap (accepted, same as MM FreqSep): layer 1 does not exercise the CUDA
+driver / D3D12 API layers themselves — that needs a live AE-hosted device
+(layer 2).
 
 ---
 
@@ -136,18 +168,61 @@ all-selected matte).
    be confined to it (intersected before cleanup). Try each *Garbage Channel*.
 
 ### 2.3 — GPU vs CPU parity (the important one)
+
+**Step 0, before looking at a single pixel: read the log.** The GPU failure
+mode is *silent* — a declined device renders correctly on the CPU with no error
+anywhere, so the frame tells you nothing (`../../docs/AE_GPU_Effects.md` §5).
+Apply the effect, scrub a frame, then open:
+
+```
+%TEMP%\MM_Qualify_gpu.log
+```
+
+What you want to see:
+
+```
+[MM_Qualify] DEVICE_SETUP what_gpu=3 device_index=0
+  -> OK (CUDA ready, 9 kernels, scratch budget ... MB)
+[MM_Qualify] PRERENDER what_gpu=3 gpu_data=... out=WxH need=...MB budget=...MB -> GPU_RENDER_POSSIBLE=YES
+[MM_Qualify] SMART_RENDER GPU what_gpu=CUDA src=... bands=... scratch=...MB
+```
+
+`what_gpu`: `0 = NONE, 1 = OPENCL, 2 = METAL, 3 = CUDA, 4 = DIRECTX`.
+
+- **`what_gpu=0` at every PreRender ⇒ the gate is shut.** Go to
+  `AE_GPU_Effects.md` §2.2 first — the re-affirm in `GPU_DEVICE_SETUP` is the
+  one that has cost this suite the most.
+- **`DEVICE_SETUP` says "PTX missing/unreadable"** ⇒ `CUDA_Assets/` did not
+  travel next to the `.aex`, or the build machine had no CUDA toolkit.
+- **`cuModuleGetFunction(...) FAILED`** ⇒ the deployed PTX is stale against the
+  binary. Rebuild; the backend declines rather than failing mid-render.
+- **No `SMART_RENDER GPU` line at all** while PreRender says YES ⇒ AE chose the
+  CPU for that frame anyway (normal for thumbnails and heavy draft downsamples).
+
+Then the A/B:
+
 1. Project Settings ▸ Video Rendering and Effects ▸ **Mercury GPU
-   Acceleration (DirectX)**. Note render; then switch to **Software Only** and
+   Acceleration (CUDA)**. Note render; then switch to **Software Only** and
    compare the same frame across several parameter states (a keyed result, a
    *Matte* view, denoise+blur+temporal all on).
-2. They should match to display precision. Layer 1 already proves the tiling
-   math is bit-exact; a visible mismatch here points at the D3D12 host
-   (`src/gpu/mm_gpu_dx.cpp`) — bindings, barriers, or the BGRA↔ARGB swizzle —
-   not the algorithm.
+2. Target **max-abs ≤ 1e-5** per channel — the real-silicon tolerance of
+   `gpu-kernel-rules.md` §3.6, which covers fma contraction. Layer 1 already
+   proves every kernel body and the whole tiled composition bit-exact, so a
+   mismatch here points at the CUDA host (`src/gpu/qk_gpu_cuda.cpp`) — module
+   load, launch config, plane offsets — not the algorithm.
 3. **6K+ / large-radius stress** (the usage profile): a 6K comp with Denoise
    and Blur Radius high. Confirm it renders (the PreRender budget gate may
    route pathological tiles to the CPU — slower, never wrong; that is by
-   design, not a bug).
+   design, not a bug; the log says `-> GPU_RENDER_POSSIBLE=no` when it does).
+4. **Temporal Stabilize on, multi-frame**: scrub *and* render a range with
+   Multi-Frame Rendering enabled. The IIR state plane is per-render by
+   construction (see `qk_gpu_cuda.cpp`'s header), so a frame must look the same
+   whether reached by scrubbing or by a batch render.
+
+> If AE renders on the CPU no matter what, note that **DirectX is not the AE
+> path on this hardware** — AE offers CUDA and never probes DIRECTX
+> (`AE_GPU_Effects.md` §1.1). `src/gpu/mm_gpu_dx.cpp` is kept and kept
+> building for Premiere; it is not what AE calls.
 
 ### 2.4 — Depth + alpha
 - Run 8 / 16 / 32-bit (float) project depths. Float should carry HDR

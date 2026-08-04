@@ -13,6 +13,8 @@
 
 #include "../../qk_core.h"
 
+KERNEL_BEGIN(qk_iir)
+
 BUF_IN (gMIn,   0);
 BUF_OUT(gState, 0);
 
@@ -31,3 +33,5 @@ KERNEL_ENTRY(qk_iir)
     const float m = gMIn[i];
     gState[i] = (gFirst != 0) ? m : QK_IIRStep(gState[i], m, gKAttack, gKRelease);
 }
+
+KERNEL_END(qk_iir)

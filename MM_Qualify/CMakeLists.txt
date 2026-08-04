@@ -172,10 +172,116 @@ if(WIN32)
 
     add_custom_target(qk_shaders DEPENDS ${QK_DXIL_HEADERS})
 
-    list(APPEND QK_SOURCES ${SRC_DIR}/gpu/mm_gpu_dx.cpp)
+    # =======================================================================
+    # CUDA backend — the framework After Effects actually offers on
+    # Windows/NVIDIA (../docs/AE_GPU_Effects.md §1.1). The HOST side needs no
+    # toolkit at all: src/gpu/qk_cuda_shim.h loads nvcuda.dll (a DRIVER
+    # component) at runtime. Only the .cu -> PTX step needs nvcc, and when the
+    # toolkit is absent this whole block SKIPS: no PTX ships, device setup
+    # declines CUDA at runtime, AE falls back to the CPU reference. A build
+    # machine without CUDA therefore still produces a working plugin — one that
+    # renders on the CPU.
+    #
+    # PTX targets compute_75 (Turing/RTX-class baseline; the test box is an RTX
+    # 3070 Ti, sm_86). PTX is a text format the driver JIT-compiles forward for
+    # newer GPUs, so one asset serves every card from Turing up.
+    #
+    # This mirrors MM_FreqSep/CMakeLists.txt and EdgeRepair's before it — see
+    # EdgeRepair for the full reasoning behind the -ccbin dance below.
+    # =======================================================================
+    # -DQK_NVCC_EXE=NOTFOUND forces the no-toolkit path, which is how the
+    # graceful skip below gets tested on a machine that HAS the toolkit.
+    if(NOT DEFINED QK_NVCC_EXE)
+        file(GLOB QK_NVCC_CANDIDATES
+            "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*/bin/nvcc.exe")
+        if(QK_NVCC_CANDIDATES)
+            list(SORT QK_NVCC_CANDIDATES)
+            list(GET QK_NVCC_CANDIDATES -1 QK_NVCC_EXE)
+        else()
+            find_program(QK_NVCC_EXE nvcc)
+        endif()
+    endif()
+
+    if(QK_NVCC_EXE)
+        message(STATUS "nvcc: ${QK_NVCC_EXE} - building CUDA_Assets PTX")
+
+        # CUDA 12.8's nvcc cannot digest VS 2026's newest STL (hard
+        # static_assert: "expected CUDA 13.2 or newer", plus EDG chokes on its
+        # C++23 patterns). VS 2026 installs older MSVC toolsets side-by-side —
+        # hand nvcc the OLDEST 14.4x (VS 2022-era v143) via -ccbin. If none
+        # exists the flag is omitted and nvcc uses the default cl, which may
+        # fail; install the "MSVC v143" component or CUDA 13.2+ in that case.
+        file(GLOB QK_CUDA_CCBIN_CANDIDATES
+            "C:/Program Files/Microsoft Visual Studio/*/*/VC/Tools/MSVC/14.4*/bin/Hostx64/x64/cl.exe")
+        set(QK_NVCC_CCBIN "")
+        set(QK_NVCC_ENV "")
+        if(QK_CUDA_CCBIN_CANDIDATES)
+            list(SORT QK_CUDA_CCBIN_CANDIDATES)
+            list(GET QK_CUDA_CCBIN_CANDIDATES 0 QK_CUDA_CCBIN)
+            message(STATUS "nvcc host compiler (ccbin): ${QK_CUDA_CCBIN}")
+            set(QK_NVCC_CCBIN -ccbin "${QK_CUDA_CCBIN}")
+
+            # ccbin alone is not enough: the build environment's INCLUDE (set by
+            # vcvars for the NEWEST toolset) would still hand the old cl the new
+            # STL. Rebuild INCLUDE for the nvcc step from the chosen toolset's
+            # own headers plus the newest installed Windows SDK.
+            get_filename_component(QK_CCBIN_DIR "${QK_CUDA_CCBIN}" DIRECTORY)
+            get_filename_component(QK_MSVC_ROOT "${QK_CCBIN_DIR}/../../.." ABSOLUTE)
+            file(GLOB QK_WINSDK_INC_CANDIDATES
+                "C:/Program Files (x86)/Windows Kits/10/Include/10.*")
+            list(SORT QK_WINSDK_INC_CANDIDATES)
+            list(GET QK_WINSDK_INC_CANDIDATES -1 QK_WINSDK_INC)
+            file(TO_NATIVE_PATH "${QK_MSVC_ROOT}/include" QK_INC_MSVC)
+            file(TO_NATIVE_PATH "${QK_WINSDK_INC}/ucrt"   QK_INC_UCRT)
+            file(TO_NATIVE_PATH "${QK_WINSDK_INC}/shared" QK_INC_SHARED)
+            file(TO_NATIVE_PATH "${QK_WINSDK_INC}/um"     QK_INC_UM)
+            file(TO_NATIVE_PATH "${QK_MSVC_ROOT}" QK_MSVC_ROOT_NATIVE)
+            file(TO_NATIVE_PATH "${QK_CCBIN_DIR}" QK_CCBIN_DIR_NATIVE)
+            # nvcc's own VS detection always lands on the NEWEST toolset, so
+            # give it a fully consistent 14.4x environment instead:
+            # --use-local-env makes it trust INCLUDE; VCToolsInstallDir covers
+            # its VS probing; the PATH prepend satisfies its cl-in-PATH ==
+            # ccbin consistency check.
+            set(QK_NVCC_ENV ${CMAKE_COMMAND} -E env
+                --modify "PATH=path_list_prepend:${QK_CCBIN_DIR_NATIVE}"
+                "INCLUDE=${QK_INC_MSVC}\;${QK_INC_UCRT}\;${QK_INC_SHARED}\;${QK_INC_UM}"
+                "VCToolsInstallDir=${QK_MSVC_ROOT_NATIVE}\\")
+        endif()
+
+        set(QK_CUDA_ASSETS "${CMAKE_CURRENT_BINARY_DIR}/CUDA_Assets")
+        add_custom_command(
+            OUTPUT "${QK_CUDA_ASSETS}/MM_Qualify_Kernels.ptx"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${QK_CUDA_ASSETS}"
+            COMMAND ${QK_NVCC_ENV} "${QK_NVCC_EXE}" -ptx -arch=compute_75
+                    --use-local-env
+                    -allow-unsupported-compiler ${QK_NVCC_CCBIN} -o
+                    "${QK_CUDA_ASSETS}/MM_Qualify_Kernels.ptx"
+                    "${SRC_DIR}/gpu/cuda/qk_kernels.cu"
+            # Same dependency set as the DXIL rule: one edit to a .kernel body
+            # must rebuild BOTH backends, or they silently drift apart.
+            DEPENDS "${SRC_DIR}/gpu/cuda/qk_kernels.cu"
+                    "${SRC_DIR}/gpu/kernels/qk_prologue_cuda.h"
+                    ${QK_KERNEL_FILES}
+            COMMENT "nvcc: qk_kernels.cu -> CUDA_Assets/MM_Qualify_Kernels.ptx"
+            VERBATIM
+        )
+        add_custom_target(qk_cuda_ptx
+            DEPENDS "${QK_CUDA_ASSETS}/MM_Qualify_Kernels.ptx")
+    else()
+        message(STATUS "nvcc not found - CUDA_Assets PTX will NOT be built. "
+                       "The plugin still builds and runs; After Effects will "
+                       "render it on the CPU (GPU device setup declines).")
+    endif()
+
+    list(APPEND QK_SOURCES
+        ${SRC_DIR}/gpu/qk_gpu_cuda.cpp
+        ${SRC_DIR}/gpu/mm_gpu_dx.cpp)
 
     add_library(${TARGET} MODULE ${QK_SOURCES} ${SDK_SOURCES} ${PIPL_RC})
     add_dependencies(${TARGET} qk_shaders)
+    if(QK_NVCC_EXE)
+        add_dependencies(${TARGET} qk_cuda_ptx)
+    endif()
     target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
     target_link_libraries(${TARGET} PRIVATE d3d12.lib dxgi.lib)
 
@@ -192,6 +298,19 @@ if(WIN32)
             "if (Test-Path '${AE_PLUGINS_DIR}') { Copy-Item -Path '$<TARGET_FILE:${TARGET}>' -Destination '${AE_PLUGINS_DIR}/${TARGET}.aex' -Force; Write-Host 'Deployed ${TARGET} to AE plugins folder' } else { Write-Host 'AE plugins folder not found; skipping deploy' }"
         COMMENT "Installing ${TARGET} to After Effects plugins folder"
         VERBATIM)
+
+    # Kernel assets must sit NEXT TO the .aex, in AE's own Plug-ins folder —
+    # not Common/Plug-ins/7.0/MediaCore, which is Premiere's
+    # (../docs/AE_GPU_Effects.md §2.5). A stale PTX here is the classic
+    # half-finished deploy: device setup fails to resolve an entry point and
+    # declines the whole backend rather than discovering it mid-render.
+    if(QK_NVCC_EXE)
+        add_custom_command(TARGET ${TARGET} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${QK_CUDA_ASSETS}" "${AE_PLUGINS_DIR}/CUDA_Assets"
+            COMMENT "Installing ${TARGET} CUDA_Assets next to the deployed .aex"
+            VERBATIM)
+    endif()
 
     message(STATUS "${TARGET}.aex -> ${AE_PLUGINS_DIR}")
 

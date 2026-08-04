@@ -14,6 +14,8 @@
 
 #include "../../qk_core.h"
 
+KERNEL_BEGIN(qk_matte)
+
 BUF_IN (gQual, 0);
 BUF_IN (gGIn,  1);
 BUF_OUT(gMOut, 0);
@@ -43,3 +45,5 @@ KERNEL_ENTRY(qk_matte)
     m *= gGIn[i];
     gMOut[i] = QK_ClipMatte(m, gClipB, gClipW);
 }
+
+KERNEL_END(qk_matte)

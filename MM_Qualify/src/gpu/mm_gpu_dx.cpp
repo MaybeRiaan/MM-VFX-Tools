@@ -224,6 +224,17 @@ PF_Err QK_DXDeviceSetup(PF_InData *in_data, PF_OutData *out_data,
 
 			data->scratchBudget = QK_QueryScratchBudget(device);
 			extra->output->gpu_data = data;
+
+			// Re-affirm GPU support for THIS device — a plain ASSIGNMENT, not
+			// an OR, exactly as Adobe's SDK_Invert_ProcAmp does in every
+			// successful backend branch (../../../docs/AE_GPU_Effects.md §2.2).
+			// Without it the host completes setup happily and is then offered
+			// what_gpu = NONE at every PreRender forever. This path is parked
+			// for AE — Premiere is where DIRECTX gets offered — but the
+			// contract belongs to the host, not the framework, and a missing
+			// re-affirm here would reproduce the same silent CPU fallback
+			// there. It was absent until the CUDA port; nothing else changed.
+			out_data->out_flags2 = PF_OutFlag2_SUPPORTS_GPU_RENDER_F32;
 		}
 	}
 

@@ -246,10 +246,6 @@ QK_FUNC float QK_RawMatte(float r, float g, float b, QK_Gates gp)
 
 /* ---- matte finesse: per-pixel stages ------------------------------------ */
 
-/* Clean Black / Clean White + Black/White Clip. All args 0..1 (percent/100).
-   Identity at cleanB=cleanW=clipB=0, clipW=1.
-
-   These reshape the matte's soft ramp (so they act on a FEATHERED key, not a
 /* Black Clip / White Clip: a hard levels remap of the matte. clipB is the
    black cut point, clipW the white cut point (both 0..1). Pixels at or below
    clipB go to 0 (solid transparent), at or above clipW go to 1 (solid
