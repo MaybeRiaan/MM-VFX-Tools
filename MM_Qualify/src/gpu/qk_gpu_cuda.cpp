@@ -470,11 +470,16 @@ PF_Err QK_CudaDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
 // pushes AE's context itself. When that fails the setup-time reading is a
 // better fallback than a hardcoded constant, so it is kept for exactly that.
 //
-// CONSEQUENCE, deliberate: the gate and the render may now see different
-// budgets for the same frame if VRAM moves between them. That is safe — the
-// number only picks a band height, never affects correctness, and a render
-// whose planner refuses after the gate said yes falls back to the CPU and says
-// so in the log (SMART_RENDER CPU).
+// CONSEQUENCE — and why the caller must NOT query this twice for one frame:
+// re-measuring means two calls a moment apart can return different numbers, so
+// PreRender's gate and SmartRender's planner could disagree about the same
+// frame. That is not benign here. A gate that declines costs a CPU render
+// (slower, never wrong), but a PLANNER that refuses inside SmartRender fails
+// the frame outright with PF_Err_OUT_OF_MEMORY — by then the worlds are device
+// memory and there is nothing to fall back to. So PreRender records the budget
+// it approved in QK_PreRenderData::gpuBudget and the render plans against that,
+// which keeps "gate and render cannot disagree" true while still re-measuring
+// once per frame.
 size_t QK_CudaScratchBudget(const void *gpu_data)
 {
 	const QK_CudaData *data = static_cast<const QK_CudaData*>(gpu_data);

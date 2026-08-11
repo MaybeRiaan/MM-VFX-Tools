@@ -253,6 +253,40 @@ Do not chase bit-exactness across platforms. Target max-abs ≤ 1e-5 against the
 CPU reference (see §5), which comfortably covers contraction differences while
 still catching real algorithmic error.
 
+**3.6.1 — The 1e-5 target names a measurement point: kernel output, or an
+image-bearing result. It does not survive a steep nonlinearity.**
+A gate, a threshold, a step — anything whose job is to turn small input
+differences into large output ones — multiplies contraction-level error by its
+local slope. Measure *behind* one and you are grading the user's parameter
+choices, not the code: the same kernels pass or fail depending on how soft
+someone set a gate.
+
+Measured on MM_Qualify, in AE, same footage and same build (2026-08-11):
+
+| measured at | frame content | max-abs |
+|---|---|---|
+| image-bearing output (Selection Overlay) | 25.4% intermediate | **2.384e-07** — 4 ULP at 0.5, the fma signature |
+| matte, very soft gates | 80.7% intermediate | **3.027e-09** |
+| matte, moderate gates, denoise **off** | 37.1% intermediate | 6.855e-06 |
+| matte, moderate gates, denoise on | 37.1% intermediate | **1.657e-05** — over target |
+| matte, hard gates | 99.8% clipped | 0.000e+00 |
+
+Same kernels throughout. The spread is gate slope, not math: the denoise-off
+control already sits at 6.855e-06 with no Gaussian running, and the error does
+not scale with tap count. In deliverable terms the 1.657e-05 worst case is
+1/237th of an 8-bit code value — below the quantisation of any real output.
+
+So: **gate a backend on an image-bearing mode.** Treat divergence measured on a
+matte or other decision surface as informational, and if you must put a number
+on it, state the gate softness alongside — the figure is meaningless without it.
+
+**And check what you measured before trusting it.** A frame that is clipped,
+binary, or empty matches bit-for-bit on any backend, because clipping destroys
+exactly the last-bit differences the test looks for. Three separate `0.000e+00`
+results during the 2026-08-11 session were hollow for this reason. Report the
+fraction of pixels carrying intermediate values next to any parity figure; a
+`0.000e+00` on a 99.8%-clipped frame is not evidence.
+
 ---
 
 ## 4. Metal-specific items requiring on-device verification

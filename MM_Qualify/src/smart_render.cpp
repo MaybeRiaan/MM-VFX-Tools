@@ -139,6 +139,15 @@ typedef struct {
 	A_long  histOKMask;        // bit i-1 set = history checkout t-i succeeded
 	A_short garbCheckedOut;
 	A_short histRequested;     // QK_TEMPORAL_WINDOW when temporal, else 0
+	// The scratch budget the GATE approved this frame against, so the render
+	// plans with the SAME number. QK_CudaScratchBudget re-measures free VRAM on
+	// every call, so gate and render would otherwise read different values a
+	// moment apart — and a render whose planner refuses does NOT fall back to
+	// the CPU, it fails the frame with PF_Err_OUT_OF_MEMORY (see the note above
+	// the gate). Carrying the number forward keeps "gate and render cannot
+	// disagree" true while still re-measuring once per frame. 0 = not recorded
+	// (no GPU offered at PreRender), render falls back to a live query.
+	size_t  gpuBudget;
 } QK_PreRenderData;
 
 extern "C" void
@@ -311,6 +320,12 @@ QK_PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
 
 		if (fits)
 			extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+
+		// Hand the render the budget this gate actually approved against. Since
+		// QK_CudaScratchBudget re-measures, a fresh reading in SmartRender could
+		// come back smaller and flip the planner to "does not fit" — which there
+		// is a FAILED FRAME, not a CPU fallback.
+		if (prd) prd->gpuBudget = budget;
 
 		qkgpu::QK_GPULogPreRenderDecision(extra->input->what_gpu,
 			extra->input->gpu_data, fits, outW, outH, needMB, budgetMB);
@@ -783,8 +798,17 @@ QK_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra 
 		// Tile plan — same planner and budget the PreRender gate ran.
 		const bool denoise = (job.dnRx > 0 || job.dnRy > 0);
 		const int marginY = qkgpu::QK_TileMarginY(job.dnRy, job.blRy);
-		const size_t budget = qkgpu::QK_ScratchBudget(extra->input->what_gpu,
-		                                             extra->input->gpu_data);
+		// Plan against the budget THE GATE APPROVED, not a fresh reading.
+		// QK_CudaScratchBudget re-measures free VRAM per call, so a live query
+		// here could return less than PreRender saw moments ago and flip the
+		// planner to "does not fit" — and unlike the gate, failing here costs
+		// the frame (PF_Err_OUT_OF_MEMORY below), because the worlds are already
+		// device memory and there is nothing to fall back to. Only when the gate
+		// recorded nothing do we query live.
+		const size_t budget = (prd && prd->gpuBudget > 0)
+			? prd->gpuBudget
+			: qkgpu::QK_ScratchBudget(extra->input->what_gpu,
+			                          extra->input->gpu_data);
 		if (!qkgpu::QK_PlanTiles(job.outH, job.srcH, job.srcOY, marginY,
 				qkgpu::QK_TileBytesPerRow(denoise, job.temporal, job.srcW),
 				qkgpu::QK_OutBytesPerRow(job.outW), budget, &job.plan)) {

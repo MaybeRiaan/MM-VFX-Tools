@@ -157,6 +157,14 @@ typedef struct {
 	A_long  matteRefW;         // matte LAYER frame size (res-independent), from
 	A_long  matteRefH;         // the matte checkout — the Fit target frame
 	A_short matteCheckedOut;   // 1 if the matte layer checkout succeeded
+	// The scratch budget the GATE approved this frame against, so the render
+	// plans with the SAME number. FS_CudaScratchBudget re-measures free VRAM on
+	// every call, so gate and render would otherwise read different values a
+	// moment apart — and a render whose planner refuses does NOT fall back to
+	// the CPU, it fails the frame with PF_Err_OUT_OF_MEMORY. Carrying the number
+	// forward is what keeps the "this cannot newly fail" claim below true.
+	// 0 = not recorded (no GPU offered at PreRender), render queries live.
+	size_t  gpuBudget;
 } FS_PreRenderData;
 
 extern "C" void
@@ -339,6 +347,11 @@ FS_PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
 
 		if (fits)
 			extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+
+		// Hand the render the budget this gate actually approved against — see
+		// FS_PreRenderData::gpuBudget. Without it a re-measured reading in
+		// SmartRender could come back smaller and fail the frame outright.
+		if (prd) prd->gpuBudget = budget;
 
 		fsgpu::FS_GPULogPreRenderDecision(extra->input->what_gpu,
 			extra->input->gpu_data, fits, outW, outH, needMB, budgetMB);
@@ -782,11 +795,16 @@ FS_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra 
 		job.mix     = (float)(p.mixF / 100.0);
 
 		// Tile plan — same planner and budget PreRender's gate ran, on the
-		// real (≤ worst-case) geometry, so this cannot newly fail.
+		// real (≤ worst-case) geometry, so this cannot newly fail. That claim
+		// depends on using the gate's OWN budget: FS_CudaScratchBudget
+		// re-measures free VRAM per call, so a live query here could return
+		// less than the gate saw and fail a frame the gate had approved.
 		const int marginY = fsgpu::FS_TileMarginY(job.guided, job.sepRy,
 			job.guidedRy, job.smoothRy);
-		const size_t budget = fsgpu::FS_ScratchBudget(extra->input->what_gpu,
-		                                              extra->input->gpu_data);
+		const size_t budget = (prd && prd->gpuBudget > 0)
+			? prd->gpuBudget
+			: fsgpu::FS_ScratchBudget(extra->input->what_gpu,
+			                          extra->input->gpu_data);
 		if (!fsgpu::FS_PlanTiles(job.outH, job.srcH, job.srcOY, marginY,
 				fsgpu::FS_TileBytesPerRow(job.guided, job.srcW),
 				fsgpu::FS_OutBytesPerRow(job.outW), budget, &job.plan)) {
