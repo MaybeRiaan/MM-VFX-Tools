@@ -408,10 +408,39 @@ PF_Err FS_CudaDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
 	return PF_Err_NONE;
 }
 
+// Re-measured on every call rather than returning the setup-time reading.
+//
+// A device is set up when AE's frame cache is COLD, which is the one moment in
+// a session that free VRAM is least representative. Cache that answer and a
+// card which happened to be busy at startup keeps a floored budget for hours,
+// long after the condition cleared — an entire work session banding harder (or
+// declining outright) on a reading that stopped being true a moment later.
+// The error is also self-perpetuating in the bad direction: a budget low enough
+// to decline frames means no GPU render ever runs, so nothing would refresh it.
+// cuMemGetInfo is a driver query — no sync, microseconds against a render.
+// ModernEdgeBlur made this call first; MM_Qualify and this host follow it.
+//
+// Nothing is current at either call site — PreRender's gate and the tile plan
+// both run outside the render's own context guard — so this pushes AE's context
+// itself. When that fails the setup-time reading is a better fallback than a
+// hardcoded constant, so it is kept for exactly that.
+//
+// CONSEQUENCE, deliberate: the gate and the render may now see different
+// budgets for the same frame if VRAM moves between them. That is safe — the
+// number only picks a band height, never affects correctness, and a render
+// whose planner refuses after the gate said yes falls back to the CPU and says
+// so in the log (SMART_RENDER CPU).
 size_t FS_CudaScratchBudget(const void *gpu_data)
 {
 	const FS_CudaData *data = static_cast<const FS_CudaData*>(gpu_data);
-	return data ? data->scratchBudget : 0;
+	if (!data) return 0;
+
+	const FS_CudaApi &cu = FS_CudaApi::Get();
+	if (cu.loaded && data->cuCtx) {
+		FS_CudaCtxGuard ctx(cu, data->cuCtx);
+		if (ctx.pushed) return FS_QueryCudaBudget(cu);
+	}
+	return data->scratchBudget;   // setup-time reading, better than a constant
 }
 
 void FS_GPULogSmartRenderCPU(int srcW, int srcH, int outW, int outH,

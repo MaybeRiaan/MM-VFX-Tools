@@ -15,7 +15,7 @@ Mercury GPU = CUDA). Contracts: [`AE_GPU_Effects.md`](AE_GPU_Effects.md) (host),
 
 | | Built + deployed | AE-free tests | In-AE GPU |
 |---|---|---|---|
-| **MM_Qualify** ("Qualify") | ✅ .aex + PTX | ✅ 128/128, all GPU cases `0.000e+00` | ⏳ **ready to test** |
+| **MM_Qualify** ("Qualify") | ✅ .aex + PTX | ✅ 128/128, all GPU cases `0.000e+00` | ✅ **verified 2026-08-11** |
 | **Modern Edge Blur** | ✅ .aex + PTX | ✅ 84 216 checks, 0 failures | ⏳ **ready to test** |
 | **MM_FreqSep** ("Skin Retouch") | ✅ .aex + PTX | ✅ 27/27, all `0.000e+00` | ⏳ **ready to test** |
 | **Grain Transfer** | ✅ .aex + PTX | ✅ 18/18 kernel parity `0.000e+00`, DSP gates pass | ⏳ **ready to test** |
@@ -23,6 +23,14 @@ Mercury GPU = CUDA). Contracts: [`AE_GPU_Effects.md`](AE_GPU_Effects.md) (host),
 
 All five suite plugins build clean and every `CUDA_Assets/*.ptx` is deployed
 next to its `.aex` in AE's own Plug-ins folder.
+
+**MM_Qualify's ✅ carries one caveat.** It was signed off on the 2026-08-10
+binary; later that evening the CUDA scratch-budget query in MM_Qualify and
+MM_FreqSep changed to re-measure free VRAM per call instead of returning the
+value cached at `GPU_DEVICE_SETUP`. The kernel math is untouched, so every
+parity figure behind the sign-off still holds — but the deployed binary is not
+the one that was measured. **Q-01 (log gate) and Q-10 (stress) are set back to
+"not run" in the tracker and are the starting point of the next session.**
 
 **Grain Transfer was ported 2026-08-04** and is the only plugin here that was
 CUDA-only from its first GPU commit — it was written after §1.2 was measured,
