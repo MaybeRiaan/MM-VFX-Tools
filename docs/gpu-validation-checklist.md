@@ -24,13 +24,21 @@ Mercury GPU = CUDA). Contracts: [`AE_GPU_Effects.md`](AE_GPU_Effects.md) (host),
 All five suite plugins build clean and every `CUDA_Assets/*.ptx` is deployed
 next to its `.aex` in AE's own Plug-ins folder.
 
-**MM_Qualify's ✅ carries one caveat.** It was signed off on the 2026-08-10
-binary; later that evening the CUDA scratch-budget query in MM_Qualify and
-MM_FreqSep changed to re-measure free VRAM per call instead of returning the
-value cached at `GPU_DEVICE_SETUP`. The kernel math is untouched, so every
-parity figure behind the sign-off still holds — but the deployed binary is not
-the one that was measured. **Q-01 (log gate) and Q-10 (stress) are set back to
-"not run" in the tracker and are the starting point of the next session.**
+**MM_Qualify was re-validated after a post-sign-off change.** The parity sweep
+ran against the 2026-08-10 binary; later that evening the CUDA scratch-budget
+query in MM_Qualify and MM_FreqSep changed to re-measure free VRAM per call
+instead of returning the value cached at `GPU_DEVICE_SETUP` (commit `4cb4bc1`).
+The kernel math was untouched, so every parity figure stood — and Q-01 and Q-10
+were re-run on the new binary the same evening: **10 and 25 GPU renders, zero
+CPU, zero declines.**
+
+That re-run also measured the case for the change. Across 22 PreRender lines in
+one session the budget took **eight distinct values, 659.3 MB to 931.6 MB**. The
+old code froze a single reading — and froze it at 1024 MB, the clamp ceiling,
+because a device is set up while AE's frame cache is still cold. It was planning
+against up to ~360 MB of VRAM that was not actually free. Band counts now track
+the real budget (`bands=2` at defaults, `bands=4` at max radius) rather than a
+stale one.
 
 **Grain Transfer was ported 2026-08-04** and is the only plugin here that was
 CUDA-only from its first GPU commit — it was written after §1.2 was measured,
