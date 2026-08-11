@@ -92,11 +92,28 @@ reading, degenerate rect. Withholding out of ignorance is the bug.
 2. **Project depth: 32-bit float.** The GPU path is F32-only; 8/16-bit projects
    route to the CPU by design.
 3. **Restart AE** after any build — plugins and PTX are loaded once.
-4. Delete stale logs so you are reading this session:
+4. Delete stale logs so you are reading this session. **Six files — Grain
+   Transfer writes two of them:**
    ```powershell
-   Remove-Item "$env:TEMP\MM_Qualify_gpu.log","$env:TEMP\ModernEdgeBlur_gpu.log","$env:TEMP\MM_FreqSep_gpu.log" -ErrorAction SilentlyContinue
+   Remove-Item "$env:TEMP\MM_Qualify_gpu.log","$env:TEMP\ModernEdgeBlur_gpu.log",`
+               "$env:TEMP\MM_FreqSep_gpu.log","$env:TEMP\EdgeRepair_gpu.log",`
+               "$env:TEMP\GrainTransfer_gpu.log","$env:TEMP\GrainTransfer_diag.log" -ErrorAction SilentlyContinue
    ```
-5. Comp: a 4K+ float layer with real detail. 6K if you have it — that is the
+   Every log then opens at `DEVICE_SETUP` (the diag log at `frame=0`), which is
+   how you confirm you are reading this session and not an appended older one —
+   these are opened `"a"`, and no line carries a timestamp.
+5. **Lift the log caps — `MM_GPU_LOG_ALL=1`.** Every log line in all five
+   plugins is budgeted per call site (`QK_GPU_LOG_FIRST(counter, limit, …)` and
+   its four siblings), and the counters are **process** statics: PreRender caps
+   at 24 and the SMART_RENDER line at 6 or 8. A few seconds of scrubbing at
+   default params exhausts them, after which the log is *silent* — a sweep run
+   later leaves no trace at all, and the absence of a line proves nothing.
+   ```powershell
+   setx MM_GPU_LOG_ALL 1     # once; then launch AE from a NEW shell/session
+   ```
+   Unset it (`setx MM_GPU_LOG_ALL 0`) for normal work — uncapped logging writes
+   a line per frame and reopens the file each time.
+6. Comp: a 4K+ float layer with real detail. 6K if you have it — that is the
    usage profile and the only size that exercises multi-band tiling.
 
 ---
@@ -124,6 +141,19 @@ SMART_RENDER GPU what_gpu=... out=3840x2160 ...
 ```
 
 `what_gpu`: `0 = NONE · 1 = OPENCL · 2 = METAL · 3 = CUDA · 4 = DIRECTX`.
+
+Every plugin also logs the other outcome:
+
+```
+SMART_RENDER CPU src=... out=... off=(...) ...
+```
+
+**A CPU line is a fact, not an inference.** Before this existed you could only
+guess at a fallback from a *missing* GPU line, which the caps in §2.5 made
+worthless. Now the two lines interleave and you can read exactly which frames
+went where — and with `MM_GPU_LOG_ALL=1`, for every frame rather than the
+first handful. Some CPU lines are correct (§5); what matters is that they are
+visible.
 
 **Stop here if the log is wrong.** A/B testing a CPU render against a CPU
 render is how this suite lost several test rounds, twice.
@@ -160,7 +190,12 @@ Render/note a frame under Mercury CUDA, then switch **Mercury GPU Acceleration
 | MM_Qualify | **Qualify** | `MM_Qualify_gpu.log` | Output popup: *Matte* |
 | Modern Edge Blur | **Modern Edge Blur** | `ModernEdgeBlur_gpu.log` | Blur Amount / Shift Edge |
 | MM_FreqSep | **Skin Retouch** | `MM_FreqSep_gpu.log` | View popup: *Low Band* / *High Band* |
-| Grain Transfer | **Grain Transfer** | `GrainTransfer_diag.log` (+ GPU lines, TBD by the port) | *Preview Grain Only* checkbox |
+| Grain Transfer | **Grain Transfer** | **two:** `GrainTransfer_gpu.log` (GPU verdict) + `GrainTransfer_diag.log` (per-frame cache state) | *Preview Grain Only* checkbox |
+
+Grain Transfer is the one plugin whose verdict is split across two files. The
+`DEVICE_SETUP` / `PRERENDER` / `SMART_RENDER` lines are in `_gpu.log`; the
+`cache` / `fullRes` / `hasSource` / `canStamp` state that explains *why* the
+gate is shut is in `_diag.log`. Read the second before blaming the first.
 
 ### MM_Qualify — "Qualify"
 Sweep these; each lights a different kernel:
@@ -210,7 +245,10 @@ GPU path is gated on the analysis cache rather than on a memory budget.
    the compute cache. Only from the second frame on can PreRender raise
    `GPU_RENDER_POSSIBLE`. Expect the log to show a CPU frame, then GPU frames.
    *If every frame stays on the CPU, the cache gate is the first suspect, not
-   §2.2.*
+   §2.2.* Before blaming the gate, check `hasSource` and `fullRes` in
+   `_diag.log`: `hasSource=0` means no Grain Source layer is connected, so
+   analysis can never run and `analysis_cached=no` is the gate behaving
+   correctly. Measured 2026-08-10 — 24 declines, all of them this.
 2. **Change the Grain Source, the Seed, or the project bit depth** — each
    changes the cache key, so the next frame must drop back to CPU for one
    frame and then return to GPU. That round trip is the gate working; a
@@ -247,7 +285,8 @@ GPU path is gated on the analysis cache rather than on a memory budget.
 | `AE provided no CUcontext` | AE handed a CUDA device with no context | Driver/AE issue, not ours |
 | `AllocateDeviceMemory(...) FAILED` | Card genuinely out of memory | Lower radius / resolution |
 | `GPU_RENDER_POSSIBLE=no` with a real `need`/`budget` | Budget gate declined a frame it *proved* does not fit | Working as designed — CPU renders it |
-| PRERENDER says YES but no `SMART_RENDER GPU` | AE chose the CPU for that frame anyway | Normal for thumbnails and heavy draft downsamples; try full res |
+| PRERENDER says YES but no `SMART_RENDER GPU` | AE chose the CPU for that frame anyway | Normal for thumbnails and heavy draft downsamples; try full res. Confirm with the `SMART_RENDER CPU` line rather than inferring it from silence |
+| The log simply stops mid-session | A per-site cap was reached (§2.5) | `MM_GPU_LOG_ALL=1` and relaunch AE. Nothing after that point was recorded, so re-run the sweep — do not read the silence as a result |
 
 ---
 

@@ -116,9 +116,23 @@ static void ER_GPULog(const char *fmt, ...)
 }
 // Log only the first `limit` hits per call site (PreRender/SmartRender fire
 // per frame — unbounded logging would swamp the file).
+// The counters are PROCESS statics: a few seconds of scrubbing at default
+// params exhausts them, after which the log is silent and an A/B sweep leaves
+// no trace at all. Set MM_GPU_LOG_ALL=1 to lift every cap across the whole
+// suite for a validation session (../../docs/gpu-validation-checklist.md §3).
+static bool ER_GPULogAll()
+{
+    static const bool all = [] {
+        char v[8];
+        const DWORD n = ::GetEnvironmentVariableA("MM_GPU_LOG_ALL", v, (DWORD)sizeof(v));
+        return n > 0 && n < (DWORD)sizeof(v) && v[0] != '0';
+    }();
+    return all;
+}
 #define ER_GPU_LOG_FIRST(counter, limit, ...) \
     do { static std::atomic<int> counter(0); \
-         if (counter.fetch_add(1) < (limit)) ER_GPULog(__VA_ARGS__); } while (0)
+         if (counter.fetch_add(1) < (limit) || ER_GPULogAll()) \
+             ER_GPULog(__VA_ARGS__); } while (0)
 #define ER_GPU_LOGF(...) ER_GPULog(__VA_ARGS__)
 #else
 #define ER_GPU_LOG_FIRST(counter, limit, ...) ((void)0)
@@ -518,6 +532,17 @@ PF_Err ER_GPUDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
 
 // Diagnostic hook for PreRender (EdgeRepair.cpp) — records what AE offered
 // per frame and whether we raised GPU_RENDER_POSSIBLE. First few frames only.
+void ER_GPULogSmartRenderCPU(int srcW, int srcH, int outW, int outH,
+                             int srcOX, int srcOY)
+{
+    // The counterpart to the SMART_RENDER GPU line. Without it a frame that
+    // falls back to the CPU is INVISIBLE — you can only infer it from a
+    // missing GPU line, which the per-site caps make unreliable.
+    ER_GPU_LOG_FIRST(s_cpu, 6,
+        "[EdgeRepair] SMART_RENDER CPU src=%dx%d out=%dx%d off=(%d,%d)\n",
+        srcW, srcH, outW, outH, srcOX, srcOY);
+}
+
 void ER_GPULogPreRenderDecision(PF_GPU_Framework what_gpu,
                                 const void *gpu_data, bool raised,
                                 int bitdepth, int dsx_num, int dsx_den)

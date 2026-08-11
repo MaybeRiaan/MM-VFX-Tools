@@ -1008,6 +1008,11 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         const A_long outW = out_world->width;
         const A_long outH = out_world->height;
 
+#ifdef _WIN32
+        MEB_GPULogSmartRenderCPU((int)src_world->width, (int)src_world->height,
+                                 (int)outW, (int)outH);
+#endif
+
         // No inflation — src_world is exactly output size.
         const size_t outN = (size_t)outW * outH;
         const bool do_blur     = (p.blur_amountF  >= 0.5f);

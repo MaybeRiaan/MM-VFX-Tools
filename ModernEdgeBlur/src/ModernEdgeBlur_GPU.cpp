@@ -120,9 +120,23 @@ static void MEB_GPULog(const char *fmt, ...)
 }
 // Log only the first `limit` hits per call site (PreRender/SmartRender fire per
 // frame — unbounded logging would swamp the file and pollute timings).
+// The counters are PROCESS statics: a few seconds of scrubbing at default
+// params exhausts them, after which the log is silent and an A/B sweep leaves
+// no trace at all. Set MM_GPU_LOG_ALL=1 to lift every cap across the whole
+// suite for a validation session (../../docs/gpu-validation-checklist.md §3).
+static bool MEB_GPULogAll()
+{
+    static const bool all = [] {
+        char v[8];
+        const DWORD n = ::GetEnvironmentVariableA("MM_GPU_LOG_ALL", v, (DWORD)sizeof(v));
+        return n > 0 && n < (DWORD)sizeof(v) && v[0] != '0';
+    }();
+    return all;
+}
 #define MEB_GPU_LOG_FIRST(counter, limit, ...) \
     do { static std::atomic<int> counter(0); \
-         if (counter.fetch_add(1) < (limit)) MEB_GPULog(__VA_ARGS__); } while (0)
+         if (counter.fetch_add(1) < (limit) || MEB_GPULogAll()) \
+             MEB_GPULog(__VA_ARGS__); } while (0)
 #define MEB_GPU_LOGF(...) MEB_GPULog(__VA_ARGS__)
 #else
 #define MEB_GPU_LOG_FIRST(counter, limit, ...) ((void)0)
@@ -465,6 +479,16 @@ PF_Err MEB_GPUDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
 
 // Diagnostic hook for PreRender — records what AE offered per frame and whether
 // we raised GPU_RENDER_POSSIBLE. First few frames only.
+void MEB_GPULogSmartRenderCPU(int srcW, int srcH, int outW, int outH)
+{
+    // The counterpart to the SMART_RENDER GPU line. Without it a frame that
+    // falls back to the CPU is INVISIBLE — you can only infer it from a
+    // missing GPU line, which the per-site caps make unreliable.
+    MEB_GPU_LOG_FIRST(s_cpu, 6,
+        "[ModernEdgeBlur] SMART_RENDER CPU src=%dx%d out=%dx%d\n",
+        srcW, srcH, outW, outH);
+}
+
 void MEB_GPULogPreRenderDecision(PF_GPU_Framework what_gpu,
                                  const void *gpu_data, bool raised,
                                  int bitdepth, int dsx_num, int dsx_den)

@@ -109,9 +109,24 @@ static void FS_GPULog(const char *fmt, ...)
 	va_end(ap);
 	fclose(f);
 }
+// The per-site budget keeps a long render from filling the disk, but the
+// counters are PROCESS statics: a few seconds of scrubbing at default params
+// exhausts them, after which the log is silent and an A/B sweep leaves no
+// trace at all. Set MM_GPU_LOG_ALL=1 to lift every cap across the whole suite
+// for a validation session (../../../docs/gpu-validation-checklist.md §3).
+static bool FS_GPULogAll()
+{
+	static const bool all = [] {
+		char v[8];
+		const DWORD n = ::GetEnvironmentVariableA("MM_GPU_LOG_ALL", v, (DWORD)sizeof(v));
+		return n > 0 && n < (DWORD)sizeof(v) && v[0] != '0';
+	}();
+	return all;
+}
 #define FS_GPU_LOG_FIRST(counter, limit, ...)                   \
 	do { static std::atomic<int> counter{0};                    \
-	     if (counter.fetch_add(1) < (limit)) FS_GPULog(__VA_ARGS__); } while (0)
+	     if (counter.fetch_add(1) < (limit) || FS_GPULogAll())  \
+	         FS_GPULog(__VA_ARGS__); } while (0)
 #define FS_GPU_LOGF(...) FS_GPULog(__VA_ARGS__)
 #else
 #define FS_GPU_LOG_FIRST(counter, limit, ...) ((void)0)
@@ -397,6 +412,17 @@ size_t FS_CudaScratchBudget(const void *gpu_data)
 {
 	const FS_CudaData *data = static_cast<const FS_CudaData*>(gpu_data);
 	return data ? data->scratchBudget : 0;
+}
+
+void FS_GPULogSmartRenderCPU(int srcW, int srcH, int outW, int outH,
+                             int srcOX, int srcOY, int view)
+{
+	// The counterpart to the SMART_RENDER GPU line. Without it a frame that
+	// falls back to the CPU is INVISIBLE — you can only infer it from a
+	// missing GPU line, which the per-site caps make unreliable.
+	FS_GPU_LOG_FIRST(s_cpu, 6,
+		"[MM_FreqSep] SMART_RENDER CPU src=%dx%d out=%dx%d off=(%d,%d) view=%d\n",
+		srcW, srcH, outW, outH, srcOX, srcOY, view);
 }
 
 void FS_GPULogPreRenderDecision(PF_GPU_Framework what_gpu, const void *gpu_data,

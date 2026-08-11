@@ -152,9 +152,24 @@ static void QK_GPULog(const char *fmt, ...)
 	va_end(ap);
 	fclose(f);
 }
+// The per-site budget keeps a long render from filling the disk, but the
+// counters are PROCESS statics: a few seconds of scrubbing at default params
+// exhausts them, after which the log is silent and an A/B sweep leaves no
+// trace at all. Set MM_GPU_LOG_ALL=1 to lift every cap across the whole suite
+// for a validation session (../../../docs/gpu-validation-checklist.md §3).
+static bool QK_GPULogAll()
+{
+	static const bool all = [] {
+		char v[8];
+		const DWORD n = ::GetEnvironmentVariableA("MM_GPU_LOG_ALL", v, (DWORD)sizeof(v));
+		return n > 0 && n < (DWORD)sizeof(v) && v[0] != '0';
+	}();
+	return all;
+}
 #define QK_GPU_LOG_FIRST(counter, limit, ...)                   \
 	do { static std::atomic<int> counter{0};                    \
-	     if (counter.fetch_add(1) < (limit)) QK_GPULog(__VA_ARGS__); } while (0)
+	     if (counter.fetch_add(1) < (limit) || QK_GPULogAll())  \
+	         QK_GPULog(__VA_ARGS__); } while (0)
 #define QK_GPU_LOGF(...) QK_GPULog(__VA_ARGS__)
 #else
 #define QK_GPU_LOG_FIRST(counter, limit, ...) ((void)0)
@@ -451,6 +466,22 @@ void QK_GPULogPreRenderDecision(PF_GPU_Framework what_gpu, const void *gpu_data,
 		"need=%.1fMB budget=%.1fMB -> GPU_RENDER_POSSIBLE=%s\n",
 		(int)what_gpu, gpu_data, outW, outH, scratchMB, budgetMB,
 		raised ? "YES" : "no");
+}
+
+void QK_GPULogSmartRenderCPU(int srcW, int srcH, int outW, int outH,
+                             int srcOX, int srcOY, int denoise,
+                             int dnRx, int dnRy, int blRx, int blRy,
+                             int temporal, int garbage, int mode)
+{
+	// The counterpart to the SMART_RENDER GPU line, in the same field order so
+	// the two are directly comparable. Without it a frame that falls back to
+	// the CPU is INVISIBLE — you can only infer it from a missing GPU line,
+	// which the per-site caps above make unreliable.
+	QK_GPU_LOG_FIRST(s_cpu, 6,
+		"[MM_Qualify] SMART_RENDER CPU src=%dx%d out=%dx%d off=(%d,%d) "
+		"denoise=%d dnR=(%d,%d) blR=(%d,%d) temporal=%d garbage=%d mode=%d\n",
+		srcW, srcH, outW, outH, srcOX, srcOY, denoise, dnRx, dnRy,
+		blRx, blRy, temporal, garbage, mode);
 }
 
 // ---------------------------------------------------------------------------

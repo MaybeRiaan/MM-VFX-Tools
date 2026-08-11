@@ -601,6 +601,18 @@ QK_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 		}
 		const float *gPlane = garb.active && !gBuf.empty() ? gBuf.data() : nullptr;
 
+#ifdef _WIN32
+		// Logged here rather than at entry: this is the first point where the
+		// whole shape of the frame is known (garbage included), and it is
+		// still ahead of every heavy row pass.
+		qkgpu::QK_GPULogSmartRenderCPU(
+			(int)srcW, (int)srcH, (int)outW, (int)outH, (int)srcOX, (int)srcOY,
+			denoise ? 1 : 0,
+			(int)qk::GaussianSupport(dnX), (int)qk::GaussianSupport(dnY),
+			(int)qk::GaussianSupport(blX), (int)qk::GaussianSupport(blY),
+			temporal ? 1 : 0, garb.active ? 1 : 0, (int)p.outputL - 1);
+#endif
+
 		// Raw matte -> clean/clip for the CURRENT frame.
 		{
 			QK_MatteRefcon mrc{ qual, gPlane, mBuf.data(), srcW,

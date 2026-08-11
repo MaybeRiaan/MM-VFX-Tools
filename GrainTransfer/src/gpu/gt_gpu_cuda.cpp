@@ -90,9 +90,24 @@ static void GT_GPULog(const char *fmt, ...)
 	va_end(ap);
 	fclose(f);
 }
+// The per-site budget keeps a long render from filling the disk, but the
+// counters are PROCESS statics: a few seconds of scrubbing at default params
+// exhausts them, after which the log is silent and an A/B sweep leaves no
+// trace at all. Set MM_GPU_LOG_ALL=1 to lift every cap across the whole suite
+// for a validation session (../../../docs/gpu-validation-checklist.md §3).
+static bool GT_GPULogAll()
+{
+	static const bool all = [] {
+		char v[8];
+		const DWORD n = ::GetEnvironmentVariableA("MM_GPU_LOG_ALL", v, (DWORD)sizeof(v));
+		return n > 0 && n < (DWORD)sizeof(v) && v[0] != '0';
+	}();
+	return all;
+}
 #define GT_GPU_LOG_FIRST(counter, limit, ...)                   \
 	do { static std::atomic<int> counter{0};                    \
-	     if (counter.fetch_add(1) < (limit)) GT_GPULog(__VA_ARGS__); } while (0)
+	     if (counter.fetch_add(1) < (limit) || GT_GPULogAll())  \
+	         GT_GPULog(__VA_ARGS__); } while (0)
 #define GT_GPU_LOGF(...) GT_GPULog(__VA_ARGS__)
 #else
 #define GT_GPU_LOG_FIRST(counter, limit, ...) ((void)0)
@@ -336,6 +351,17 @@ PF_Err GT_CudaDeviceSetdown(PF_InData *in_data, PF_OutData *out_data,
 	}
 	delete data;
 	return PF_Err_NONE;
+}
+
+void GT_GPULogSmartRenderCPU(int outW, int outH, int fullRes, int cached)
+{
+	// The counterpart to the SMART_RENDER GPU line, in THIS log rather than
+	// the diag log, so one file answers "did the GPU take this frame". For
+	// Grain Transfer a CPU frame is often correct — the first frame, any frame
+	// after a cache-key change, and every reduced-resolution preview.
+	GT_GPU_LOG_FIRST(s_cpu, 8,
+		"[GrainTransfer] SMART_RENDER CPU out=%dx%d fullRes=%d analysis_cached=%s\n",
+		outW, outH, fullRes, cached ? "yes" : "no");
 }
 
 void GT_GPULogPreRenderDecision(PF_GPU_Framework what_gpu, const void *gpu_data,

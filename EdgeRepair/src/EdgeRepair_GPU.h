@@ -59,6 +59,11 @@ bool ER_GPUFrameworkSupported(PF_GPU_Framework what_gpu);
    GPU_RENDER_POSSIBLE was raised, plus the render context (bitdepth AE is
    driving the effect at, downsample factor) to correlate AE's CPU/GPU choice
    with project settings. No-op when logging is compiled out. */
+/* Records a CPU SmartRender alongside the PreRender decision, so a frame AE
+   routed to the CPU leaves a trace instead of only a missing GPU line. */
+void ER_GPULogSmartRenderCPU(int srcW, int srcH, int outW, int outH,
+                             int srcOX, int srcOY);
+
 void ER_GPULogPreRenderDecision(PF_GPU_Framework what_gpu,
                                 const void *gpu_data, bool raised,
                                 int bitdepth, int dsx_num, int dsx_den);

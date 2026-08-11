@@ -1093,6 +1093,15 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                (prd && prd->hasSource) ? 1 : 0);
 #endif
 
+#ifdef _WIN32
+        // Same moment, into the GPU log: this frame is being rendered by the
+        // CPU. Whether that is correct depends on fullRes and the cache.
+        // `analysis`, not diagCacheHit — the latter only exists under
+        // GT_DIAG_LOG, and this line must not depend on that switch.
+        gtgpu::GT_GPULogSmartRenderCPU((int)W, (int)H, (int)isFullRes,
+                                       analysis ? 1 : 0);
+#endif
+
         if (canStamp) {
             GT_StampRefcon rc;
             rc.src = src_world; rc.out = out_world; rc.fmt = fmt; rc.W = W;

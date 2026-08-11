@@ -213,6 +213,11 @@ void FS_GPULogPreRenderDecision(PF_GPU_Framework what_gpu, const void *gpu_data,
                                 bool raised, int outW, int outH,
                                 double scratchMB, double budgetMB);
 
+// Records a CPU SmartRender alongside it, so a frame AE routed to the CPU
+// leaves a trace instead of only a missing GPU line.
+void FS_GPULogSmartRenderCPU(int srcW, int srcH, int outW, int outH,
+                             int srcOX, int srcOY, int view);
+
 // --- DirectX 12 (mm_gpu_dx.cpp) — the Premiere path ---------------------
 PF_Err FS_DXDeviceSetup(PF_InData *in_data, PF_OutData *out_data,
                         PF_GPUDeviceSetupExtra *extra);

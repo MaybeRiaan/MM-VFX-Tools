@@ -232,6 +232,15 @@ void QK_GPULogPreRenderDecision(PF_GPU_Framework what_gpu, const void *gpu_data,
                                 bool raised, int outW, int outH,
                                 double scratchMB, double budgetMB);
 
+// Records a CPU SmartRender in the same field order as the SMART_RENDER GPU
+// line, so the two can be read against each other. AE routing a frame to the
+// CPU is legitimate and silent (thumbnails, draft downsamples, a declined
+// gate), and without this line it leaves no trace whatsoever.
+void QK_GPULogSmartRenderCPU(int srcW, int srcH, int outW, int outH,
+                             int srcOX, int srcOY, int denoise,
+                             int dnRx, int dnRy, int blRx, int blRy,
+                             int temporal, int garbage, int mode);
+
 // ---- DirectX 12 (the Premiere path; parked for AE, still built) ----
 PF_Err QK_DXDeviceSetup(PF_InData *in_data, PF_OutData *out_data,
                         PF_GPUDeviceSetupExtra *extra);

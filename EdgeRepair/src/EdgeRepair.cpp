@@ -950,6 +950,11 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
             goto cleanup;
         }
 
+#ifdef _WIN32
+        ER_GPULogSmartRenderCPU((int)srcW, (int)srcH, (int)outW, (int)outH,
+                                (int)srcOX, (int)srcOY);
+#endif
+
         PF_PixelFormat fmt = PF_PixelFormat_INVALID;
         ERR(wsP->PF_GetPixelFormat(out_world, &fmt));
         if (err) goto cleanup;

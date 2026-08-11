@@ -74,6 +74,10 @@ PF_Err GT_CudaRender(PF_InData *in_data, PF_OutData *out_data,
 // PreRender's decision, logged. Grain Transfer's gate is the ANALYSIS CACHE,
 // not a memory budget — see GrainTransfer.cpp's PreRender for why that is the
 // one legitimate withholding condition in this suite.
+// Records a CPU SmartRender into MM_GPU's own log, so one file answers "did
+// the GPU take this frame". A CPU frame here is frequently correct — see §4.
+void GT_GPULogSmartRenderCPU(int outW, int outH, int fullRes, int cached);
+
 void GT_GPULogPreRenderDecision(PF_GPU_Framework what_gpu, const void *gpu_data,
                                 bool raised, bool cached, int outW, int outH);
 

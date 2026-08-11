@@ -548,6 +548,11 @@ FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 		if (srcOX < 0) srcOX = 0;
 		if (srcOY < 0) srcOY = 0;
 
+#ifdef _WIN32
+		fsgpu::FS_GPULogSmartRenderCPU((int)srcW, (int)srcH, (int)outW, (int)outH,
+		                               (int)srcOX, (int)srcOY, (int)p.viewL);
+#endif
+
 		// Working buffers: pristine source, scratch, low band. ~48 bytes/px
 		// of inflated tile — the CPU-reference tradeoff, revisited in Phase 5.
 		const size_t srcN4 = (size_t)srcW * srcH * 4;

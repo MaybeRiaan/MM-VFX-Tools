@@ -80,6 +80,10 @@ void MEB_GPULogPreRenderDecision(PF_GPU_Framework what_gpu,
                                  const void *gpu_data, bool raised,
                                  int bitdepth, int dsx_num, int dsx_den);
 
+/* Records a CPU SmartRender alongside it, so a frame AE routed to the CPU
+   leaves a trace instead of only a missing GPU line. */
+void MEB_GPULogSmartRenderCPU(int srcW, int srcH, int outW, int outH);
+
 /* GPU SmartRender. Called from ModernEdgeBlur.cpp's SmartRender when
    extra->input->what_gpu != NONE, with the already-checked-out GPU worlds and
    the parameters (read BEFORE the CPU/GPU fork, so both paths see identical
