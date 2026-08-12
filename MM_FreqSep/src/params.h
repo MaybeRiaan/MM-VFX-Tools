@@ -87,7 +87,9 @@ typedef short int			int16;
 #define FS_MIX_MAX			100.0
 #define FS_MIX_DFLT			100.0
 
-// Matte Channel popup (1-based). Inert this session (Phase 3).
+// Matte Channel popup (1-based). LIVE — matte.cpp:132 MatteChannelValue picks
+// the channel and smart_render.cpp:846 feeds it to both hosts. (The old "inert
+// this session" note here outlived Phase 3 by some margin.)
 enum {
 	FS_MATTE_CHAN_ALPHA = 1,
 	FS_MATTE_CHAN_ALPHA_INV,
@@ -98,7 +100,10 @@ enum {
 #define FS_MATTE_CHAN_DFLT	FS_MATTE_CHAN_ALPHA
 #define FS_MATTE_CHAN_ITEMS	"Alpha|Alpha Inverted|Luma|Luma Inverted"
 
-// Matte Fit popup (1-based). v1 ships Fit only; all inert this session.
+// Matte Fit popup (1-based). All three are LIVE — matte.cpp:88-112 implements
+// the source→matte mapping per mode. Note they only diverge when the matte
+// layer differs in size from the source layer; at equal dimensions all three
+// reduce to mlx = lx. In-AE parity verified 2026-08-12 (F-07).
 enum {
 	FS_MATTE_FIT_FIT = 1,
 	FS_MATTE_FIT_CENTER,

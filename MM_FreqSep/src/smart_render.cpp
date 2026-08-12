@@ -562,6 +562,8 @@ FS_SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *ex
 		if (srcOY < 0) srcOY = 0;
 
 #ifdef _WIN32
+		// p.viewL is the 1-based popup value; the GPU line logs the same basis
+		// (it adds 1 back to its 0-based job.view). Keep them in step.
 		fsgpu::FS_GPULogSmartRenderCPU((int)srcW, (int)srcH, (int)outW, (int)outH,
 		                               (int)srcOX, (int)srcOY, (int)p.viewL);
 #endif

@@ -17,7 +17,7 @@ Mercury GPU = CUDA). Contracts: [`AE_GPU_Effects.md`](AE_GPU_Effects.md) (host),
 |---|---|---|---|
 | **MM_Qualify** ("Qualify") | ✅ .aex + PTX | ✅ 128/128, all GPU cases `0.000e+00` | ✅ **verified 2026-08-11** |
 | **Modern Edge Blur** | ✅ .aex + PTX | ✅ 84 216 checks, 0 failures | ⏳ **ready to test** |
-| **MM_FreqSep** ("Skin Retouch") | ✅ .aex + PTX | ✅ 27/27, all `0.000e+00` | ⏳ **ready to test** |
+| **MM_FreqSep** ("Skin Retouch") | ✅ .aex + PTX | ✅ 27/27, all `0.000e+00` | ✅ **verified 2026-08-12** |
 | **Grain Transfer** | ✅ .aex + PTX | ✅ 18/18 kernel parity `0.000e+00`, DSP gates pass | ⏳ **ready to test** |
 | *EdgeRepair* (reference) | ✅ .aex + PTX | ✅ | ✅ **verified 2026-07-30** |
 
@@ -39,6 +39,32 @@ because a device is set up while AE's frame cache is still cold. It was planning
 against up to ~360 MB of VRAM that was not actually free. Band counts now track
 the real budget (`bands=2` at defaults, `bands=4` at max radius) rather than a
 stale one.
+
+**MM_FreqSep was validated 2026-08-12** on the `5857c87` binary — 9 rows passed,
+F-10/F-11 retired as n/a on the same reasoning as Q-12/Q-13. Parity against the
+1e-5 target: default 4.470e-08, Low Band 8.941e-07, High Band 5.960e-07, σ=2
+7.749e-07, σ=90 9.537e-07, Matte Fit 4.172e-07 (Center and Top-Left bit-identical
+for a reason — see §4), MFR bit-identical.
+
+**F-08 is the row that earned its keep.** It is the first render anywhere in this
+suite to execute the multi-band path — every other frame logged has been
+`bands=1`, because a layer that exactly fills the comp cannot be inflated past
+its own edge, so AE clamps the request and the tile geometry never changes. At
+6220×4269 with σ=90 the planner re-banded live as free VRAM fell: budget 1024.0 MB
+→ `bands=2` (938.1 MB), 880.0 MB → `bands=3` (727.7 MB), ~667 MB → `bands=4`
+(584.6 MB), never once exceeding the budget the gate had approved. That is
+`5857c87` proven end-to-end under real pressure, and it had zero exposure in AE
+before this session.
+
+Two consequences worth carrying:
+
+- **`GPU scratch grown to …` can fire more than once per frame size.** §4's Modern
+  Edge Blur note says it should appear once and never again. That was true when
+  the budget was measured once at setup; under a per-call budget a changing band
+  plan legitimately grows the block again (727.7 MB then 938.1 MB in one session).
+- **Getting to 6K needs real pixels, not Scale.** Layer Scale is a transform
+  applied *after* effects, so scaling a 4K layer inside a 6K comp still hands the
+  effect a 3840×2636 source. Precompose, or use a genuine 6K plate.
 
 **Grain Transfer was ported 2026-08-04** and is the only plugin here that was
 CUDA-only from its first GPU commit — it was written after §1.2 was measured,
@@ -240,13 +266,40 @@ Full deep protocol: [`../MM_Qualify/docs/testing.md`](../MM_Qualify/docs/testing
    never again — the block is grow-only and cached.
 
 ### MM_FreqSep — "Skin Retouch"
+
+**View ▸ Result is an IDENTITY at default params — do not sweep anything in it.**
+High band is defined as `source − low`, so `low + high == source` for *any*
+separation radius whenever Texture=100 / Smooth=0 / Mix=100
+(`mm-freqsep-plan.md:66` asserts this and unit-tests it). A radius sweep in
+Result view measures nothing: σ=2 against σ=90 differenced to **1.192e-07** on
+both backends before this was spotted. Worse, it is not a *visibly* dead frame —
+the picture looks perfectly normal, so §3.6.1's "check the distribution" does not
+catch it. The parameter is inert, not the pixels. Sweep in Low Band, or set
+Texture ≠ 100.
+
 1. **View ▸ Low Band** and **View ▸ High Band** separately — this is the whole
    point of that popup: it isolates the separation/guided kernels away from
    compose, which makes a mismatch diagnosable instead of merely visible.
-2. **Separation Radius** low, then high. Note `gpu-kernel-rules.md` §3.7: the
-   guided box pass is O(r), so at σ≈90 (r≈110) the GPU can land *slower* than
-   the CPU. Expected, documented, and a perf issue — not a correctness one.
-3. **Matte Layer** connected, each *Matte Fit* mode — `fs_matte`.
+2. **Separation Radius** low, then high, **in Low Band view** (see above). Note
+   `gpu-kernel-rules.md` §3.7: the *Guided* box pass is O(r) and can land slower
+   on GPU. It does **not** apply to Gaussian — measured 2026-08-12, σ=90 with
+   `guided=0` ran orders of magnitude *faster* on GPU than CPU.
+3. **Matte Layer** connected, each *Matte Fit* mode — `fs_matte`. Two setup
+   requirements, or the row is inert:
+   - **The matte layer must differ in size from the source layer.** At equal
+     dimensions Fit / Center / Top-Left all reduce to `mlx = lx` — the identical
+     mapping — and three "passes" prove nothing.
+   - **Use View ▸ Matte**, and give the matte real spatial variation. Low Band
+     and High Band never sample `matteW` at all; only Result and Matte do. With
+     no matte layer `SampleMatte` returns 1 → solid white.
+
+   Expect **Center and Top-Left to difference to exactly `0.000e+00`**, and that
+   is correct rather than hollow: both put samples on exactly-representable
+   coordinates (Top-Left does no arithmetic; Center's offset is a half-integer
+   that lands on texel centres), so the bilinear weights are exact on both
+   backends. Only *Fit* scales by `mRefW/srcRefW`, producing arbitrary
+   interpolation weights and therefore a real non-zero difference. If **Fit**
+   comes back at 0.0 too, the test is genuinely hollow — check the matte size.
 
 Full protocol: `MM_FreqSep/docs/phase6-validation.md`.
 

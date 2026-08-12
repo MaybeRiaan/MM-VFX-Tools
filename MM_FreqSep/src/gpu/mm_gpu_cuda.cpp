@@ -597,6 +597,12 @@ PF_Err FS_CudaRender(PF_InData *in_data, PF_OutData *out_data,
 
 			// Tagged "SMART_RENDER GPU" so one grep answers "did AE actually
 			// dispatch to the GPU?" across every plugin in the suite.
+			//
+			// view= is the POPUP value (1-based: 1=Result 2=Low 3=High
+			// 4=Matte), not job.view, which is the 0-based kernel index.
+			// The CPU line logs the same 1-based value. They have to agree:
+			// an A/B is read by comparing these two lines, and while they
+			// differed by one a matched pair looked like a param mismatch.
 			FS_GPU_LOG_FIRST(s_plan, 6,
 				"[MM_FreqSep] SMART_RENDER GPU what_gpu=CUDA "
 				"src=%dx%d out=%dx%d off=(%d,%d) guided=%d "
@@ -604,7 +610,7 @@ PF_Err FS_CudaRender(PF_InData *in_data, PF_OutData *out_data,
 				"bands=%d scratch=%.1fMB\n",
 				job.srcW, job.srcH, job.outW, job.outH, job.srcOX, job.srcOY,
 				job.guided ? 1 : 0, job.sepRx, job.sepRy, job.guidedRx, job.guidedRy,
-				job.smoothRx, job.smoothRy, job.view, job.matte.active ? 1 : 0,
+				job.smoothRx, job.smoothRy, job.view + 1, job.matte.active ? 1 : 0,
 				(int)job.plan.bands.size(),
 				(double)scratchBytes / (1024.0 * 1024.0));
 

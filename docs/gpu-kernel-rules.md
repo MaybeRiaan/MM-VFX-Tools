@@ -247,6 +247,14 @@ test ever starts passing trivially, this hazard has stopped being covered.
 > The accumulator is not the bug — the O(r) shape is. See the MM FreqSep plan's
 > Phase 5 for the chunked sliding-window fix, which restores O(1) and keeps
 > `double` cheap on every backend.
+>
+> **This is the GUIDED method only. It is not a property of Separation Radius.**
+> Measured in AE 2026-08-12 at σ=90 with `guided=0` (Gaussian, `sepR=270`, a
+> 541-tap separable pass at 3840×2636): the GPU ran *orders of magnitude faster*
+> than the CPU, not slower. A separable Gaussian is O(r) per axis but trivially
+> parallel and bandwidth-bound; the guided box pass is what degrades. Do not cite
+> §3.7 when sweeping radius on the Gaussian path — the in-AE checklist did, and
+> it set the expectation exactly backwards.
 
 **3.6 — `fma` contraction is allowed to differ; tolerance absorbs it.**
 Do not chase bit-exactness across platforms. Target max-abs ≤ 1e-5 against the
