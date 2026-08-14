@@ -167,17 +167,62 @@ static void PackRow(const float *src, void *dstRow, A_long W, PF_PixelFormat fmt
 // radius > 0 → dilate (grow alpha); radius < 0 → erode (shrink alpha)
 // Operates in-place on a float[H*W*4] ARGB buffer (channel 0 = alpha).
 // ---------------------------------------------------------------------------
-static void ShiftEdgeAlpha(float *buf, A_long W, A_long H, float radius)
+struct MEB_MorphRefcon {
+    const float *in;
+    float       *out;
+    A_long       W, H;
+    int          ri;
+    float        r2;
+    int          dilate;
+};
+
+extern "C" {
+
+static PF_Err
+MEB_MorphRow(void *refconPV, A_long /*thread_indexL*/, A_long y, A_long /*iterationsL*/)
+{
+    const MEB_MorphRefcon *rc = static_cast<const MEB_MorphRefcon*>(refconPV);
+    MEB_MorphRowInline(rc->in, rc->out + (size_t)y * rc->W,
+                       rc->W, rc->H, y, rc->ri, rc->r2, rc->dilate);
+    return PF_Err_NONE;
+}
+
+} // extern "C"
+
+// Threaded per output row via iterate_generic when available, exactly as
+// DirectionalMinFilter and the two Gaussians already are. This was the last
+// serial pass in the render, and the most expensive one by a wide margin: it
+// samples ~pi*r^2 per pixel where every other pass is O(r) or better, so at
+// r=50 on a 4096x3112 frame it measured 170s on one thread. That is not merely
+// slow — a frame the PreRender budget gate declines lands here, so it froze AE
+// with CUDA selected and working. Threading is bit-identical (see the note on
+// MEB_MorphRowInline: pure gather, and min/max do not round), so GPU parity is
+// untouched and tests/test_gpuparity.cpp needs no rebaseline.
+static void ShiftEdgeAlpha(float *buf, A_long W, A_long H, float radius,
+                           PF_InData *in_data)
 {
     if (std::abs(radius) < 0.5f) return;
 
-    const bool dilate = (radius > 0.f);
+    const bool  dilate = (radius > 0.f);
+    const float r      = std::abs(radius);
+    const int   ri     = (int)std::ceil(r);
+    const float r2     = r * r;
 
     std::vector<float> alpha_in((size_t)W * H);
     for (A_long i = 0; i < W * H; ++i) alpha_in[i] = buf[i * 4 + 0];
 
     std::vector<float> alpha_out((size_t)W * H);
-    MorphPlane(alpha_in.data(), alpha_out.data(), W, H, radius, dilate);
+
+    bool done = false;
+    if (in_data && in_data->utils && in_data->utils->iterate_generic) {
+        MEB_MorphRefcon rc{ alpha_in.data(), alpha_out.data(), W, H,
+                            ri, r2, dilate ? 1 : 0 };
+        done = ((*in_data->utils->iterate_generic)(H, &rc, MEB_MorphRow)
+                    == PF_Err_NONE);
+    }
+    // Serial fallback — same row body as the threaded callback above.
+    if (!done)
+        MorphPlane(alpha_in.data(), alpha_out.data(), W, H, radius, dilate);
 
     // Write shifted alpha back; RGB unchanged
     for (A_long i = 0; i < W * H; ++i) buf[i * 4 + 0] = alpha_out[i];
@@ -849,7 +894,7 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX("Shift Edge",
         MEB_SHIFT_EDGE_MIN, MEB_SHIFT_EDGE_MAX,
-        MEB_SHIFT_EDGE_MIN, MEB_SHIFT_EDGE_MAX,
+        MEB_SHIFT_EDGE_SLIDER_MIN, MEB_SHIFT_EDGE_SLIDER_MAX,
         MEB_SHIFT_EDGE_DFLT, PF_Precision_HUNDREDTHS, 0, 0,
         MEB_SHIFT_EDGE_DISK_ID);
 
@@ -1119,7 +1164,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
         // internal keyer that only touches alpha.)
         t0 = MEB_Clock::now();
         if (do_shift) {
-            ShiftEdgeAlpha(sharp_buf, outW, outH, (float)p.shift_edgeF);
+            ShiftEdgeAlpha(sharp_buf, outW, outH, (float)p.shift_edgeF, in_data);
             MEB_DeriveRefcon drc{ sharp_buf, blurred_buf, sharp_alpha, outW, do_blur };
             MEB_ForEachRow(in_data, outH, &drc, MEB_DeriveRow);
         }

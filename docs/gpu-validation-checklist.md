@@ -257,13 +257,66 @@ Sweep these; each lights a different kernel:
 Full deep protocol: [`../MM_Qualify/docs/testing.md`](../MM_Qualify/docs/testing.md) §2.3.
 
 ### Modern Edge Blur
+
+**MEB IS AN EXACT IDENTITY ON A FULLY OPAQUE SOURCE — the test layer must carry
+a real alpha edge.** Every phase keys off the alpha plane: the Blend Radius
+weight is an *erosion of the alpha, then a feather*, so on a constant alpha the
+erosion is constant, the feather is constant, and `w == 1` at every pixel. That
+collapses `MEB_CompositeTexel` (`src/gpu/MEB_KernelMath.h:281`) to the sharp
+texel — the source — on both backends, bit for bit. The plugin's own parity
+suite already names the case: *"a fully opaque noise field — no edge anywhere,
+which is the degenerate case"* (`tests/test_gpuparity.cpp:142`).
+
+This is worse than MM_FreqSep's Result-view identity below, because **no
+parameter sweep escapes it**: the sliders are live, the *source* is inert, so
+Blur Amount, Shift Edge and Blend Radius all difference to `0.000e+00` and every
+A/B in the tab reads as a flawless pass. The 4K/6K opaque plates used for
+MM_Qualify and MM_FreqSep are exactly this case — do not inherit one.
+
+Give the layer a mask (AE renders masks *before* effects, so the effect really
+sees the alpha). Prefer an **ellipse over a rectangle**: the Blend Radius
+erosion is an octagon built from four directional min passes including the
+diagonals `(1,1)` and `(1,-1)`, which an axis-aligned rectangle barely
+exercises. Layer *Scale* does not work, for the same reason it does not at 6K —
+it is a transform applied after effects.
+
+Prove liveness before trusting any parity number here: difference the CUDA
+render against an effect-disabled render of the same frame. Measured 2026-08-12
+at defaults on a 4096x3112 ellipse-masked comp: `1.358e-01` over 270,733 px, a
+~28 px band on the mask perimeter and *nothing* within 64 px of the frame
+border.
+
 1. **Blur Amount** alone, then **+ Shift Edge**, then **+ Blend Radius** — the
    three passes of the schedule, added one at a time.
-2. Watch for `PRERENDER budget ... -> TOO BIG - CPU` in the log at 4.6K+: MEB's
-   scratch is all-or-nothing (~641 MB at 4.6K), so that line is expected on a
-   busy card and means the CPU took the frame correctly.
-3. `GPU scratch grown to ... MB` should appear **once** per frame size, then
-   never again — the block is grow-only and cached.
+2. Watch for `PRERENDER budget ... -> TOO BIG - CPU` in the log: MEB's scratch
+   is all-or-nothing, so that line means the CPU took the frame correctly.
+   **The threshold is not a fixed resolution.** The CUDA host re-measures
+   `free VRAM / 4` at *every* gated PreRender (`ModernEdgeBlur_GPU.cpp:696-703`
+   — the "quarter of dedicated VRAM once at device setup" behaviour is its
+   DirectX host, not this one). Measured 2026-08-12: `budget=877.4MB` at
+   `free=3510MB` rising to `budget=1242.7MB` at `free=4971MB`, against
+   ~44 bytes/px of requirement. So 4.6K (~528 MB) will **not** decline on an
+   idle card with 3.5 GB+ free — sizing a decline test at 4.6K makes it silently
+   no-op. Budget above ~21-25M pixels (6K+), or run the card busy.
+3. **Shift Edge is the expensive control, not Blur Amount — and a decline
+   routes straight into it.** The circular min/max samples ~πr² per pixel, where
+   every other pass is O(r) or better. Measured 2026-08-14 at 4096x3112,
+   single-threaded: **r=4 → 1.09s, r=10 → 7.12s, r=25 → 45.9s, r=50 → 170.3s**
+   for ONE frame (r² to within 0.3%). This froze AE twice during validation —
+   once on Software Only, and once *with CUDA selected and working*, because the
+   PreRender budget gate declined the frame into the CPU morph. Since fixed:
+   `ShiftEdgeAlpha` now threads through `iterate_generic` like every other pass
+   (7.4x on 8 threads, byte-identical — min/max do not round, so the row split
+   cannot change the result), and the slider is bounded to ±10 while the valid
+   range stays ±50 so old projects still load. Treat a big typed Shift Edge on a
+   CPU-bound frame as slow by nature: 24s at r=50 even threaded.
+4. `GPU scratch grown to ... MB` should appear **once** per frame size, then
+   never again — the block is grow-only and cached. MEB will not re-grow the way
+   MM_FreqSep does, and the reason is *not* that it lacks a per-call budget (it
+   has one, see above) but that it has no banding: the budget only ever decides
+   yes/no, never a different scratch size. Verified 2026-08-12 across 8 GPU
+   renders spanning four distinct plans — one growth line, later plans needing
+   339.4 / 237.6 / 33.9 MB all reused the 373.4 MB block.
 
 ### MM_FreqSep — "Skin Retouch"
 

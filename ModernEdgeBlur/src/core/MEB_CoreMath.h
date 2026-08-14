@@ -25,6 +25,7 @@
         MakeBlurKernel           -- host-side only; the GPU uploads the weights
         MakeBlendKernel             this builds, verbatim (see below)
         MorphPlane               <- MEB_PassMorph              (MEB_KernelPasses.h)
+        MEB_MorphRowInline          ... its per-row body, threaded by the host
         MEB_DeriveRowInline      <- MEB_PassDerive / MEB_PassSharp
         MEB_DirMinRowInline      <- MEB_PassDirMin
         MEB_BlurRowPlane         <- MEB_PassBlurHPlane
@@ -161,6 +162,39 @@ static inline std::vector<float> MakeBlendKernel(float radius)
    GPU twin evaluates the identical comparison rather than deriving a per-row dx
    bound from a sqrt, because a bound would round differently at the exact
    boundary and silently change the structuring element's shape. */
+/* One output row of the circular min/max. Lifted out of MorphPlane so the
+   threaded per-row callback in ModernEdgeBlur.cpp and the serial loop below
+   share one body — exactly the lift MEB_DirMinRowInline got, for the same
+   reason: before it, the two carried the same quadruple loop twice.
+
+   Threading this pass is safe and BIT-IDENTICAL, which is not true of every
+   pass here. Each output pixel is a pure gather over the input plane with no
+   dependence on any other output, and min/max introduce no rounding, so the
+   result does not depend on evaluation order. The Gaussian passes cannot be
+   reordered that freely — their accumulation order is load-bearing for GPU
+   parity (see the header note above) — but this one can, and the GPU twin may
+   keep its own traversal without the two diverging by a single bit. */
+static inline void MEB_MorphRowInline(const float *MEB_RESTRICT in,
+                                      float *MEB_RESTRICT outRow,
+                                      MEB_Long W, MEB_Long H, MEB_Long y,
+                                      int ri, float r2, int dilate)
+{
+    for (MEB_Long x = 0; x < W; ++x) {
+        float best = dilate ? 0.f : 1.f;
+        for (int dy = -ri; dy <= ri; ++dy) {
+            for (int dx = -ri; dx <= ri; ++dx) {
+                if ((float)(dx*dx + dy*dy) > r2) continue;
+                const MEB_Long sx = clampL(x + dx, 0, W - 1);
+                const MEB_Long sy = clampL(y + dy, 0, H - 1);
+                const float    a  = in[(size_t)sy * W + sx];
+                if (dilate) { if (a > best) best = a; }
+                else        { if (a < best) best = a; }
+            }
+        }
+        outRow[x] = best;
+    }
+}
+
 static inline void MorphPlane(const float *in, float *out,
                               MEB_Long W, MEB_Long H, float radius, bool dilate)
 {
@@ -173,22 +207,9 @@ static inline void MorphPlane(const float *in, float *out,
     const int   ri = (int)std::ceil(r);
     const float r2 = r * r;
 
-    for (MEB_Long y = 0; y < H; ++y) {
-        for (MEB_Long x = 0; x < W; ++x) {
-            float best = dilate ? 0.f : 1.f;
-            for (int dy = -ri; dy <= ri; ++dy) {
-                for (int dx = -ri; dx <= ri; ++dx) {
-                    if ((float)(dx*dx + dy*dy) > r2) continue;
-                    const MEB_Long sx = clampL(x + dx, 0, W - 1);
-                    const MEB_Long sy = clampL(y + dy, 0, H - 1);
-                    const float    a  = in[(size_t)sy * W + sx];
-                    if (dilate) { if (a > best) best = a; }
-                    else        { if (a < best) best = a; }
-                }
-            }
-            out[(size_t)y * W + x] = best;
-        }
-    }
+    for (MEB_Long y = 0; y < H; ++y)
+        MEB_MorphRowInline(in, out + (size_t)y * W, W, H, y, ri, r2,
+                           dilate ? 1 : 0);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -45,8 +45,21 @@ typedef short int			int16;
 // Parameter ranges and defaults
 // ---------------------------------------------------------------------------
 
+// Shift Edge's VALID range stays at +/-50 so projects saved before the slider
+// was narrowed still load and render identically. The SLIDER range is what a
+// drag can reach.
+//
+// The two differ because Shift Edge is the one O(r^2) pass in the plugin: its
+// circular min/max samples ~pi*r^2 per pixel, single-threaded before this, and
+// measured 170s for ONE 4096x3112 frame at r=50 against 1.09s at r=4. A frame
+// that the PreRender budget gate declines lands on exactly that pass, so a
+// dragged-to-50 Shift Edge froze AE in the default CUDA configuration
+// (docs/gpu-validation-checklist.md, Modern Edge Blur). +/-10 keeps the drag in
+// the range the control is actually useful in.
 #define MEB_SHIFT_EDGE_MIN		-50.0
 #define MEB_SHIFT_EDGE_MAX		 50.0
+#define MEB_SHIFT_EDGE_SLIDER_MIN	-10.0
+#define MEB_SHIFT_EDGE_SLIDER_MAX	 10.0
 #define MEB_SHIFT_EDGE_DFLT		  0.0
 
 #define MEB_BLUR_AMOUNT_MIN		  0.0
