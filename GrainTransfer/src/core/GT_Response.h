@@ -33,11 +33,15 @@ struct ResponseCurve {
     bool  valid = false;
 };
 
-// Measure σ(L) from the source. rgb: apply-space planes (for luminance);
-// residual: matching high-pass residual planes. Bands span the 1st–99th
-// luminance percentile; per-band sigma is MAD-robust (×1.4826) so content
-// edges don't inflate it; bands with too few pixels inherit their nearest
-// measured neighbour.
+// Measure σ(L) from the source. rgb: apply-space planes; residual: matching
+// high-pass residual planes. Bands span the 1st–99th percentile of the
+// BLURRED luminance (rgb − residual, so the binning variable carries no
+// grain — binning by raw luminance sorts pixels by the very quantity being
+// measured, which on a flat grain plate fabricates a U-shaped curve); per-band
+// sigma is MAD-robust (×1.4826) so content edges don't inflate it; bands with
+// too few pixels inherit their nearest measured neighbour. If the plate's
+// luminance span is under ~10 residual sigmas the curve is not identifiable
+// at all and collapses to flatSigma rather than extrapolating noise.
 void MeasureResponse(const float *const rgb[3], const float *const residual[3],
                      int W, int H, ResponseCurve &out);
 

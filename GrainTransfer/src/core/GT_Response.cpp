@@ -16,11 +16,27 @@ void MeasureResponse(const float *const rgb[3], const float *const residual[3],
     const size_t N = (size_t)W * H;
     if (!N) return;
 
-    // Luminance plane and its 1st/99th percentiles (subsampled sort — exact
-    // percentiles are not needed for band edges).
+    // Binning luminance comes from the BLURRED plate, not the raw one.
+    //
+    // This is the difference between measuring the source and measuring
+    // ourselves. Binning by raw pixel luminance sorts pixels by a value that
+    // CONTAINS the grain, then measures the grain inside each bin -- so on a
+    // plate whose only luminance variation IS grain (a locked grain plate, the
+    // canonical Grain Source), the top bin is by definition the pixels where
+    // grain landed brightest. Measured on real stock that produced a U-shaped
+    // curve, ends up to 3.2x the plate's own sigma and a collapsed middle,
+    // which the stamp's end-clamping then applied to every target luminance
+    // outside the plate's narrow range: 1.7-2.6x too much grain.
+    //
+    // blur(plate) = plate - residual, both already in hand, so removing the
+    // grain from the binning variable costs nothing. It is also the more
+    // correct question: the curve describes how grain scales with SCENE
+    // luminance, not with the grain-perturbed pixel value.
     std::vector<float> luma(N);
     for (size_t i = 0; i < N; ++i)
-        luma[i] = Luma(rgb[0][i], rgb[1][i], rgb[2][i]);
+        luma[i] = Luma(rgb[0][i] - residual[0][i],
+                       rgb[1][i] - residual[1][i],
+                       rgb[2][i] - residual[2][i]);
 
     const size_t step = N > 65536 ? N / 65536 : 1;
     std::vector<float> sample;
@@ -30,17 +46,45 @@ void MeasureResponse(const float *const rgb[3], const float *const residual[3],
     const float lo = sample[(size_t)((double)(sample.size() - 1) * 0.01)];
     const float hi = sample[(size_t)((double)(sample.size() - 1) * 0.99)];
     const float span = hi - lo;
-    if (span <= 1e-6f) {
-        // Flat plate — no luminance structure to measure; curve collapses
-        // to the overall sigma (which is exactly right for a flat sample).
+
+    // Identifiability. A curve can only be measured where the plate actually
+    // HAS luminance range to measure it over. Judge that against the grain
+    // itself: a span of a few residual sigmas carries no recoverable
+    // luminance dependence, and fitting five bands across it produces noise
+    // that the stamp's end-clamping then extrapolates far outside the
+    // measured range. Collapsing to one honest number is strictly better
+    // than inventing a curve. Real content clears this by orders of
+    // magnitude (a graded plate measures hundreds of sigmas of span); flat
+    // grain plates do not clear it at all, which is the correct verdict.
+    // MAD-robust, exactly as the per-band sigma below: a plain RMS over the
+    // whole plate measures CONTENT EDGES, not grain, and would judge a
+    // perfectly good graded plate unidentifiable.
+    float residSigma = 0.f;
+    {
+        std::vector<float> mag;
+        mag.reserve(3 * (N / 7 + 1));
+        for (int c = 0; c < 3; ++c)
+            for (size_t i = 0; i < N; i += 7)
+                mag.push_back(std::fabs(residual[c][i]));
+        if (!mag.empty()) {
+            std::nth_element(mag.begin(), mag.begin() + mag.size() / 2, mag.end());
+            residSigma = mag[mag.size() / 2] * 1.4826f;
+        }
+    }
+    const float kMinSpanSigmas = 10.0f;
+
+    if (span <= 1e-6f || span < kMinSpanSigmas * residSigma) {
+        // No usable luminance structure; the curve collapses to the overall
+        // sigma, which is exactly right for a flat sample.
         double acc[3] = { 0, 0, 0 };
         for (int c = 0; c < 3; ++c) {
             for (size_t i = 0; i < N; ++i)
                 acc[c] += (double)residual[c][i] * residual[c][i];
             out.flatSigma[c] = (float)std::sqrt(acc[c] / (double)N);
         }
+        const float step5 = span > 1e-6f ? span / (float)ResponseCurve::kBands : 0.2f;
         for (int b = 0; b < ResponseCurve::kBands; ++b) {
-            out.lumaMid[b] = lo + ((float)b + 0.5f) * 0.2f;
+            out.lumaMid[b] = lo + ((float)b + 0.5f) * step5;
             for (int c = 0; c < 3; ++c) out.sigma[c][b] = out.flatSigma[c];
         }
         out.valid = true;

@@ -31,9 +31,58 @@ struct GrainSpectrum {
     float crossCorr = 0.f;            // mean cross-channel grain correlation [0,1]:
                                       // 0 = independent (chroma-heavy/digital look),
                                       // 1 = monochromatic (luma grain, "unified")
+    float crossPair[3] = { 0, 0, 0 }; // per-pair correlation [0]=R-G [1]=G-B [2]=R-B,
+                                      // each SIGNED, [-1,1]. The pairs carry both
+                                      // the asymmetry crossCorr averages away and
+                                      // the sign it cannot represent at all:
+                                      // debayered digital plates are commonly
+                                      // ANTI-correlated (chroma reconstruction
+                                      // drives G against R/B), which is real grain
+                                      // structure, not noise.
     int patchesUsed = 0;              // grain patches that survived selection
     bool valid() const { return n > 0 && patchesUsed > 0; }
 };
+
+// Rank-1 common-factor decomposition of the measured cross-channel structure.
+//
+//     grain_c = a_c . L + N_c
+//
+// with L one shared unit-variance grain field common to all three channels and
+// N_c independent per channel. Because the synthesized tiles are normalized to
+// unit sigma per channel (absolute amplitude is reapplied at stamp time from
+// the response curve), the quantity to reproduce is the CORRELATION matrix, not
+// the covariance: corr(i,j) = a_i.a_j exactly, with no phase-blend nonlinearity
+// to undershoot.
+//
+// The spectral split is p_c = a_c^2.p_L + p_Nc with p_Nc >= 0 required, which
+// is what bounds the model: the shared field can only live at frequencies where
+// ALL THREE channels have power. Putting p_L at the per-bin channel minimum
+// makes that bound explicit and maximal -- `overlap` is the resulting spectral
+// overlap Sum_bins min_c p_c, and `achieved` is the fraction of the measured
+// correlation the spectra actually permit. A coarse blue channel against a fine
+// red one caps `achieved` below 1 no matter how correlated the source measured,
+// and no synthesis method can beat that: two fields with different power
+// spectra cannot be perfectly correlated.
+struct CrossChannelModel {
+    bool  useCommonFactor = false;    // false -> caller uses the scalar path
+    float a[3] = { 0, 0, 0 };         // shared-factor weight per channel
+    float overlap = 0.f;              // spectral overlap M, [0,1]
+    float achieved = 0.f;             // realized/target correlation ratio s, [0,1]
+    std::vector<float> pShared;       // p_L,  n*n, sums to 1
+    std::vector<float> pIndep[3];     // p_Nc, n*n, each sums to 1 - a_c^2
+};
+
+// Solve the common-factor model for a measured spectrum. Returns
+// useCommonFactor = false when the measured correlation is too weak or too
+// inconsistent to factor, leaving the caller on the legacy scalar phase-blend
+// path. Pure function of `spec`: same spectrum, same model.
+//
+// `a_c` is SIGNED. corr(i,j) = a_i.a_j, so a single negative weight flips two
+// of the three pairs -- which is exactly the (+,-,-) pattern a debayered plate
+// measures. A rank-1 fit therefore exists iff every pair is non-negligible and
+// their product is positive: r_RG.r_GB.r_RB = (a_R.a_G.a_B)^2 >= 0. One
+// negative pair, or three, has no real solution and falls back.
+CrossChannelModel SolveCrossChannel(const GrainSpectrum &spec);
 
 // Bank of seamless zero-mean unit-sigma grain tiles.
 struct TileBank {
@@ -76,14 +125,27 @@ bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
                              int n, GrainSpectrum &out);
 
 // Bake `count` RPN tiles from the measured spectrum. Per tile and channel:
-// fresh white-noise field → FFT → keep phase, impose measured magnitude →
-// inverse FFT → normalize to zero mean, unit sigma. Channel phases are mixed
-// from a per-tile SHARED phase field and a per-channel independent one,
-// weighted by spec.crossCorr, so the tiles carry the source's measured
-// cross-channel grain correlation (luma-heavy film grain reads unified;
-// crossCorr=0 falls back to fully independent per-channel phases). The
-// per-channel magnitude spectrum is imposed unchanged, so grain size/character
-// per channel is unaffected. Deterministic in `seed`.
+// fresh white-noise field → FFT → keep phase, impose a measured magnitude →
+// inverse FFT → normalize to zero mean, unit sigma. Deterministic in `seed`.
+//
+// Cross-channel colour is reproduced by the COMMON-FACTOR model above: one
+// shared grain field L (spectrum p_L) and three independent fields N_c
+// (spectra p_Nc) are summed as a_c·L + N_c in the frequency domain, where the
+// sum stays Hermitian and the inverse stays exactly real. This reproduces the
+// measured correlation matrix directly — including its per-pair asymmetry
+// (R–G ≠ G–B ≠ R–B), which a single scalar cannot carry.
+//
+// The per-channel magnitude is therefore NOT re-imposed after the sum: doing so
+// would restore the exact spectrum but destroy the correlation the sum just
+// bought. Each COMPONENT carries an exactly imposed magnitude and the total is
+// correct in expectation, fluctuating per bin by at most
+// 2·a_c·√(p_L·p_Nc) — bounded, not Rayleigh, since only the phases are random.
+// That is what a finite sample of a real stochastic grain process does anyway;
+// the radial spectrum, which is what reads as grain character, is unaffected.
+//
+// If SolveCrossChannel declines to factor the measurement, synthesis falls back
+// to the legacy scalar path: a per-tile shared PHASE field blended into each
+// channel by spec.crossCorr, with the measured magnitude imposed exactly.
 void SynthesizeTileBank(const GrainSpectrum &spec, int count, uint64_t seed,
                         TileBank &out);
 

@@ -177,6 +177,33 @@ static void MomentStats(const float *p, size_t N, double &skew, double &exKurt)
     exKurt = m4 / (m2 * m2) - 3.0;
 }
 
+// Realized pairwise cross-channel correlation of a baked tile bank, pooled
+// over every tile: [0]=R-G, [1]=G-B, [2]=R-B. This is the quantity the
+// common-factor model exists to make equal the measured target.
+static void BankCorrelation(const TileBank &bank, double outPair[3])
+{
+    const size_t N = (size_t)bank.n * bank.n;
+    double sq[3] = { 0, 0, 0 }, cross[3] = { 0, 0, 0 };
+    for (int t = 0; t < bank.count; ++t) {
+        const float *ch[3] = { bank.tile(t, 0), bank.tile(t, 1), bank.tile(t, 2) };
+        double mean[3] = { 0, 0, 0 };
+        for (int c = 0; c < 3; ++c) {
+            for (size_t i = 0; i < N; ++i) mean[c] += ch[c][i];
+            mean[c] /= (double)N;
+        }
+        for (size_t i = 0; i < N; ++i) {
+            const double r = ch[0][i] - mean[0];
+            const double g = ch[1][i] - mean[1];
+            const double b = ch[2][i] - mean[2];
+            sq[0] += r * r; sq[1] += g * g; sq[2] += b * b;
+            cross[0] += r * g; cross[1] += g * b; cross[2] += r * b;
+        }
+    }
+    outPair[0] = cross[0] / (std::sqrt(sq[0] * sq[1]) + 1e-30);
+    outPair[1] = cross[1] / (std::sqrt(sq[1] * sq[2]) + 1e-30);
+    outPair[2] = cross[2] / (std::sqrt(sq[0] * sq[2]) + 1e-30);
+}
+
 // ---------------------------------------------------------------------------
 int main()
 {
@@ -397,6 +424,218 @@ int main()
         }
     }
 
+    // ----------------------------------------------------------------- S1c
+    // Cross-channel colour fidelity. A plate whose grain is built by the same
+    // common-factor construction the synthesis inverts, with DELIBERATELY
+    // ASYMMETRIC pairs (a = .9/.8/.6 -> R-G .72, G-B .48, R-B .54) so a single
+    // scalar cannot fit all three. All component fields share one correlation
+    // length, so the channel spectra match and the overlap ceiling is ~1:
+    // anything the model fails to reproduce here is the model's own fault.
+    std::printf("\n[Stage 1c] Cross-channel colour fidelity\n");
+    {
+        const float trueA[3] = { 0.90f, 0.80f, 0.60f };
+        const double wantPair[3] = {                       // a_i.a_j
+            (double)trueA[0] * trueA[1],
+            (double)trueA[1] * trueA[2],
+            (double)trueA[0] * trueA[2],
+        };
+
+        std::vector<float> shared, indep[3], cplate[3];
+        MakeGrainField(W, H, 1.f, corrSigma, 4242, shared);
+        for (int c = 0; c < 3; ++c)
+            MakeGrainField(W, H, 1.f, corrSigma, 5000 + c, indep[c]);
+
+        for (int c = 0; c < 3; ++c) {
+            const float aI = std::sqrt(1.f - trueA[c] * trueA[c]);
+            cplate[c].resize((size_t)W * H);
+            for (size_t i = 0; i < cplate[c].size(); ++i)
+                cplate[c][i] = content[i] +
+                    trueSigma[c] * (trueA[c] * shared[i] + aI * indep[c][i]);
+        }
+
+        GrainSpectrum cspec;
+        {
+            const float *planes[3] = { cplate[0].data(), cplate[1].data(),
+                                       cplate[2].data() };
+            const bool ok = MeasureGrainSpectrum(planes, W, H, TILE, blurSigma, cspec);
+            CHECK(ok && cspec.valid(), "correlated plate measured");
+        }
+
+        std::printf("  info: target pairs   R-G %.3f  G-B %.3f  R-B %.3f\n",
+                    wantPair[0], wantPair[1], wantPair[2]);
+        std::printf("  info: measured pairs R-G %.3f  G-B %.3f  R-B %.3f (mean %.3f)\n",
+                    cspec.crossPair[0], cspec.crossPair[1], cspec.crossPair[2],
+                    cspec.crossCorr);
+
+        // The measurement must see the asymmetry at all -- a mean-only
+        // measurement reports one number and loses R-G > R-B > G-B.
+        for (int i = 0; i < 3; ++i)
+            CHECK(std::fabs(cspec.crossPair[i] - wantPair[i]) < 0.10,
+                  "measured pair %d = %.3f vs true %.3f (|d| < 0.10)",
+                  i, cspec.crossPair[i], wantPair[i]);
+        CHECK(cspec.crossPair[0] > cspec.crossPair[2] &&
+              cspec.crossPair[2] > cspec.crossPair[1],
+              "pair ordering R-G > R-B > G-B preserved (asymmetry survives)");
+
+        // The solve should factor cleanly and hit the ceiling, since every
+        // component field was built at one correlation length.
+        const CrossChannelModel cm = SolveCrossChannel(cspec);
+        CHECK(cm.useCommonFactor, "common-factor model accepted the measurement");
+        std::printf("  info: solved a = %.3f/%.3f/%.3f (true %.2f/%.2f/%.2f), "
+                    "overlap %.3f, achieved %.3f\n",
+                    cm.a[0], cm.a[1], cm.a[2], trueA[0], trueA[1], trueA[2],
+                    cm.overlap, cm.achieved);
+        CHECK(cm.achieved > 0.95f,
+              "matched spectra leave the correlation unclipped (achieved %.3f > 0.95)",
+              cm.achieved);
+        for (int c = 0; c < 3; ++c)
+            CHECK(std::fabs(cm.a[c] - trueA[c]) < 0.10f,
+                  "recovered a[%d] = %.3f vs true %.2f (|d| < 0.10)",
+                  c, cm.a[c], trueA[c]);
+
+        // p_Nc >= 0 everywhere is the model's feasibility contract.
+        {
+            size_t neg = 0;
+            for (int c = 0; c < 3; ++c)
+                for (float v : cm.pIndep[c]) if (v < 0.f) ++neg;
+            CHECK(neg == 0, "independent spectra non-negative in all %zu bins",
+                  (size_t)3 * cm.pShared.size());
+        }
+
+        // The gate: realized correlation of the baked bank vs the target it
+        // was asked to reproduce.
+        TileBank cbank;
+        SynthesizeTileBank(cspec, 8, /*seed*/ 11, cbank);
+        CHECK(cbank.valid(), "correlated tile bank baked");
+        double got[3];
+        BankCorrelation(cbank, got);
+
+        // A/B against the legacy scalar path. Zeroing the pairs is exactly the
+        // condition that makes SolveCrossChannel decline, so this re-bakes the
+        // SAME spectrum through the old phase-blend using the same mean rho.
+        GrainSpectrum lspec = cspec;
+        lspec.crossPair[0] = lspec.crossPair[1] = lspec.crossPair[2] = 0.f;
+        TileBank lbank;
+        SynthesizeTileBank(lspec, 8, /*seed*/ 11, lbank);
+        double leg[3];
+        BankCorrelation(lbank, leg);
+
+        std::printf("  info: realized  common-factor %.3f/%.3f/%.3f | "
+                    "legacy scalar %.3f/%.3f/%.3f\n",
+                    got[0], got[1], got[2], leg[0], leg[1], leg[2]);
+
+        double sumNew = 0.0, sumOld = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            const double tgt = cspec.crossPair[i];
+            CHECK(std::fabs(got[i] - tgt) < 0.05,
+                  "realized pair %d = %.3f vs measured target %.3f (|d| < 0.05)",
+                  i, got[i], tgt);
+            sumNew += std::fabs(got[i] - tgt);
+            sumOld += std::fabs(leg[i] - tgt);
+        }
+        std::printf("  info: total correlation error  common-factor %.3f  "
+                    "legacy %.3f  (%.1fx better)\n",
+                    sumNew, sumOld, sumOld / (sumNew + 1e-9));
+        CHECK(sumNew < sumOld,
+              "common-factor beats the scalar path (err %.3f < %.3f)",
+              sumNew, sumOld);
+
+        // Character must survive the change: the tiles are still unit sigma,
+        // because only the cross-channel split moved.
+        for (int c = 0; c < 3; ++c) {
+            double var = 0.0;
+            const float *tl = cbank.tile(0, c);
+            for (size_t i = 0; i < (size_t)cbank.n * cbank.n; ++i)
+                var += (double)tl[i] * tl[i];
+            var /= (double)cbank.n * cbank.n;
+            CHECK(std::fabs(std::sqrt(var) - 1.0) < 0.02,
+                  "channel %d tile sigma %.4f == 1 (normalization intact)",
+                  c, std::sqrt(var));
+        }
+    }
+
+    // ---------------------------------------------------------------- S1c2
+    // The same model with an OPPOSING channel: a = .9/.8/-.6, so R-G is
+    // positive while G-B and R-B are negative. This is the sign pattern a
+    // debayered digital plate actually measures (chroma reconstruction drives
+    // green against red and blue), and it is representable by rank-1 only
+    // because a_c is signed. Clamping correlation to [0,1] would destroy it.
+    std::printf("\n[Stage 1c2] Cross-channel colour fidelity, anti-correlated\n");
+    {
+        const float trueA[3] = { 0.90f, 0.80f, -0.60f };
+        const double wantPair[3] = {
+            (double)trueA[0] * trueA[1],
+            (double)trueA[1] * trueA[2],
+            (double)trueA[0] * trueA[2],
+        };
+
+        std::vector<float> shared, indep[3], cplate[3];
+        MakeGrainField(W, H, 1.f, corrSigma, 909, shared);
+        for (int c = 0; c < 3; ++c)
+            MakeGrainField(W, H, 1.f, corrSigma, 6000 + c, indep[c]);
+
+        for (int c = 0; c < 3; ++c) {
+            const float aI = std::sqrt(1.f - trueA[c] * trueA[c]);
+            cplate[c].resize((size_t)W * H);
+            for (size_t k = 0; k < cplate[c].size(); ++k)
+                cplate[c][k] = content[k] +
+                    trueSigma[c] * (trueA[c] * shared[k] + aI * indep[c][k]);
+        }
+
+        GrainSpectrum cspec;
+        const float *planes[3] = { cplate[0].data(), cplate[1].data(),
+                                   cplate[2].data() };
+        CHECK(MeasureGrainSpectrum(planes, W, H, TILE, blurSigma, cspec),
+              "anti-correlated plate measured");
+
+        std::printf("  info: target pairs   R-G %+.3f  G-B %+.3f  R-B %+.3f\n",
+                    wantPair[0], wantPair[1], wantPair[2]);
+        std::printf("  info: measured pairs R-G %+.3f  G-B %+.3f  R-B %+.3f\n",
+                    cspec.crossPair[0], cspec.crossPair[1], cspec.crossPair[2]);
+
+        // The sign must survive the measurement at all.
+        CHECK(cspec.crossPair[0] > 0.f && cspec.crossPair[1] < 0.f &&
+              cspec.crossPair[2] < 0.f,
+              "sign pattern (+,-,-) preserved through measurement");
+        for (int k = 0; k < 3; ++k)
+            CHECK(std::fabs(cspec.crossPair[k] - wantPair[k]) < 0.10,
+                  "measured pair %d = %+.3f vs true %+.3f (|d| < 0.10)",
+                  k, cspec.crossPair[k], wantPair[k]);
+
+        const CrossChannelModel cm = SolveCrossChannel(cspec);
+        CHECK(cm.useCommonFactor,
+              "two-negative sign pattern accepted (rank-1 solution exists)");
+        std::printf("  info: solved a = %+.3f/%+.3f/%+.3f (true %+.2f/%+.2f/%+.2f), "
+                    "achieved %.3f\n",
+                    cm.a[0], cm.a[1], cm.a[2], trueA[0], trueA[1], trueA[2],
+                    cm.achieved);
+        for (int c = 0; c < 3; ++c)
+            CHECK(std::fabs(cm.a[c] - trueA[c]) < 0.12f,
+                  "recovered a[%d] = %+.3f vs true %+.2f (|d| < 0.12)",
+                  c, cm.a[c], trueA[c]);
+
+        TileBank cbank;
+        SynthesizeTileBank(cspec, 8, /*seed*/ 13, cbank);
+        CHECK(cbank.valid(), "anti-correlated tile bank baked");
+        double got[3];
+        BankCorrelation(cbank, got);
+        std::printf("  info: realized %+.3f/%+.3f/%+.3f\n", got[0], got[1], got[2]);
+        for (int k = 0; k < 3; ++k)
+            CHECK(std::fabs(got[k] - cspec.crossPair[k]) < 0.05,
+                  "realized pair %d = %+.3f vs measured target %+.3f (|d| < 0.05)",
+                  k, got[k], cspec.crossPair[k]);
+
+        // An impossible sign pattern (all three negative) has no real rank-1
+        // solution and must fall back rather than produce nonsense.
+        {
+            GrainSpectrum bad = cspec;
+            bad.crossPair[0] = -0.40f; bad.crossPair[1] = -0.35f;
+            bad.crossPair[2] = -0.30f;
+            CHECK(!SolveCrossChannel(bad).useCommonFactor,
+                  "all-negative pattern declined (no real rank-1 solution)");
+        }
+    }
+
     // ------------------------------------------------------------------ S2
     std::printf("\n[Stage 2] Luminance response\n");
     {
@@ -540,6 +779,69 @@ int main()
             CHECK(std::fabs(logSigma - 0.03f) / 0.03f < 0.10f,
                   "log-space grain sigma %.4f vs 0.0300 (rel %.3f < 0.10)",
                   logSigma, std::fabs(logSigma - 0.03f) / 0.03f);
+        }
+    }
+
+    // ----------------------------------------------------------------- S2b
+    // The FLAT-PLATE case: a locked grain plate, which is what the Grain
+    // Source is actually for. Such a plate has no content, so ALL of its
+    // luminance variation is its own grain. Binning by raw pixel luminance
+    // therefore sorts pixels by the very quantity being measured and
+    // fabricates a U-shaped curve -- measured on real stock at up to 3.2x the
+    // plate's sigma at the ends and ~0.6x in the middle, which the stamp's
+    // end-clamping then applied to every target luminance outside the plate's
+    // narrow range. The curve must instead be recognised as unidentifiable
+    // and collapse to one honest number.
+    std::printf("\n[Stage 2b] Flat grain plate -- response must not invent a curve\n");
+    {
+        const int WF = 1024, HF = 1024;
+        const float base = 0.18f, gs = 0.02f;
+
+        std::vector<float> gf[3], plate[3];
+        for (int c = 0; c < 3; ++c) {
+            MakeGrainField(WF, HF, gs, 0.8f, 7700 + c, gf[c]);
+            plate[c].resize((size_t)WF * HF);
+            for (size_t k = 0; k < plate[c].size(); ++k)
+                plate[c][k] = base + gf[c][k];
+        }
+
+        const float bsF = 2.0f;
+        std::vector<float> resF[3];
+        const float *planesF[3], *resPF[3];
+        for (int c = 0; c < 3; ++c) {
+            resF[c].resize((size_t)WF * HF);
+            HighPassResidual(plate[c].data(), resF[c].data(), WF, HF, bsF);
+            planesF[c] = plate[c].data();
+            resPF[c] = resF[c].data();
+        }
+
+        ResponseCurve rcF;
+        MeasureResponse(planesF, resPF, WF, HF, rcF);
+        CHECK(rcF.valid, "flat-plate response measured");
+
+        // Every band must carry the same sigma -- no fabricated curve.
+        float lo = rcF.sigma[1][0], hi = rcF.sigma[1][0];
+        for (int b = 1; b < ResponseCurve::kBands; ++b) {
+            lo = std::min(lo, rcF.sigma[1][b]);
+            hi = std::max(hi, rcF.sigma[1][b]);
+        }
+        std::printf("  info: band sigmas span %.6f..%.6f, flat %.6f\n",
+                    lo, hi, rcF.flatSigma[1]);
+        CHECK(hi - lo < 1e-6f, "curve is flat across all bands (span %.2e)", hi - lo);
+
+        // And it must sit at the plate's real grain level at EVERY target
+        // luminance -- including far outside the plate's own narrow range,
+        // which is where the old end-clamping did its damage.
+        double rv = 0.0;
+        for (float v : resF[1]) rv += (double)v * v;
+        const float trueResid = (float)std::sqrt(rv / (double)resF[1].size());
+        const float probe[5] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+        for (int k = 0; k < 5; ++k) {
+            const float got = EvalSigma(rcF, 1, probe[k], 1.0f);
+            const float rel = std::fabs(got - trueResid) / trueResid;
+            CHECK(rel < 0.10f,
+                  "L=%.2f -> sigma %.6f vs plate residual %.6f (rel %.3f < 0.10)",
+                  probe[k], got, trueResid, rel);
         }
     }
 

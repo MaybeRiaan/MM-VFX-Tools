@@ -215,6 +215,18 @@ static PF_PixelFormat GT_FormatForBitdepth(short bpc)
 // cache's key and the GPU host's tile-bank identity are derived from ONE
 // expression — if they drifted, the device would keep serving a stale bank
 // under a key the cache considers current.
+// Format version of the analysis PRODUCT. The key ingredients below describe
+// the analysis INPUT, so a change to how the input is turned into a tile bank
+// is invisible to them -- a cached bank from the previous algorithm would go on
+// being served under a key that still looks current. Bump this whenever the
+// meaning of GrainSpectrum or the synthesis changes, so every existing entry
+// misses once and re-analyzes. No migration: the cost is one slow frame per
+// source, and the value is that a stale bank can never outlive its algorithm.
+//   1 -> scalar crossCorr phase-blend
+//   2 -> per-pair crossPair + common-factor synthesis
+//   3 -> response curve binned on BLURRED luma + identifiability guard
+#define GT_ANALYSIS_FORMAT 3
+
 static void GT_AnalysisHashes(const GT_AnalysisKey &key, uint64_t &h1, uint64_t &h2)
 {
     const uint64_t s = 0x4754414E414C5953ull;   // arbitrary class salt
@@ -224,6 +236,7 @@ static void GT_AnalysisHashes(const GT_AnalysisKey &key, uint64_t &h1, uint64_t 
     h2 = gt::HashSeed(h1, (uint64_t)(uint32_t)key.seed,
                       (uint64_t)(uint32_t)key.encodeMode);
     h2 = gt::HashSeed(h2, (uint64_t)(uint32_t)key.pixelFormat, s);
+    h2 = gt::HashSeed(h2, (uint64_t)GT_ANALYSIS_FORMAT, s);
 }
 
 // Identity of the analysis PRODUCT, for the device-side tile-bank cache. Zero
@@ -310,6 +323,26 @@ static A_Err GT_CacheCompute(AEGP_CCComputeOptionsRefconP optionsP,
                val->spec.n, val->spec.patchesUsed, val->spec.crossCorr, analyzeMs,
                val->spec.sigma[0], val->spec.sigma[1], val->spec.sigma[2],
                val->resp.flatSigma[0], val->resp.flatSigma[1], val->resp.flatSigma[2]);
+        // Cross-channel structure, the whole story on one line: what each pair
+        // measured, whether the common-factor model could factor it, and how
+        // much of the target the channel spectra actually permitted. A
+        // `model=scalar` here means the pairs were inconsistent (typically
+        // content leaking into the residual on a coloured plate) and synthesis
+        // fell back to the scalar phase blend.
+        {
+            const gt::CrossChannelModel cm = gt::SolveCrossChannel(val->spec);
+            if (cm.useCommonFactor)
+                GT_Log("[analyze] xchan pairs RG/GB/RB=%.3f/%.3f/%.3f mean=%.3f | "
+                       "model=common-factor a=%.3f/%.3f/%.3f overlap=%.3f achieved=%.3f",
+                       val->spec.crossPair[0], val->spec.crossPair[1],
+                       val->spec.crossPair[2], val->spec.crossCorr,
+                       cm.a[0], cm.a[1], cm.a[2], cm.overlap, cm.achieved);
+            else
+                GT_Log("[analyze] xchan pairs RG/GB/RB=%.3f/%.3f/%.3f mean=%.3f | "
+                       "model=scalar (unfactorable)",
+                       val->spec.crossPair[0], val->spec.crossPair[1],
+                       val->spec.crossPair[2], val->spec.crossCorr);
+        }
         GT_Log("[analyze] band[G] L:sigma = %.3f:%.6f %.3f:%.6f %.3f:%.6f "
                "%.3f:%.6f %.3f:%.6f",
                val->resp.lumaMid[0], val->resp.sigma[1][0],

@@ -144,6 +144,24 @@ int main()
             std::printf("  info: band %d L=%.3f sigma G %.5f\n",
                         b, rc.lumaMid[b], rc.sigma[1][b]);
 
+        // Cross-channel structure on a real stock: what the plate measured,
+        // what the common-factor model could actually deliver, and whether the
+        // spectral-overlap ceiling bit. `achieved` well below 1 here means the
+        // channels' grain spectra are too differently shaped to carry the
+        // measured correlation -- see GT_Grain.h.
+        {
+            const CrossChannelModel cm = SolveCrossChannel(spec);
+            std::printf("  info: pairs R-G %.3f G-B %.3f R-B %.3f (mean %.3f)\n",
+                        spec.crossPair[0], spec.crossPair[1], spec.crossPair[2],
+                        spec.crossCorr);
+            if (cm.useCommonFactor)
+                std::printf("  info: common-factor a = %.3f/%.3f/%.3f, "
+                            "overlap %.3f, achieved %.3f\n",
+                            cm.a[0], cm.a[1], cm.a[2], cm.overlap, cm.achieved);
+            else
+                std::printf("  info: common-factor declined -> scalar path\n");
+        }
+
         TileBank bank;
         SynthesizeTileBank(spec, 4, 7, bank);
         CHECK(bank.valid(), "tile bank baked");

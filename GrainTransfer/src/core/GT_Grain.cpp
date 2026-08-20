@@ -92,6 +92,148 @@ bool MeasureGrainSpectrum(const float *const rgb[3], int W, int H,
     return MeasureGrainSpectrumRes(resP, W, H, n, out);
 }
 
+// ---------------------------------------------------------------------------
+// Robust cross-channel correlation.
+// ---------------------------------------------------------------------------
+// Measured on its OWN grid of small blocks rather than on the FFT patches,
+// because the two measurements want opposite things. The spectrum wants large
+// patches (frequency resolution) and tolerates a little content, which phase
+// randomization discards downstream anyway. Correlation wants the opposite:
+// content is the DOMINANT error term here and has to be excluded, and a small
+// block is both likelier to be content-free and cheap enough to have hundreds
+// of them instead of the six a 6K plate yields at n=256.
+//
+// Why content is the enemy specifically: the residual is plane - blur(plane),
+// so content edges survive in it, and they bias this measurement in a
+// direction set by the content's own colour. A grey edge appears in all three
+// channels and drives every pair positive; a coloured edge drives pairs in
+// opposite directions. Neither has anything to do with grain. Three defences:
+//
+//   1. Small blocks, so any one edge contaminates few of them.
+//   2. Flattest-first selection: blocks are ranked by combined residual sigma
+//      and only a low percentile window survives -- an edge inflates sigma,
+//      and the bottom of the range is clipped or grainless.
+//   3. Winsorized correlation inside each block: clamping at kClip sigma
+//      strips the leverage of the few high-amplitude edge pixels that get
+//      through 1-2, without discarding the grain pixels around them.
+//
+// The per-block correlations are then combined by MEDIAN, never by pooling.
+// Pooling weights each block by its variance, which hands the answer to
+// exactly the contaminated blocks the first three defences just excluded.
+static void MeasureCrossPairs(const float *const res[3], int W, int H,
+                              double out[3])
+{
+    out[0] = out[1] = out[2] = 0.0;
+
+    constexpr int   kBlock = 32;       // correlation block edge, px
+    constexpr float kClip  = 2.5f;     // winsorization point, in block sigmas
+    constexpr int   kMinForSelect = 16;// below this, keep every block
+
+    const int bx = W / kBlock, by = H / kBlock;
+    const int nBlocks = bx * by;
+    if (nBlocks < 1) return;
+
+    constexpr size_t kN = (size_t)kBlock * kBlock;
+
+    // Pass 1: combined residual sigma per block -- the flatness statistic.
+    std::vector<float> sig((size_t)nBlocks);
+    for (int j = 0; j < by; ++j) {
+        for (int i = 0; i < bx; ++i) {
+            double acc = 0.0;
+            for (int c = 0; c < 3; ++c) {
+                for (int y = 0; y < kBlock; ++y) {
+                    const float *row = res[c] +
+                        ((size_t)(j * kBlock + y) * W + (size_t)i * kBlock);
+                    for (int x = 0; x < kBlock; ++x) acc += (double)row[x] * row[x];
+                }
+            }
+            sig[(size_t)(j * bx + i)] = (float)std::sqrt(acc / ((double)kN * 3.0));
+        }
+    }
+
+    // Keep the flattest band: above the 10th percentile (clipped/grainless
+    // blocks carry no usable correlation) and below the 60th (edge-bearing).
+    float loCut = -1.f, hiCut = 3.0e38f;
+    if (nBlocks >= kMinForSelect) {
+        std::vector<float> srt(sig);
+        std::sort(srt.begin(), srt.end());
+        loCut = srt[(size_t)nBlocks * 10 / 100];
+        hiCut = srt[(size_t)nBlocks * 60 / 100];
+    }
+
+    // Pass 2: winsorized correlation per surviving block.
+    std::vector<float> corr[3];
+    for (int k = 0; k < 3; ++k) corr[k].reserve((size_t)nBlocks);
+
+    std::vector<float> v[3] = { std::vector<float>(kN), std::vector<float>(kN),
+                                std::vector<float>(kN) };
+
+    for (int j = 0; j < by; ++j) {
+        for (int i = 0; i < bx; ++i) {
+            const float bs = sig[(size_t)(j * bx + i)];
+            if (bs < loCut || bs > hiCut || bs <= 0.f) continue;
+
+            bool degenerate = false;
+            for (int c = 0; c < 3 && !degenerate; ++c) {
+                float *d = v[c].data();
+                double mean = 0.0;
+                for (int y = 0; y < kBlock; ++y) {
+                    const float *row = res[c] +
+                        ((size_t)(j * kBlock + y) * W + (size_t)i * kBlock);
+                    for (int x = 0; x < kBlock; ++x) {
+                        const float t = row[x];
+                        d[(size_t)y * kBlock + x] = t;
+                        mean += t;
+                    }
+                }
+                mean /= (double)kN;
+
+                double var = 0.0;
+                for (size_t q = 0; q < kN; ++q) {
+                    const float t = (float)(d[q] - mean);
+                    d[q] = t;
+                    var += (double)t * t;
+                }
+                var /= (double)kN;
+                if (!(var > 0.0)) { degenerate = true; break; }
+
+                // Winsorize, then re-centre: clamping is slightly asymmetric on
+                // a finite sample and would otherwise leave a residual mean.
+                const float lim = kClip * (float)std::sqrt(var);
+                double m2 = 0.0;
+                for (size_t q = 0; q < kN; ++q) {
+                    if (d[q] >  lim) d[q] =  lim;
+                    else if (d[q] < -lim) d[q] = -lim;
+                    m2 += d[q];
+                }
+                m2 /= (double)kN;
+                for (size_t q = 0; q < kN; ++q) d[q] = (float)(d[q] - m2);
+            }
+            if (degenerate) continue;
+
+            double sq[3] = { 0, 0, 0 }, cr[3] = { 0, 0, 0 };
+            for (size_t q = 0; q < kN; ++q) {
+                const double r = v[0][q], g = v[1][q], b = v[2][q];
+                sq[0] += r * r; sq[1] += g * g; sq[2] += b * b;
+                cr[0] += r * g; cr[1] += g * b; cr[2] += r * b;
+            }
+            if (!(sq[0] > 0.0 && sq[1] > 0.0 && sq[2] > 0.0)) continue;
+
+            corr[0].push_back((float)(cr[0] / std::sqrt(sq[0] * sq[1])));
+            corr[1].push_back((float)(cr[1] / std::sqrt(sq[1] * sq[2])));
+            corr[2].push_back((float)(cr[2] / std::sqrt(sq[0] * sq[2])));
+        }
+    }
+
+    if (corr[0].empty()) return;
+    for (int k = 0; k < 3; ++k) {
+        std::sort(corr[k].begin(), corr[k].end());
+        const size_t m = corr[k].size();
+        out[k] = (m & 1) ? corr[k][m / 2]
+                         : 0.5 * ((double)corr[k][m / 2 - 1] + corr[k][m / 2]);
+    }
+}
+
 bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
                              int n, GrainSpectrum &out)
 {
@@ -158,13 +300,6 @@ bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
     double accVar[3] = { 0, 0, 0 };
     for (int c = 0; c < 3; ++c) accPower[c].assign(tileN, 0.0);
 
-    // Cross-channel accumulators (mean-subtracted residual, over kept patches)
-    // → the grain's mean pairwise correlation, reproduced at synthesis so the
-    // tiles carry the source's luma/chroma balance instead of assuming
-    // independent (chroma-heavy) channels.
-    double sqSum[3] = { 0, 0, 0 };
-    double crossSum[3] = { 0, 0, 0 };   // [0]=R·G, [1]=G·B, [2]=R·B
-
     int used = 0;
     for (int pj = 0; pj < py; ++pj) {
         for (int pi = 0; pi < px; ++pi) {
@@ -172,8 +307,8 @@ bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
             if (s > hi || s < lo) continue;
             ++used;
 
-            // Mean-subtract each channel's patch first (needed intact for the
-            // cross products before windowing).
+            // Mean-subtract each channel's patch (the window and FFT below
+            // both assume a zero-mean patch).
             for (int c = 0; c < 3; ++c) {
                 double mean = 0.0;
                 for (int y = 0; y < n; ++y) {
@@ -193,13 +328,6 @@ bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
                     var += (double)v * v;
                 }
                 accVar[c] += var / (double)tileN;
-                sqSum[c] += var;
-            }
-
-            for (size_t i = 0; i < tileN; ++i) {
-                crossSum[0] += (double)ms[0][i] * ms[1][i];
-                crossSum[1] += (double)ms[1][i] * ms[2][i];
-                crossSum[2] += (double)ms[0][i] * ms[2][i];
             }
 
             // Window + FFT + accumulate power per channel.
@@ -226,16 +354,139 @@ bool MeasureGrainSpectrumRes(const float *const res[3], int W, int H,
         out.sigma[c] = (float)std::sqrt(accVar[c] / (double)used);
     }
 
-    // Mean pairwise correlation, clamped to [0,1] (grain correlation is
-    // non-negative; noise/negative estimates collapse to independent).
-    const double rRG = crossSum[0] / (std::sqrt(sqSum[0] * sqSum[1]) + 1e-30);
-    const double rGB = crossSum[1] / (std::sqrt(sqSum[1] * sqSum[2]) + 1e-30);
-    const double rRB = crossSum[2] / (std::sqrt(sqSum[0] * sqSum[2]) + 1e-30);
-    double rho = (rRG + rGB + rRB) / 3.0;
-    if (rho < 0.0) rho = 0.0; else if (rho > 1.0) rho = 1.0;
-    out.crossCorr = (float)rho;
+    // Pairwise correlations, kept SEPARATELY and SIGNED. The three carry both
+    // the asymmetry a mean averages away and the sign a mean cannot represent:
+    // clamping a real -0.7 G-B anti-correlation to zero throws away structure
+    // the common-factor model can reproduce exactly (with a negative weight).
+    //
+    // crossCorr remains the mean of the POSITIVE parts, because it feeds the
+    // legacy scalar phase-blend, whose rho is a [0,1] quantity that cannot
+    // express anti-correlation. It is a fallback summary, not the measurement.
+    //
+    // Measured on its own block grid, NOT on the patches above: see
+    // MeasureCrossPairs for why the two measurements cannot share a grid.
+    double pair[3];
+    MeasureCrossPairs(res, W, H, pair);
+    double sum = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        double r = pair[i];
+        if (r < -1.0) r = -1.0; else if (r > 1.0) r = 1.0;
+        out.crossPair[i] = (float)r;
+        if (r > 0.0) sum += r;
+    }
+    out.crossCorr = (float)(sum / 3.0);
 
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-channel common-factor solve.
+// ---------------------------------------------------------------------------
+CrossChannelModel SolveCrossChannel(const GrainSpectrum &spec)
+{
+    CrossChannelModel m;
+    if (!spec.valid()) return m;
+
+    const size_t tileN = (size_t)spec.n * spec.n;
+
+    // A pair at ~zero means those two channels measured independent, and the
+    // rank-1 solve divides by it either way -- the shared factor cannot be
+    // identified, so hand back to the scalar path.
+    const float kMinPair = 1e-3f;
+    for (int i = 0; i < 3; ++i)
+        if (std::fabs(spec.crossPair[i]) < kMinPair) return m;
+
+    // A real rank-1 fit exists iff r_RG.r_GB.r_RB = (a_R.a_G.a_B)^2 >= 0, i.e.
+    // all three pairs positive, or exactly two negative (one channel opposing
+    // the other two -- the debayer signature). One negative pair, or three, has
+    // no real solution: no assignment of signs to a_c reproduces it.
+    const double prod = (double)spec.crossPair[0] * spec.crossPair[1] *
+                        (double)spec.crossPair[2];
+    if (prod <= 0.0) return m;
+
+    // Per-bin spectra normalized to unit total. Absolute scale is irrelevant:
+    // tiles are normalized to unit sigma per channel after synthesis, so what
+    // survives is shape, and what we reproduce is correlation, not covariance.
+    std::vector<float> p[3];
+    for (int c = 0; c < 3; ++c) {
+        p[c].assign(tileN, 0.f);
+        double tot = 0.0;
+        for (size_t i = 0; i < tileN; ++i) {
+            const float v = spec.power[c][i];
+            if (v > 0.f) tot += (double)v;
+        }
+        if (tot <= 0.0) return m;                    // a channel with no grain
+        const float inv = (float)(1.0 / tot);
+        for (size_t i = 0; i < tileN; ++i) {
+            const float v = spec.power[c][i];
+            p[c][i] = v > 0.f ? v * inv : 0.f;
+        }
+    }
+
+    // Rank-1 factor of the correlation matrix: corr(i,j) = a_i.a_j.
+    //   crossPair = [0]=R-G  [1]=G-B  [2]=R-B
+    //   a_R^2 = (R_RG.R_RB)/R_GB,  a_G^2 = (R_RG.R_GB)/R_RB,
+    //   a_B^2 = (R_GB.R_RB)/R_RG.
+    // The guard above makes all three ratios positive. A measurement that is
+    // not consistently rank-1 can still push a_c^2 past 1; clamping there
+    // degrades gracefully (that channel becomes pure shared field).
+    const float rRG = spec.crossPair[0], rGB = spec.crossPair[1],
+                rRB = spec.crossPair[2];
+    float aSq[3] = { rRG * rRB / rGB, rRG * rGB / rRB, rGB * rRB / rRG };
+    for (int c = 0; c < 3; ++c) {
+        if (!(aSq[c] > 0.f)) return m;               // NaN / non-finite guard
+        if (aSq[c] > 1.f) aSq[c] = 1.f;
+    }
+
+    // Signs. a_R > 0 without loss of generality (negating all three leaves
+    // every product unchanged), then a_G and a_B follow from the pairs that
+    // involve R. The guard above guarantees these are consistent with r_GB.
+    float sgn[3] = { 1.f, rRG < 0.f ? -1.f : 1.f, rRB < 0.f ? -1.f : 1.f };
+
+    // The shared field can only occupy frequencies where ALL THREE channels
+    // have power, so put p_L at the per-bin channel minimum. That choice is
+    // both feasible and maximal for this family, and its total M is exactly
+    // the spectral overlap that bounds how correlated the channels can be.
+    m.pShared.assign(tileN, 0.f);
+    double M = 0.0;
+    for (size_t i = 0; i < tileN; ++i) {
+        float lo = p[0][i];
+        if (p[1][i] < lo) lo = p[1][i];
+        if (p[2][i] < lo) lo = p[2][i];
+        m.pShared[i] = lo;
+        M += (double)lo;
+    }
+    if (M <= 1e-9) return m;                         // disjoint spectra
+    {
+        const float inv = (float)(1.0 / M);
+        for (size_t i = 0; i < tileN; ++i) m.pShared[i] *= inv;
+    }
+
+    // Feasibility: p_Nc = p_c - a_c^2.p_L must stay non-negative everywhere.
+    // With p_L at the per-bin minimum that reduces to a_c^2 <= M, so one
+    // scalar s scales every a_c^2 into range -- and because corr = a_i.a_j,
+    // the realized correlation is exactly s times the measured target. s is
+    // reported rather than hidden: it is the honest ceiling.
+    float aMax = aSq[0];
+    if (aSq[1] > aMax) aMax = aSq[1];
+    if (aSq[2] > aMax) aMax = aSq[2];
+    float s = 1.f;
+    if (aMax > 0.f && (float)M < aMax) s = (float)M / aMax;
+
+    for (int c = 0; c < 3; ++c) {
+        const float sc = aSq[c] * s;
+        m.a[c] = sgn[c] * std::sqrt(sc);
+        m.pIndep[c].assign(tileN, 0.f);
+        for (size_t i = 0; i < tileN; ++i) {
+            float v = p[c][i] - sc * m.pShared[i];
+            m.pIndep[c][i] = v > 0.f ? v : 0.f;      // exact bar float rounding
+        }
+    }
+
+    m.overlap = (float)M;
+    m.achieved = s;
+    m.useCommonFactor = true;
+    return m;
 }
 
 // ---------------------------------------------------------------------------
@@ -260,14 +511,34 @@ void SynthesizeTileBank(const GrainSpectrum &spec, int count, uint64_t seed,
     std::vector<kiss_fft_cpx> specShared(tileN);
     std::vector<float> mag(tileN);
 
-    // Cross-channel correlation weight. A per-tile SHARED phase field is mixed
-    // into each channel's own by rho; both donors are FFTs of real fields, so
-    // any linear blend stays Hermitian and the inverse stays real. rho=0 →
-    // fully independent channels (the old behaviour); rho=1 → one shared phase
-    // → monochromatic (luma) grain.
+    // Cross-channel structure. Preferred: the common-factor model, which sums
+    // a shared FIELD into each channel and so reproduces the measured
+    // correlation matrix directly. Fallback (unfactorable measurement): the
+    // legacy scalar path, which blends a shared PHASE field by rho -- cheaper
+    // to reason about but nonlinear in rho, so it undershoots.
+    //
+    // Both donors are FFTs of real fields scaled per bin by real, EVEN factors
+    // (measured power spectra are even), so every spectrum below stays
+    // Hermitian and each inverse FFT is exactly real -- no conjugate-symmetry
+    // bookkeeping, exactly as with plain RPN.
+    const CrossChannelModel model = SolveCrossChannel(spec);
+
     float rho = spec.crossCorr;
     if (rho < 0.f) rho = 0.f; else if (rho > 1.f) rho = 1.f;
     const float sIndep = std::sqrt(1.f - rho * rho);
+
+    // Impose magnitude `mg` on the phase of donor bin `d`.
+    auto imposeMag = [](kiss_fft_cpx &d, float mg) {
+        const float len = std::sqrt(d.r * d.r + d.i * d.i);
+        if (len > 1e-20f) {
+            const float sc = mg / len;
+            d.r *= sc;
+            d.i *= sc;
+        } else {
+            d.r = mg;
+            d.i = 0.f;
+        }
+    };
 
     // Box–Muller Gaussian white field into `buf`, deterministic in `key`.
     auto fillNoise = [&](std::vector<float> &buf, uint64_t key) {
@@ -288,30 +559,44 @@ void SynthesizeTileBank(const GrainSpectrum &spec, int count, uint64_t seed,
         fillNoise(noiseShared, HashSeed(seed, (uint64_t)t, 0x73686172ull));
         fft.forward(noiseShared.data(), specShared.data());
 
-        for (int c = 0; c < 3; ++c) {
-            // Magnitude from the measured average power.
-            const float *pw = spec.power[c].data();
+        // Common-factor mode: turn the shared donor into L itself, once per
+        // tile, by imposing the shared spectrum p_L on its phase. All three
+        // channels then add the SAME field, which is what carries correlation.
+        if (model.useCommonFactor) {
+            const float *pL = model.pShared.data();
             for (size_t i = 0; i < tileN; ++i)
-                mag[i] = std::sqrt(pw[i] < 0.f ? 0.f : pw[i]);
+                imposeMag(specShared[i], std::sqrt(pL[i]));
+        }
 
+        for (int c = 0; c < 3; ++c) {
             // Channel-independent phase donor.
             fillNoise(noise, HashSeed(seed, (uint64_t)t * 3 + c, 0x67726169ull));
             fft.forward(noise.data(), spc.data());
 
-            // Blend shared + independent phase by rho, then impose the measured
-            // per-channel magnitude — grain size/character per channel is
-            // unchanged; only the cross-channel alignment moves.
-            for (size_t i = 0; i < tileN; ++i) {
-                const float re = rho * specShared[i].r + sIndep * spc[i].r;
-                const float im = rho * specShared[i].i + sIndep * spc[i].i;
-                const float len = std::sqrt(re * re + im * im);
-                if (len > 1e-20f) {
-                    const float sc = mag[i] / len;
-                    spc[i].r = re * sc;
-                    spc[i].i = im * sc;
-                } else {
-                    spc[i].r = mag[i];
-                    spc[i].i = 0.f;
+            if (model.useCommonFactor) {
+                // N_c at its own spectrum, then grain_c = a_c·L + N_c. The sum
+                // is NOT re-normalized to the measured magnitude: that would
+                // undo the correlation this addition just bought (see header).
+                const float *pN = model.pIndep[c].data();
+                const float a = model.a[c];
+                for (size_t i = 0; i < tileN; ++i) {
+                    imposeMag(spc[i], std::sqrt(pN[i]));
+                    spc[i].r += a * specShared[i].r;
+                    spc[i].i += a * specShared[i].i;
+                }
+            } else {
+                // Legacy scalar path: blend shared + independent PHASE by rho,
+                // then impose the measured per-channel magnitude exactly.
+                const float *pw = spec.power[c].data();
+                for (size_t i = 0; i < tileN; ++i)
+                    mag[i] = std::sqrt(pw[i] < 0.f ? 0.f : pw[i]);
+
+                for (size_t i = 0; i < tileN; ++i) {
+                    const float re = rho * specShared[i].r + sIndep * spc[i].r;
+                    const float im = rho * specShared[i].i + sIndep * spc[i].i;
+                    spc[i].r = re;
+                    spc[i].i = im;
+                    imposeMag(spc[i], mag[i]);
                 }
             }
             spc[0].r = 0.f;   // DC stays zero
