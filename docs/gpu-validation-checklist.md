@@ -16,7 +16,7 @@ Mercury GPU = CUDA). Contracts: [`AE_GPU_Effects.md`](AE_GPU_Effects.md) (host),
 | | Built + deployed | AE-free tests | In-AE GPU |
 |---|---|---|---|
 | **MM_Qualify** ("Qualify") | ✅ .aex + PTX | ✅ 128/128, all GPU cases `0.000e+00` | ✅ **verified 2026-08-11** |
-| **Modern Edge Blur** | ✅ .aex + PTX | ✅ 84 216 checks, 0 failures | ⏳ **ready to test** |
+| **Modern Edge Blur** | ✅ .aex + PTX | ✅ 84 216 checks, 0 failures | ✅ **verified 2026-08-20** |
 | **MM_FreqSep** ("Skin Retouch") | ✅ .aex + PTX | ✅ 27/27, all `0.000e+00` | ✅ **verified 2026-08-12** |
 | **Grain Transfer** | ✅ .aex + PTX | ✅ 18/18 kernel parity `0.000e+00`, DSP gates pass | ⏳ **ready to test** |
 | *EdgeRepair* (reference) | ✅ .aex + PTX | ✅ | ✅ **verified 2026-07-30** |
@@ -281,10 +281,14 @@ exercises. Layer *Scale* does not work, for the same reason it does not at 6K �
 it is a transform applied after effects.
 
 Prove liveness before trusting any parity number here: difference the CUDA
-render against an effect-disabled render of the same frame. Measured 2026-08-12
-at defaults on a 4096x3112 ellipse-masked comp: `1.358e-01` over 270,733 px, a
-~28 px band on the mask perimeter and *nothing* within 64 px of the frame
-border.
+render against an effect-disabled render of the same frame. Measured 2026-08-20
+at defaults on the 4096x3112 sample comp: `6.472e-01` on **alpha** over
+3,572,082 px — 28.0% of the frame — with all four channels moving at the same
+worst pixel, i.e. an alpha-driven composite. That supersedes the 2026-08-12
+figure of `1.358e-01` over 270,733 px, which was taken on a synthetic
+ellipse-masked plate built purely to give MEB an edge; the sample comp is
+full-frame (the plate rendered mask-bounded at 3224x2760) and carries a 13x
+larger active population, so it better reflects general use.
 
 1. **Blur Amount** alone, then **+ Shift Edge**, then **+ Blend Radius** — the
    three passes of the schedule, added one at a time.
