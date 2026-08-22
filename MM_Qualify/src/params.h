@@ -164,6 +164,13 @@ enum {
 #define QK_LUM_SOFT_SLIDER_MAX	1.0
 #define QK_LUM_SOFT_DFLT		0.0
 
+// Gate strip geometry (gate_ui.cpp). ui_width is only a REQUEST — AE lays the
+// control out to the panel width and hands the real rect back in
+// effect_win.current_frame, which is what the drawing and hit-testing use.
+// The height is honoured, so it is the number that matters here.
+#define QK_GATE_UI_W			300
+#define QK_GATE_UI_H			54
+
 // Open-bound sentinels + thresholds. A bound within EPS of its extreme is
 // treated as open (+/- BIG) in QK_BuildGates. BIG is finite and huge so the
 // gate arithmetic stays NaN-free.
@@ -226,50 +233,51 @@ enum {
 // an Advanced group holding the color-science controls (Color Space Override,
 // Luma Weights).
 enum {
-	QK_INPUT = 0,
-	QK_TOPIC_QUAL,			// 1  "Qualifier"
-	QK_SAMPLE_BUTTON,		// 2  arms the viewer eyedropper (picker.cpp)
-	QK_TOPIC_HUE,			// 3  "Hue"
-	QK_HUE_ENABLE,			// 4
-	QK_HUE_CENTER,			// 5  (angle)
-	QK_HUE_WIDTH,			// 6
-	QK_HUE_IN_SOFT,			// 7
-	QK_HUE_OUT_SOFT,		// 8
-	QK_TOPIC_HUE_END,		// 9
-	QK_TOPIC_SAT,			// 10 "Saturation"
-	QK_SAT_ENABLE,			// 11
-	QK_SAT_IN,				// 12
-	QK_SAT_OUT,				// 13
-	QK_SAT_IN_SOFT,			// 14
-	QK_SAT_OUT_SOFT,		// 15
-	QK_TOPIC_SAT_END,		// 16
-	QK_TOPIC_LUM,			// 17 "Luma"
-	QK_LUM_ENABLE,			// 18
-	QK_LUM_IN,				// 19
-	QK_LUM_OUT,				// 20
-	QK_LUM_IN_SOFT,			// 21
-	QK_LUM_OUT_SOFT,		// 22
-	QK_TOPIC_LUM_END,		// 23
-	QK_TOPIC_QUAL_END,		// 24
-	QK_OUTPUT,				// 25
-	QK_TOPIC_FINESSE,		// 26 "Matte Finesse"
-	QK_DENOISE,				// 27
-	QK_BLUR,				// 28
-	QK_RATIO,				// 29
-	QK_BLACK_CLIP,			// 30
-	QK_WHITE_CLIP,			// 31
-	QK_TEMPORAL,			// 32 (supervised — greys Attack/Release)
-	QK_ATTACK,				// 33
-	QK_RELEASE,				// 34
-	QK_TOPIC_FINESSE_END,	// 35
-	QK_TOPIC_GARBAGE,		// 36 "Garbage Matte"
-	QK_GARBAGE_LAYER,		// 37
-	QK_GARBAGE_CHAN,		// 38
-	QK_TOPIC_GARBAGE_END,	// 39
-	QK_TOPIC_ADV,			// 40 "Advanced (Color Science)"
-	QK_QIN,					// 41 Color Space Override
-	QK_LUMA_WEIGHTS,		// 42
-	QK_TOPIC_ADV_END,		// 43
+	QK_INPUT = 0,           // 0
+	QK_SAMPLE_BUTTON,       // 1  arms the viewer eyedropper (picker.cpp)
+	QK_HUE_ENABLE,          // 2
+	QK_HUE_UI,              // 3  hue spectrum strip (gate_ui.cpp)
+	QK_SAT_ENABLE,          // 4
+	QK_SAT_UI,              // 5  saturation strip (gate_ui.cpp)
+	QK_LUM_ENABLE,          // 6
+	QK_LUM_UI,              // 7  luma strip (gate_ui.cpp)
+	QK_TOPIC_HUE,           // 8  "Hue Values" (collapsed)
+	QK_HUE_CENTER,          // 9  (angle)
+	QK_HUE_WIDTH,           // 10
+	QK_HUE_IN_SOFT,         // 11
+	QK_HUE_OUT_SOFT,        // 12
+	QK_TOPIC_HUE_END,       // 13
+	QK_TOPIC_SAT,           // 14 "Saturation Values"
+	QK_SAT_IN,              // 15
+	QK_SAT_OUT,             // 16
+	QK_SAT_IN_SOFT,         // 17
+	QK_SAT_OUT_SOFT,        // 18
+	QK_TOPIC_SAT_END,       // 19
+	QK_TOPIC_LUM,           // 20 "Luma Values"
+	QK_LUM_IN,              // 21
+	QK_LUM_OUT,             // 22
+	QK_LUM_IN_SOFT,         // 23
+	QK_LUM_OUT_SOFT,        // 24
+	QK_TOPIC_LUM_END,       // 25
+	QK_OUTPUT,              // 26
+	QK_TOPIC_FINESSE,       // 27 "Matte Finesse"
+	QK_DENOISE,             // 28
+	QK_BLUR,                // 29
+	QK_RATIO,               // 30
+	QK_BLACK_CLIP,          // 31
+	QK_WHITE_CLIP,          // 32
+	QK_TEMPORAL,            // 33 supervised - greys Attack/Release
+	QK_ATTACK,              // 34
+	QK_RELEASE,             // 35
+	QK_TOPIC_FINESSE_END,   // 36
+	QK_TOPIC_GARBAGE,       // 37 "Garbage Matte"
+	QK_GARBAGE_LAYER,       // 38
+	QK_GARBAGE_CHAN,        // 39
+	QK_TOPIC_GARBAGE_END,   // 40
+	QK_TOPIC_ADV,           // 41 "Advanced (Color Science)"
+	QK_QIN,                 // 42 Color Space Override
+	QK_LUMA_WEIGHTS,        // 43
+	QK_TOPIC_ADV_END,       // 44
 	QK_NUM_PARAMS
 };
 
@@ -277,7 +285,10 @@ enum {
 // NOTE: reused numbers from the previous layout freely — no shipped comps
 // exist yet, so old saved values are not a concern.
 enum {
-	QK_TOPIC_QUAL_DISK_ID = 101,
+	// 101 / 124 belonged to the old "Qualifier" wrapper group, removed when
+	// the strips were flattened to the top level. Retained as enumerators so
+	// every id below keeps the number it already had.
+	QK_TOPIC_QUAL_DISK_ID_UNUSED = 101,
 	QK_SAMPLE_BUTTON_DISK_ID,		// 102 (was the Set/Add/Sub swatch trio)
 	QK_TOPIC_HUE_DISK_ID,			// 103
 	QK_HUE_ENABLE_DISK_ID,			// 104
@@ -300,7 +311,7 @@ enum {
 	QK_LUM_IN_SOFT_DISK_ID,			// 121
 	QK_LUM_OUT_SOFT_DISK_ID,		// 122
 	QK_TOPIC_LUM_END_DISK_ID,		// 123
-	QK_TOPIC_QUAL_END_DISK_ID,		// 124
+	QK_TOPIC_QUAL_END_DISK_ID_UNUSED,	// 124
 	QK_OUTPUT_DISK_ID,				// 125
 	QK_TOPIC_FINESSE_DISK_ID,		// 126
 	QK_DENOISE_DISK_ID,				// 127
@@ -319,7 +330,13 @@ enum {
 	QK_TOPIC_ADV_DISK_ID,			// 140
 	QK_QIN_DISK_ID,					// 141
 	QK_LUMA_WEIGHTS_DISK_ID,		// 142
-	QK_TOPIC_ADV_END_DISK_ID		// 143
+	QK_TOPIC_ADV_END_DISK_ID,		// 143
+	// Custom-UI gate strips. Appended rather than slotted in beside
+	// their gates: disk IDs are an identity, and only the on-screen
+	// ORDER (the index enum above) needs to read sensibly.
+	QK_HUE_UI_DISK_ID,				// 144
+	QK_SAT_UI_DISK_ID,				// 145
+	QK_LUM_UI_DISK_ID				// 146
 };
 
 // Snapshot of the checked-out param values for one render. Built fresh per
@@ -435,9 +452,11 @@ typedef struct QK_PickEnvelope {
 // the MFR rule). Gesture state is transient: it is zeroed on unflatten, so a
 // project saved mid-gesture reopens disarmed.
 typedef struct QK_SeqData {
-	A_long			armedB;			// Sample button pressed, waiting for a click
+	A_long			armedB;			// picker live: Sample toggles it, tool change clears it
 	A_long			gestureB;		// inside press..release
 	A_long			modeL;			// QK_PICK_* latched at press
+	A_long			armToolL;		// PF_ExtendedSuiteTool selected when we armed;
+								// picking a different one auto-disarms
 	QK_PickEnvelope	env;
 } QK_SeqData;
 
@@ -455,10 +474,31 @@ PF_Err QK_ApplySampleRGB(PF_InData *in_data, PF_OutData *out_data,
 // window custom UI: DO_CLICK latches the modifier and checks out ONE upstream
 // (pre-effect) frame for the whole gesture, DRAG samples from that held frame,
 // and the final drag (last_time) checks it in. QK_ArmPicker is the Sample
-// button handler.
+// button handler — a TOGGLE: the picker stays live across gestures so you can
+// keep sampling, and gives up only on a second press or a tool-palette change.
 PF_Err QK_HandleEvent(PF_InData *in_data, PF_OutData *out_data,
                       PF_ParamDef *params[], PF_EventExtra *extra);
 PF_Err QK_ArmPicker(PF_InData *in_data, PF_OutData *out_data);
+
+// picker.cpp — declare WHICH windows send us events. MUST be called at the
+// END of PF_Cmd_PARAMS_SETUP: AE only delivers PF_Cmd_EVENT (NEW_CONTEXT
+// included) to an effect that has already registered, so registering from
+// inside an event handler never fires. See the SDK's UI/CCU, UI/ColorGrid and
+// UI/Custom_ECW_UI samples — all three call register_ui immediately before
+// setting out_data->num_params.
+PF_Err QK_RegisterCustomUI(PF_InData *in_data);
+
+// gate_ui.cpp — the Hue/Sat/Luma strips in the Effect Controls panel.
+// Each is a PF_ADD_NULL param carrying PF_PUI_CONTROL; the strip owns no
+// state and edits the gate's own float/angle params, so keyframes and
+// expressions on them keep working. Called from QK_HandleEvent for
+// PF_Window_EFFECT events.
+PF_Err QK_GateUIDraw(PF_InData *in_data, PF_OutData *out_data,
+                     PF_ParamDef *params[], PF_EventExtra *extra);
+PF_Err QK_GateUIClick(PF_InData *in_data, PF_OutData *out_data,
+                      PF_ParamDef *params[], PF_EventExtra *extra);
+PF_Err QK_GateUIDrag(PF_InData *in_data, PF_OutData *out_data,
+                     PF_ParamDef *params[], PF_EventExtra *extra);
 PF_Err QK_SeqSetup(PF_InData *in_data, PF_OutData *out_data);
 PF_Err QK_SeqSetdown(PF_InData *in_data, PF_OutData *out_data);
 PF_Err QK_SeqFlatten(PF_InData *in_data, PF_OutData *out_data);

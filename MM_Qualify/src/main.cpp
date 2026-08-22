@@ -62,9 +62,15 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	PF_ParamDef def;
 
 	// ======================= Qualifier ====================================
-
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_TOPIC("Qualifier", QK_TOPIC_QUAL_DISK_ID);
+	// FLAT ON PURPOSE. The controls an artist touches on every single key —
+	// Sample, the three enables, the three gate strips — sit at the TOP LEVEL
+	// with no twirl to open first. Burying a strip two groups deep meant three
+	// clicks before you could pull a handle.
+	//
+	// The numeric params keep their groups further down, collapsed. That is
+	// where the keyframe stopwatches and expression pickwhips live, so the
+	// groups are not decoration — they are the only route to animating a gate,
+	// and the strips edit those very params (gate_ui.cpp), never a copy.
 
 	// --- Sampling FIRST — the first thing the artist reaches for. ONE button
 	// arms the viewer eyedropper (picker.cpp); the next click/drag in the comp
@@ -73,22 +79,68 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	// Because a comp/layer custom UI DOES receive modifiers — unlike a colour
 	// param — the operation is the modifier, not three separate swatches:
 	//     click = Set   ·   Ctrl-click = Add   ·   Alt-click = Subtract
-	// Dragging GROWS the selection across everything swept (Resolve's feel).
 	// SUPERVISE so the press fires PF_Cmd_USER_CHANGED_PARAM -> QK_ArmPicker.
-	AEFX_CLR_STRUCT(def);
-	def.flags = PF_ParamFlag_SUPERVISE;
+	// AE_Effect.h on PF_Param_BUTTON: "must combine with PF_ParamFlag_SUPERVISE"
+	// — without it a button is completely inert.
+	//
+	// MIND THE ARG ORDER. PF_ADD_BUTTON is
+	//     (PARAM_NAME, BUTTON_NAME, PUI_FLAGS, PARAM_FLAGS, ID)
+	// i.e. the *UI* flags come third and the *param* flags fourth — the reverse
+	// of PF_ADD_CHECKBOXX/PF_ADD_FLOAT_SLIDERX, where the param flags come
+	// first. Swapping them compiles clean (both are plain A_longs) and silently
+	// leaves def.flags == 0, so the button never fires USER_CHANGED_PARAM.
+	// Note also that the macro AEFX_CLR_STRUCTs def itself, so pre-setting
+	// def.flags before the call is wiped and cannot rescue it.
 	PF_ADD_BUTTON("Sample", "Click / drag in viewer",
-		PF_ParamFlag_SUPERVISE, PF_PUI_NONE, QK_SAMPLE_BUTTON_DISK_ID);
+		PF_PUI_NONE, PF_ParamFlag_SUPERVISE, QK_SAMPLE_BUTTON_DISK_ID);
 
-	// --- Hue gate. Center is an ANGLE (unbounded — animating across the 0°
-	// seam is smooth; all hue math wraps in qk_core.h). Width is the total
-	// arc kept; Soft In/Out feather each edge independently. Default Width
-	// 360 == full circle (all hues pass) -> passthrough at reset.
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_TOPIC("Hue", QK_TOPIC_HUE_DISK_ID);
+	// --- The three gate strips, each behind its own enable. PF_ADD_NULL
+	// carries no value of its own — it exists purely to own a custom-drawn
+	// control area, and the handles on it edit the numeric params below.
+	// Unlike most of the PF_ADD_ macros, PF_ADD_NULL does NOT clear def, so the
+	// ui_* fields set here are what it picks up. DONT_ERASE_CONTROL: gate_ui.cpp
+	// paints every pixel itself.
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_CHECKBOXX("Hue Enable", TRUE, 0, QK_HUE_ENABLE_DISK_ID);
+	PF_ADD_CHECKBOXX("Hue", TRUE, 0, QK_HUE_ENABLE_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	def.ui_flags  = PF_PUI_CONTROL | PF_PUI_DONT_ERASE_CONTROL;
+	def.ui_width  = QK_GATE_UI_W;
+	def.ui_height = QK_GATE_UI_H;
+	PF_ADD_NULL("Hue Range", QK_HUE_UI_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_CHECKBOXX("Saturation", TRUE, 0, QK_SAT_ENABLE_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	def.ui_flags  = PF_PUI_CONTROL | PF_PUI_DONT_ERASE_CONTROL;
+	def.ui_width  = QK_GATE_UI_W;
+	def.ui_height = QK_GATE_UI_H;
+	PF_ADD_NULL("Sat Range", QK_SAT_UI_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_CHECKBOXX("Luma", TRUE, 0, QK_LUM_ENABLE_DISK_ID);
+
+	AEFX_CLR_STRUCT(def);
+	def.ui_flags  = PF_PUI_CONTROL | PF_PUI_DONT_ERASE_CONTROL;
+	def.ui_width  = QK_GATE_UI_W;
+	def.ui_height = QK_GATE_UI_H;
+	PF_ADD_NULL("Luma Range", QK_LUM_UI_DISK_ID);
+
+	// ======================= Gate values ==================================
+	// Collapsed by default: the strips above are the everyday control surface.
+	// These exist so every gate edge stays a first-class AE param — keyframable
+	// and expression-drivable, the headline differentiator over Resolve — and
+	// for typing an exact number when the eye is not enough.
+
+	// --- Hue. Center is an ANGLE (unbounded — animating across the 0° seam is
+	// smooth; all hue math wraps in qk_core.h). Width is the total arc kept;
+	// Soft In/Out feather each edge independently. Default Width 360 == full
+	// circle (all hues pass) -> passthrough at reset.
+	AEFX_CLR_STRUCT(def);
+	def.flags = PF_ParamFlag_START_COLLAPSED;
+	PF_ADD_TOPIC("Hue Values", QK_TOPIC_HUE_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_ANGLE("Hue Center", QK_HUE_CENTER_DFLT, QK_HUE_CENTER_DISK_ID);
@@ -111,12 +163,10 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(QK_TOPIC_HUE_END_DISK_ID);
 
-	// --- Saturation gate.
+	// --- Saturation.
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_TOPIC("Saturation", QK_TOPIC_SAT_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_CHECKBOXX("Sat Enable", TRUE, 0, QK_SAT_ENABLE_DISK_ID);
+	def.flags = PF_ParamFlag_START_COLLAPSED;
+	PF_ADD_TOPIC("Saturation Values", QK_TOPIC_SAT_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Sat In",
@@ -141,12 +191,10 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(QK_TOPIC_SAT_END_DISK_ID);
 
-	// --- Luma gate. HDR-aware: bounds valid to 8.0 (sliders show 0..1).
+	// --- Luma. HDR-aware: bounds valid to 8.0 (sliders show 0..1).
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_TOPIC("Luma", QK_TOPIC_LUM_DISK_ID);
-
-	AEFX_CLR_STRUCT(def);
-	PF_ADD_CHECKBOXX("Luma Enable", TRUE, 0, QK_LUM_ENABLE_DISK_ID);
+	def.flags = PF_ParamFlag_START_COLLAPSED;
+	PF_ADD_TOPIC("Luma Values", QK_TOPIC_LUM_DISK_ID);
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Luma In",
@@ -171,8 +219,6 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(QK_TOPIC_LUM_END_DISK_ID);
 
-	AEFX_CLR_STRUCT(def);
-	PF_END_TOPIC(QK_TOPIC_QUAL_END_DISK_ID);
 
 	// ======================= Output =======================================
 
@@ -277,6 +323,11 @@ ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
 
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(QK_TOPIC_ADV_END_DISK_ID);
+
+	// Custom UI (picker.cpp). MUST be here, at the tail of PARAMS_SETUP —
+	// registering from an event handler is circular and yields no events at
+	// all. QK_RegisterCustomUI's comment has the full reasoning.
+	ERR(QK_RegisterCustomUI(in_data));
 
 	out_data->num_params = QK_NUM_PARAMS;
 	return err;
