@@ -70,6 +70,28 @@ void UnlockSeq(PF_InData *in_data)
 }
 
 // ---------------------------------------------------------------------------
+// The tool-palette tool currently selected, or PF_ExtendedSuiteTool_NONE when
+// the host does not offer the suite (Premiere). Used ONLY to decide when the
+// sticky arm should give up — never to gate a sample, so a host without the
+// suite simply keeps the picker live until Sample is pressed again.
+// ---------------------------------------------------------------------------
+A_long CurrentTool(PF_InData *in_data)
+{
+	PF_ExtendedSuiteTool tool = PF_ExtendedSuiteTool_NONE;
+	if (!in_data || in_data->appl_id == kAppID_Premiere) return (A_long)tool;
+
+	// AEGP_SuiteHandler throws MissingSuiteError rather than returning; an
+	// absent suite must degrade to "cannot tell", not abort the event.
+	try {
+		AEGP_SuiteHandler suites(in_data->pica_basicP);
+		suites.HelperSuite2()->PF_GetCurrentExtendedTool(&tool);
+	} catch (...) {
+		tool = PF_ExtendedSuiteTool_NONE;
+	}
+	return (A_long)tool;
+}
+
+// ---------------------------------------------------------------------------
 // Pixel read out of a checked-out AEGP world, promoted to float.
 // The upstream frame can come back 8/16/32-bit depending on the project's
 // depth, so all three are handled. 8/16 are straight normalisations; 32 is
@@ -241,17 +263,58 @@ PF_Err SampleAt(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[],
 } // namespace
 
 // ---------------------------------------------------------------------------
-// Sample button — arms the picker. The next click in the comp/layer viewer
-// starts a gesture; until then nothing is intercepted, so normal viewer
-// interaction is untouched.
+// Custom UI registration. Tells AE WHICH windows should send this effect
+// events; PF_OutFlag_CUSTOM_UI at global setup only says "I have one".
+//
+// PLACEMENT IS LOAD-BEARING. This must be called at the END of
+// PF_Cmd_PARAMS_SETUP:
+//   · GLOBAL_SETUP is too early — register_ui is rejected there and the
+//     effect fails to initialise.
+//   · An event handler is too late — AE sends PF_Cmd_EVENT only to effects
+//     that already registered, so registering from PF_Event_NEW_CONTEXT is
+//     circular and the plugin receives no events at all (no ADJUST_CURSOR,
+//     hence no eyedropper cursor; no DO_CLICK, hence a Sample button that
+//     arms state nothing ever reads).
+// Every SDK custom-UI sample (UI/CCU, UI/ColorGrid, UI/Custom_ECW_UI,
+// UI/HistoGrid) registers immediately before setting out_data->num_params.
+//
+// COMP | LAYER: the viewer eyedropper needs image-window clicks, where the
+// point can be mapped to a layer pixel.
+// EFFECT: the Hue/Sat/Luma gate strips in the Effect Controls panel
+// (gate_ui.cpp). Their sizes come from each param's ui_width/ui_height, not
+// from this struct — the comp_ui_* / layer_ui_* fields below stay zero.
+// ---------------------------------------------------------------------------
+PF_Err QK_RegisterCustomUI(PF_InData *in_data)
+{
+	PF_CustomUIInfo ci;
+	AEFX_CLR_STRUCT(ci);
+	ci.events = PF_CustomEFlag_COMP | PF_CustomEFlag_LAYER |
+	            PF_CustomEFlag_EFFECT;
+	return PF_REGISTER_UI(in_data, &ci);
+}
+
+// ---------------------------------------------------------------------------
+// Sample button — TOGGLES the picker. While it is off nothing is intercepted,
+// so normal viewer interaction is completely untouched.
+//
+// STICKY BY DESIGN. The picker stays live across gestures: keying is an
+// iterative act (sample, look, add a bit, carve a bit) and re-pressing a
+// button between every stroke is the wrong rhythm. It stands down on:
+//   · a second press of Sample (the explicit off switch), or
+//   · the user selecting a different tool from the palette — checked in
+//     QK_HandleEvent, since AE gives no tool-change notification.
+// Both matter, because while armed we consume viewer clicks: without a way
+// out you could not select a layer with the mouse.
 // ---------------------------------------------------------------------------
 PF_Err QK_ArmPicker(PF_InData *in_data, PF_OutData *out_data)
 {
 	QK_SeqData *seq = LockSeq(in_data);
 	if (!seq) return PF_Err_BAD_CALLBACK_PARAM;
 
-	seq->armedB   = 1;
+	const bool wasArmed = (seq->armedB != 0);
+	seq->armedB   = wasArmed ? 0 : 1;
 	seq->gestureB = 0;
+	seq->armToolL = wasArmed ? 0 : CurrentTool(in_data);
 	AEFX_CLR_STRUCT(seq->env);
 
 	UnlockSeq(in_data);
@@ -279,21 +342,35 @@ PF_Err QK_HandleEvent(PF_InData *in_data, PF_OutData *out_data,
 
 	if (!extra || !extra->contextH) return PF_Err_NONE;
 
-	// NEW_CONTEXT is where a comp/layer custom UI subscribes to events —
-	// register_ui is REJECTED during GLOBAL_SETUP (AE errors out and the
-	// effect fails to initialise). PF_OutFlag_CUSTOM_UI at global setup only
-	// says "I have a custom UI"; this call says WHICH windows send us events.
-	// Per the SDK the extra fields are meaningless for NEW_CONTEXT beyond
-	// contextH/e_type, so we do nothing else here.
-	if (extra->e_type == PF_Event_NEW_CONTEXT) {
-		PF_CustomUIInfo ci;
-		AEFX_CLR_STRUCT(ci);
-		ci.events = PF_CustomEFlag_COMP | PF_CustomEFlag_LAYER;
-		return PF_REGISTER_UI(in_data, &ci);
+	// NEW_CONTEXT / CLOSE_CONTEXT only bracket one window's custom-UI
+	// lifetime. Registration does NOT happen here — it CANNOT: AE delivers
+	// PF_Cmd_EVENT (this event included) only to an effect that has already
+	// registered, so a register_ui call in this branch never runs. It lives in
+	// QK_RegisterCustomUI, called from PARAMS_SETUP. Nothing to set up per
+	// context either: all gesture state lives in sequence data.
+	if (extra->e_type == PF_Event_NEW_CONTEXT ||
+	    extra->e_type == PF_Event_CLOSE_CONTEXT)
+		return PF_Err_NONE;
+
+	const PF_WindowType wtype = (*extra->contextH)->w_type;
+
+	// Effect Controls panel: the gate strips. Entirely separate from the
+	// eyedropper — a strip is a control you drag, not a pixel you sample — so
+	// it is dispatched here and never touches the picker's armed state.
+	if (wtype == PF_Window_EFFECT) {
+		switch (extra->e_type) {
+			case PF_Event_DRAW:
+				return QK_GateUIDraw(in_data, out_data, params, extra);
+			case PF_Event_DO_CLICK:
+				return QK_GateUIClick(in_data, out_data, params, extra);
+			case PF_Event_DRAG:
+				return QK_GateUIDrag(in_data, out_data, params, extra);
+			default:
+				return PF_Err_NONE;
+		}
 	}
 
-	// Only the image windows carry a meaningful click point.
-	const PF_WindowType wtype = (*extra->contextH)->w_type;
+	// Beyond here only the image windows, which carry a meaningful click point.
 	if (wtype != PF_Window_COMP && wtype != PF_Window_LAYER) return PF_Err_NONE;
 
 	if (extra->e_type != PF_Event_DO_CLICK &&
@@ -307,6 +384,21 @@ PF_Err QK_HandleEvent(PF_InData *in_data, PF_OutData *out_data,
 	// Not armed and not mid-gesture: let the event through to AE untouched, so
 	// normal viewer interaction (pan, selection) is completely unaffected.
 	if (!seq->armedB && !seq->gestureB) { UnlockSeq(in_data); return PF_Err_NONE; }
+
+	// The sticky arm's other exit. AE sends no tool-change notification, so the
+	// palette is polled here instead — this runs on ADJUST_CURSOR, i.e. as the
+	// mouse moves over the viewer, which is exactly when a stale arm would
+	// otherwise start eating clicks. Only between gestures: a drag cannot
+	// change the tool, and a NONE reading means "host can't tell", not "changed".
+	if (seq->armedB && !seq->gestureB) {
+		const A_long tool = CurrentTool(in_data);
+		if (tool != (A_long)PF_ExtendedSuiteTool_NONE && tool != seq->armToolL) {
+			seq->armedB = 0;
+			AEFX_CLR_STRUCT(seq->env);
+			UnlockSeq(in_data);
+			return PF_Err_NONE;
+		}
+	}
 
 	// Armed: show the eyedropper so the user can SEE the picker is live.
 	if (extra->e_type == PF_Event_ADJUST_CURSOR) {
@@ -347,7 +439,7 @@ PF_Err QK_HandleEvent(PF_InData *in_data, PF_OutData *out_data,
 		} else if (receiptH) {
 			// Render failed after checkout — do not leak the frame.
 			suites.RenderSuite5()->AEGP_CheckinFrame(receiptH);
-			seq->armedB = 0;
+			seq->armedB = 0;	// a failed checkout stands the picker down
 		}
 		extra->evt_out_flags = PF_EO_HANDLED_EVENT;
 
@@ -363,12 +455,13 @@ PF_Err QK_HandleEvent(PF_InData *in_data, PF_OutData *out_data,
 			               x, y, seq->modeL, &seq->env);
 
 		if (click->last_time) {
-			// ---- release: end the gesture, disarm -------------------------
+			// ---- release: end the gesture but STAY ARMED ------------------
+			// The envelope is cleared so the next press starts a fresh
+			// accumulation; armedB deliberately survives (see QK_ArmPicker).
 			if (receiptH) suites.RenderSuite5()->AEGP_CheckinFrame(receiptH);
 			click->continue_refcon[0] = 0;
 			click->continue_refcon[1] = 0;
 			seq->gestureB = 0;
-			seq->armedB   = 0;
 			AEFX_CLR_STRUCT(seq->env);
 		}
 		extra->evt_out_flags = PF_EO_HANDLED_EVENT;
