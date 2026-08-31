@@ -442,7 +442,8 @@ Build everything, then run every suite — one pass, before any AE session:
 MM_Qualify\tests\run_tests.ps1                # 93 core + 23 kernel + 12 pipeline
 MM_FreqSep\tests\run_tests.ps1                # 27
 ModernEdgeBlur\tests\build_tests.ps1          # 84 216 checks
-GrainTransfer\tests\build_tests.ps1           # DSP gates (FFT, RPN, response)
+GrainTransfer\tests\build_tests.ps1           # DSP gates + kernel parity
+EdgeRepair\tests\build_tests.ps1              # EDT / pull-push / composite / GPU parity / soak
 ```
 
 Or as one line that stops on the first failure:
@@ -452,7 +453,8 @@ Or as one line that stops on the first failure:
     "MM_Qualify\tests\run_tests.ps1",
     "MM_FreqSep\tests\run_tests.ps1",
     "ModernEdgeBlur\tests\build_tests.ps1",
-    "GrainTransfer\tests\build_tests.ps1")) {
+    "GrainTransfer\tests\build_tests.ps1",
+    "EdgeRepair\tests\build_tests.ps1")) {
   & ".\$t"; if ($LASTEXITCODE -ne 0) { throw "FAILED: $t" } }
 Write-Host "all suites green" -ForegroundColor Green
 ```
@@ -460,8 +462,19 @@ Write-Host "all suites green" -ForegroundColor Green
 These are the regression gate and they cover everything except the CUDA driver
 layer itself. Nothing in AE is worth investigating until they are green.
 
-**Coverage caveat, worth knowing before you trust a green run:** Grain
-Transfer's suite gates its *DSP* (FFT round-trip, RPN character/ghosting/seams,
-the response law, determinism) and knows nothing about a GPU path — there is
-none yet. Closing that is step 2 of its port brief, and until it is done a
-green Grain Transfer run says nothing about GPU parity.
+**Coverage note, worth knowing before you trust a green run — rewritten
+2026-08-31 (G-17).** The reach differs per suite, and Grain Transfer's needs
+naming. Its `test_core.cpp` and `test_realfootage.cpp` are *DSP* gates (FFT
+round-trip, RPN character/ghosting/seams, the response law, determinism) and
+know nothing about a GPU path; a green run from those two alone says nothing
+about GPU parity. **`test_kernel.cpp` does cover it** — it compiles the shipped
+`gt_stamp.kernel` through the host prologue and diffs it against the CPU
+reference at exactly `0.0`, gating the kernel's indexing, buffer-slot order,
+`PARAM_BLOCK` layout, BGRA↔ARGB swizzle and pitch handling. That is the same
+arrangement MM_Qualify and MM_FreqSep use, and it is why the earlier wording
+here (“there is none yet”) is retired.
+
+What **no** suite covers, for any plugin, is the CUDA driver layer itself and
+the AE host plumbing around it — device setup, the PreRender gate, and tile
+geometry as AE actually requests it. That is what §3 exists for: a green
+headless run is a precondition for an AE session, never a substitute for one.

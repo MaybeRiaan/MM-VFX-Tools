@@ -5,11 +5,11 @@ no bloated feature sets. Windows / MSVC / CMake.
 
 | Plugin | Folder | Status |
 |---|---|---|
-| Grain Transfer | `GrainTransfer/` | Functional in AE; grain-quality passes ongoing |
-| HSL Key (MM Qualify) | `MM_Qualify/` | Built + tested (105 headless tests); in-AE validation pending; DX12 GPU host parked (see note below) |
-| MM FreqSep | `MM_FreqSep/` | Phases 1–5 done, kernels bit-exact (48/48 AE-free); DX12 GPU host parked pending CUDA re-examination (see note below) |
-| Modern Edge Blur | `ModernEdgeBlur/` | Shipped/working; rename planned |
-| Edge Repair | `EdgeRepair/` | All six stages done incl. CUDA GPU render; **the suite's GPU reference**; rename planned |
+| Grain Transfer | `GrainTransfer/` | Functional in AE; CUDA host built, kernel parity 18/18 exact; grain-analysis passes ongoing; **in-AE GPU rows not yet run** |
+| HSL Key (MM Qualify) | `MM_Qualify/` | Built + tested (105 headless tests); **CUDA GPU render verified in AE 2026-08-11** |
+| MM FreqSep | `MM_FreqSep/` | Phases 1–5 done, kernels bit-exact; **CUDA GPU render verified in AE 2026-08-12** |
+| Modern Edge Blur | `ModernEdgeBlur/` | Shipped/working; **CUDA GPU render verified in AE 2026-08-20**; rename planned |
+| Edge Repair | `EdgeRepair/` | All six stages done; **CUDA GPU render verified in AE 2026-07-30**; the suite's GPU reference; rename planned |
 
 All five plugins live here, one folder each. Modern Edge Blur and Edge Repair
 shared a folder until 2026-08-02 — they were separated once it was established
@@ -78,6 +78,8 @@ belongs here, not in that plugin's folder.
 |---|---|
 | [docs/AE_GPU_Effects.md](docs/AE_GPU_Effects.md) | **Host contract** — how to make AE dispatch to your GPU code, which framework it actually offers, and how to tell whether it really ran. Read before any GPU work. |
 | [docs/gpu-kernel-rules.md](docs/gpu-kernel-rules.md) | **Kernel contract** — how to write shader bodies so one math source serves DX12 / CUDA / Metal / host C++, and how to prove it against the CPU reference. |
+| [docs/gpu-validation-checklist.md](docs/gpu-validation-checklist.md) | **In-AE validation** — the hands-on loop, the per-plugin traps that make a sweep hollow, and the log decoder. Its §0 table is the live record of which plugins AE has actually GPU-rendered. |
+| `docs/gpu-validation-tracker.xlsx` | The row-by-row evidence behind that table. Read and write it with `tools/gpu-validation/read-tracker.ps1` / `write-tracker.ps1` — it is the only live copy. |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | How this repo was assembled from four independent repos, and the recipe if it ever needs repeating. |
 
 `tools/` holds suite-wide tooling: `pipl_dump.py` (read a built `.aex`'s PiPL —
@@ -85,13 +87,25 @@ match name, version, outflags), `pipl_sweep.py`, and `gpu_status.ps1`.
 
 > **GPU direction (decided 2026-08-02): CUDA only, EdgeRepair is the reference.**
 > EdgeRepair's GPU path is the one written after the AE host mechanism was
-> *measured* rather than inferred, and the only one AE has actually GPU-rendered.
+> *measured* rather than inferred. **That re-examination is finished.** All five
+> plugins now ship a CUDA host, and After Effects has GPU-rendered four of them
+> on this box: EdgeRepair (2026-07-30), MM_Qualify (2026-08-11), MM_FreqSep
+> (2026-08-12), Modern Edge Blur (2026-08-20). Grain Transfer's host is built
+> and its kernel is parity-tested headlessly, but its in-AE rows are still to
+> run — [docs/gpu-validation-checklist.md](docs/gpu-validation-checklist.md) §0
+> is the live status.
+>
 > MM_FreqSep's and MM_Qualify's DX12 hosts accept `DIRECTX`, which AE never
 > offers on this hardware, so they silently render on the CPU. Those hosts are
-> **parked, not deleted** — their kernels are bit-exact and remain the asset.
-> All four non-EdgeRepair plugins get re-examined through this lens once suite
-> unification is finished. See [docs/AE_GPU_Effects.md](docs/AE_GPU_Effects.md)
-> §1.1–1.2.
+> **parked, not deleted** — their kernels are bit-exact, they remain the asset,
+> and Premiere is the host that would use them.
+>
+> **Metal is unwritten.** No Metal host exists in any plugin, no
+> `*_prologue_metal.h` exists, and the only `.metal` file in the repo mirrors a
+> single EdgeRepair entry point. The kernel math is already Metal-shaped by
+> construction — see [docs/AE_GPU_Effects.md](docs/AE_GPU_Effects.md)
+> §1.1–1.2 and [docs/gpu-kernel-rules.md](docs/gpu-kernel-rules.md) §4 for
+> what a port still has to settle on-device.
 
 ## Fresh-checkout note
 
