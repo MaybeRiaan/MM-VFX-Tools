@@ -1,10 +1,6 @@
 #include "AEConfig.h"
 #include "AE_EffectVers.h"
 
-#ifndef AE_OS_WIN
-	#define AE_OS_WIN
-#endif
-
 // Version information from GrainTransfer.h — keep STAGE_VERSION in sync.
 #define	MAJOR_VERSION	1
 #define	MINOR_VERSION	0
@@ -12,8 +8,12 @@
 #define	STAGE_VERSION	0	// PF_Stage_DEVELOP (enum value 0) — must match GrainTransfer.h
 #define	BUILD_VERSION	18
 
+// Portable pattern from the SDK's own SmartyPantsPiPL.r: on Mac (AE_OS_WIN
+// undefined) pull in AE_General.r for Rez; on Windows the cl /EP + PiPLTool
+// path supplies the definitions and this include is skipped. Do NOT force-
+// define AE_OS_WIN above — that would break the Mac Rez build.
 #ifndef AE_OS_WIN
-	#include <AE_General.r>
+	#include "AE_General.r"
 #endif
 
 resource 'PiPL' (16000) {

@@ -71,18 +71,38 @@
 #define GT_DIAG_LOG 1
 
 #if GT_DIAG_LOG
+#ifdef _WIN32
 #include <windows.h>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
+
+// The temp directory, which is the only thing in this file that has ever cared
+// which OS it is running on. Windows has no $TMPDIR; macOS has no
+// GetTempPathA, and its TMPDIR is a per-user path under /var/folders that
+// already ends in a separator (as does GetTempPathA's result, and as does the
+// /tmp/ fallback for the case where the variable is unset).
+static std::string GT_LogDir()
+{
+#ifdef _WIN32
+    char dir[MAX_PATH];
+    const DWORD dn = GetTempPathA(MAX_PATH, dir);
+    if (dn == 0 || dn > MAX_PATH - 24) return std::string();
+    return std::string(dir);
+#else
+    const char *t = std::getenv("TMPDIR");
+    return std::string((t && *t) ? t : "/tmp/");
+#endif
+}
 
 static void GT_Log(const char *fmt, ...)
 {
-    char dir[MAX_PATH];
-    const DWORD dn = GetTempPathA(MAX_PATH, dir);
-    if (dn == 0 || dn > MAX_PATH - 24) return;
-    const std::string path = std::string(dir) + "GrainTransfer_diag.log";
+    const std::string dir = GT_LogDir();
+    if (dir.empty()) return;
+    const std::string path = dir + "GrainTransfer_diag.log";
 
     // Format the whole line (with newline) into one buffer, then write once —
     // keeps lines intact when AE renders frames on multiple threads.
@@ -96,7 +116,12 @@ static void GT_Log(const char *fmt, ...)
     line[len + 1] = '\0';
 
     FILE *f = nullptr;
+#ifdef _WIN32
     if (fopen_s(&f, path.c_str(), "a") != 0 || !f) return;
+#else
+    f = std::fopen(path.c_str(), "a");
+    if (!f) return;
+#endif
     fwrite(line, 1, (size_t)len + 1, f);
     fclose(f);
 }

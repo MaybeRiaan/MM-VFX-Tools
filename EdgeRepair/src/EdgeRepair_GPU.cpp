@@ -52,6 +52,23 @@
     same argument as pre_render_data).
 */
 
+/* ---------------------------------------------------------------------------
+   PLATFORM FORK. Everything below is the WINDOWS GPU host: CUDA through the
+   nvcuda.dll shim, plus the DX12 path Premiere uses. Both are Windows-only by
+   construction (nvcuda.dll, d3d12.h), and Metal is unwritten
+   (../../docs/gpu-kernel-rules.md §4), so on any other platform this file
+   compiles down to the DECLINE stubs at the bottom: PF_Err_NONE with null
+   gpu_data at device setup and ER_GPUFrameworkSupported false, so PreRender
+   never raises GPU_RENDER_POSSIBLE and AE routes every frame to the CPU
+   reference — the always-correct path on both platforms.
+
+   The fork lives HERE rather than at EdgeRepair.cpp's call sites on purpose:
+   the command dispatch and PreRender read identically on both platforms, and
+   there is exactly one place to unpick when a Metal host lands. Same shape as
+   MM_Qualify's QK_GPUDeviceSetup fallback (MM_Qualify/src/smart_render.cpp).
+   --------------------------------------------------------------------------- */
+#ifdef _WIN32
+
 #define NOMINMAX
 #include "EdgeRepair.h"          // SDK includes, ER_* enums
 #include "EdgeRepair_GPU.h"
@@ -1319,3 +1336,49 @@ PF_Err ER_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data,
             return PF_Err_INTERNAL_STRUCT_DAMAGED;
     }
 }
+
+#else   /* !_WIN32 — no GPU host on this platform yet */
+
+#include "EdgeRepair.h"
+#include "EdgeRepair_GPU.h"
+
+/*  Decline stubs. These are not placeholders for a Metal host — they are the
+    correct behaviour for a build with no GPU backend, and they are the same
+    behaviour the Windows host gives an unsupported framework (OpenCL): accept
+    the setup call, hand back no device data, and let the CPU pipeline have
+    every frame. AE asks no further questions.  */
+
+PF_Err ER_GPUDeviceSetup(PF_InData *, PF_OutData *, PF_GPUDeviceSetupExtra *extra)
+{
+    extra->output->gpu_data = nullptr;
+    return PF_Err_NONE;
+}
+
+PF_Err ER_GPUDeviceSetdown(PF_InData *, PF_OutData *, PF_GPUDeviceSetdownExtra *)
+{
+    return PF_Err_NONE;
+}
+
+/* Premiere-only in the first place (guarded by appl_id == 'PrMr' at the call
+   site), and Premiere on Mac would need the Metal host anyway. */
+void ER_DeclareGPUPixelFormats(PF_InData *, PF_OutData *) {}
+
+bool ER_GPUFrameworkSupported(PF_GPU_Framework) { return false; }
+
+void ER_GPULogSmartRenderCPU(int, int, int, int, int, int) {}
+void ER_GPULogPreRenderDecision(PF_GPU_Framework, const void *, bool,
+                                int, int, int) {}
+void ER_GPULogEvent(const char *) {}
+void ER_GPULogEventF(const char *, ...) {}
+
+/* Unreachable: ER_GPUFrameworkSupported is false, so PreRender never raises
+   GPU_RENDER_POSSIBLE and AE never sends PF_Cmd_SMART_RENDER_GPU. Fail loudly
+   rather than silently returning a black frame if that ever stops holding. */
+PF_Err ER_SmartRenderGPU(PF_InData *, PF_OutData *, PF_SmartRenderExtra *,
+                         PF_EffectWorld *, PF_EffectWorld *,
+                         const ER_Params &, A_long, A_long)
+{
+    return PF_Err_INTERNAL_STRUCT_DAMAGED;
+}
+
+#endif  /* _WIN32 */

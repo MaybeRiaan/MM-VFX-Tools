@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for the macOS GrainTransfer.plugin bundle. AE loads effect plugins
+  as bundles whose package type is 'eFKT' and whose Resources hold the
+  Rez-compiled PiPL (see CMakeLists.txt APPLE branch). Cannot be built or
+  verified on the Windows dev machine; present so a Mac build is self-contained.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>English</string>
+    <key>CFBundleExecutable</key>
+    <string>GrainTransfer</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.mm.GrainTransfer</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Grain Transfer</string>
+    <key>CFBundlePackageType</key>
+    <string>eFKT</string>
+    <key>CFBundleSignature</key>
+    <string>FXTC</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>18</string>
+</dict>
+</plist>

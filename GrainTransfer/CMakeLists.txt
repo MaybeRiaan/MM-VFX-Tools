@@ -41,15 +41,16 @@ set(SDK_SOURCES
     ${AE_SDK_ROOT}/Util/Smart_Utils.cpp
 )
 
-set(PIPLTOOL "${AE_SDK_ROOT}/Resources/PiPLtool.exe")
-if(NOT EXISTS ${PIPLTOOL})
-    message(FATAL_ERROR "PiPLtool.exe not found at: ${PIPLTOOL}")
-endif()
-
 if(COMMAND mm_ae_plugins_dir)
     mm_ae_plugins_dir()
 else()
-    set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins")
+    # Standalone fallback, used only when this folder is built outside the
+    # suite (cmake/MMSuite.cmake absent, so mm_ae_plugins_dir is undefined).
+    if(APPLE)
+        set(AE_PLUGINS_DIR "/Applications/Adobe After Effects 2026/Plug-ins")
+    else()
+        set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins")
+    endif()
 endif()
 
 set(PIPL_R   "${RESOURCES_DIR}/GrainTransferPiPL.r")
@@ -61,6 +62,19 @@ if(COMMAND mm_check_plugin_version)
         HEADER "${SRC_DIR}/GrainTransfer.h"
         PIPL   "${PIPL_R}")
 endif()
+
+# ===========================================================================
+# Windows - the .aex: PiPLTool resource pipeline, DXIL/PTX kernel assets, and
+# the deploy into AE's Plug-ins folder. Everything from here to the macOS
+# branch at the bottom of this file is Windows-only.
+# ===========================================================================
+if(WIN32)
+
+set(PIPLTOOL "${AE_SDK_ROOT}/Resources/PiPLtool.exe")
+if(NOT EXISTS ${PIPLTOOL})
+    message(FATAL_ERROR "PiPLtool.exe not found at: ${PIPLTOOL}")
+endif()
+
 
 set(PIPL_RR  "${CMAKE_CURRENT_BINARY_DIR}/GrainTransferPiPL.rr")
 set(PIPL_RC  "${CMAKE_CURRENT_BINARY_DIR}/GrainTransferPiPL.rc")
@@ -249,3 +263,69 @@ if(GT_NVCC_EXE)
 endif()
 
 message(STATUS "GrainTransfer.aex → ${AE_PLUGINS_DIR}")
+
+
+# ===========================================================================
+# macOS - the .plugin bundle: a Rez-compiled PiPL in Resources, universal
+# (x86_64 + arm64), matching the SDK's own Xcode sample layout. Rez ships with
+# the Xcode command-line tools.
+#
+# CPU PATH ONLY, and that is a complete plugin rather than a degraded one: the
+# CPU pipeline is the reference both platforms are validated against. There is
+# no Metal host in this suite yet (../docs/gpu-kernel-rules.md SS4), so
+# gt_gpu_cuda.cpp (excluded from this branch entirely; its host header is #ifdef _WIN32) compiles to its decline stubs here, AE is never offered a
+# device, and every frame takes the reference path.
+#
+# NOTE: cannot be compiled or verified on the Windows dev machine.
+# ===========================================================================
+elseif(APPLE)
+    find_program(REZ_TOOL Rez REQUIRED)
+
+    add_library(GrainTransfer MODULE
+        "${SRC_DIR}/GrainTransfer.cpp"
+        "${SRC_DIR}/GrainTransfer_Strings.cpp"
+        "${SRC_DIR}/common/GT_Common.cpp"
+        "${SRC_DIR}/core/GT_FFT.cpp"
+        "${SRC_DIR}/core/GT_Grain.cpp"
+        "${SRC_DIR}/core/GT_Response.cpp"
+        "${SRC_DIR}/core/GT_Stamp.cpp"
+        "${KISSFFT_DIR}/kiss_fft.c"
+        "${KISSFFT_DIR}/kiss_fftnd.c"
+        ${SDK_SOURCES}
+    )
+
+    set_target_properties(GrainTransfer PROPERTIES
+        BUNDLE TRUE
+        BUNDLE_EXTENSION "plugin"
+        OUTPUT_NAME "GrainTransfer"
+        MACOSX_BUNDLE_INFO_PLIST "${RESOURCES_DIR}/Info.plist"
+        OSX_ARCHITECTURES "x86_64;arm64")
+
+    target_compile_definitions(GrainTransfer PRIVATE macintosh)
+
+    # The PiPL goes into the bundle's Resources as a Rez-compiled .rsrc. AE
+    # reads it to find the effect's name, category and entry point; without it
+    # the bundle loads and does nothing.
+    add_custom_command(TARGET GrainTransfer POST_BUILD
+        COMMAND ${REZ_TOOL}
+            -i "${AE_SDK_ROOT}/Headers"
+            -i "${AE_SDK_ROOT}/Resources"
+            -arch x86_64
+            -o "$<TARGET_BUNDLE_CONTENT_DIR:GrainTransfer>/Resources/GrainTransfer.rsrc"
+            "${PIPL_R}"
+        COMMENT "Compiling GrainTransfer PiPL with Rez"
+        VERBATIM)
+
+    # Deploy. Pass -DAE_PLUGINS_DIR=... if AE is not at the default location.
+    add_custom_command(TARGET GrainTransfer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "$<TARGET_BUNDLE_DIR:GrainTransfer>"
+                "${AE_PLUGINS_DIR}/GrainTransfer.plugin"
+        COMMENT "Installing GrainTransfer.plugin -> ${AE_PLUGINS_DIR}"
+        VERBATIM)
+
+    message(STATUS "GrainTransfer.plugin (macOS bundle, CPU path) -> ${AE_PLUGINS_DIR}")
+
+else()
+    message(FATAL_ERROR "GrainTransfer targets Windows and macOS only.")
+endif()

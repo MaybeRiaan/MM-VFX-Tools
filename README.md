@@ -1,7 +1,8 @@
 # MM VFX Tools
 
 A suite of After Effects plugins (Effect → MM → …). Fast, simple, intuitive —
-no bloated feature sets. Windows / MSVC / CMake.
+no bloated feature sets. Windows / MSVC / CMake; macOS builds are wired up but
+not yet compiled on a Mac — see [docs/MAC_BUILD.md](docs/MAC_BUILD.md).
 
 | Plugin | Folder | Status |
 |---|---|---|
@@ -31,6 +32,11 @@ to After Effects for testing:
 .\build.ps1 -Publish              # re-deploy what's built, no recompile
 .\build.ps1 -Clean                # wipe the suite build tree first
 ```
+
+On **macOS** neither script applies — both drive MSVC and PiPLTool.exe. Use
+plain CMake (`cmake -S . -B build-mac && cmake --build build-mac -j`); the
+details, and what a Mac build does and does not include, are in
+[docs/MAC_BUILD.md](docs/MAC_BUILD.md).
 
 **Single plugin**, from its folder — unchanged, and still the tool for working
 on one plugin, because these own their version bumps and per-project quirks:
@@ -78,6 +84,7 @@ belongs here, not in that plugin's folder.
 |---|---|
 | [docs/AE_GPU_Effects.md](docs/AE_GPU_Effects.md) | **Host contract** — how to make AE dispatch to your GPU code, which framework it actually offers, and how to tell whether it really ran. Read before any GPU work. |
 | [docs/gpu-kernel-rules.md](docs/gpu-kernel-rules.md) | **Kernel contract** — how to write shader bodies so one math source serves DX12 / CUDA / Metal / host C++, and how to prove it against the CPU reference. |
+| [docs/MAC_BUILD.md](docs/MAC_BUILD.md) | **macOS** — prerequisites, the CMake invocation that replaces `build.ps1`, where bundles install, what is deliberately not wired up (Metal, the test runners), and what to check in AE first. |
 | [docs/gpu-validation-checklist.md](docs/gpu-validation-checklist.md) | **In-AE validation** — the hands-on loop, the per-plugin traps that make a sweep hollow, and the log decoder. Its §0 table is the live record of which plugins AE has actually GPU-rendered. |
 | `docs/gpu-validation-tracker.xlsx` | The row-by-row evidence behind that table. Read and write it with `tools/gpu-validation/read-tracker.ps1` / `write-tracker.ps1` — it is the only live copy. |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | How this repo was assembled from four independent repos, and the recipe if it ever needs repeating. |

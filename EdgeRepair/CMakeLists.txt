@@ -57,16 +57,18 @@ set(SDK_SOURCES
     ${AE_SDK_ROOT}/Util/Smart_Utils.cpp
 )
 
-set(PIPLTOOL "${AE_SDK_ROOT}/Resources/PiPLtool.exe")
-if(NOT EXISTS ${PIPLTOOL})
-    message(FATAL_ERROR "PiPLtool.exe not found at: ${PIPLTOOL}")
-endif()
-
 if(COMMAND mm_ae_plugins_dir)
     mm_ae_plugins_dir()
 else()
-    set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins"
-        CACHE PATH "After Effects Plug-ins folder to deploy the .aex into")
+    # Standalone fallback, used only when this folder is built outside the
+    # suite (cmake/MMSuite.cmake absent, so mm_ae_plugins_dir is undefined).
+    if(APPLE)
+        set(AE_PLUGINS_DIR "/Applications/Adobe After Effects 2026/Plug-ins"
+            CACHE PATH "After Effects Plug-ins folder to deploy plugins into")
+    else()
+        set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins"
+            CACHE PATH "After Effects Plug-ins folder to deploy plugins into")
+    endif()
 endif()
 
 # 2026-07-30: AE's own Plug-ins folder is correct. EdgeRepair was briefly
@@ -86,6 +88,19 @@ if(COMMAND mm_check_plugin_version)
         HEADER "${SRC_DIR}/EdgeRepair.h"
         PIPL   "${PIPL_R}")
 endif()
+
+# ===========================================================================
+# Windows - the .aex: PiPLTool resource pipeline, DXIL/PTX kernel assets, and
+# the deploy into AE's Plug-ins folder. Everything from here to the macOS
+# branch at the bottom of this file is Windows-only.
+# ===========================================================================
+if(WIN32)
+
+set(PIPLTOOL "${AE_SDK_ROOT}/Resources/PiPLtool.exe")
+if(NOT EXISTS ${PIPLTOOL})
+    message(FATAL_ERROR "PiPLtool.exe not found at: ${PIPLTOOL}")
+endif()
+
 
 # ---------------------------------------------------------------------------
 # OPTIONAL: Premiere Pro GPU module (src/gpu/ER_GPUFilter.cpp, exports
@@ -347,3 +362,64 @@ else()
 endif()
 
 message(STATUS "EdgeRepair.aex + kernel assets -> ${AE_PLUGINS_DIR}")
+
+
+# ===========================================================================
+# macOS - the .plugin bundle: a Rez-compiled PiPL in Resources, universal
+# (x86_64 + arm64), matching the SDK's own Xcode sample layout. Rez ships with
+# the Xcode command-line tools.
+#
+# CPU PATH ONLY, and that is a complete plugin rather than a degraded one: the
+# CPU pipeline is the reference both platforms are validated against. There is
+# no Metal host in this suite yet (../docs/gpu-kernel-rules.md SS4), so
+# EdgeRepair_GPU.cpp compiles to its decline stubs here, AE is never offered a
+# device, and every frame takes the reference path.
+#
+# NOTE: cannot be compiled or verified on the Windows dev machine.
+# ===========================================================================
+elseif(APPLE)
+    find_program(REZ_TOOL Rez REQUIRED)
+
+    add_library(EdgeRepair MODULE
+        "${SRC_DIR}/EdgeRepair.cpp"
+        "${SRC_DIR}/EdgeRepair_Strings.cpp"
+        "${SRC_DIR}/EdgeRepair_GPU.cpp"
+        "${SRC_DIR}/core/ER_Common.cpp"
+        ${SDK_SOURCES}
+    )
+
+    set_target_properties(EdgeRepair PROPERTIES
+        BUNDLE TRUE
+        BUNDLE_EXTENSION "plugin"
+        OUTPUT_NAME "EdgeRepair"
+        MACOSX_BUNDLE_INFO_PLIST "${RESOURCES_DIR}/Info.plist"
+        OSX_ARCHITECTURES "x86_64;arm64")
+
+    target_compile_definitions(EdgeRepair PRIVATE macintosh)
+
+    # The PiPL goes into the bundle's Resources as a Rez-compiled .rsrc. AE
+    # reads it to find the effect's name, category and entry point; without it
+    # the bundle loads and does nothing.
+    add_custom_command(TARGET EdgeRepair POST_BUILD
+        COMMAND ${REZ_TOOL}
+            -i "${AE_SDK_ROOT}/Headers"
+            -i "${AE_SDK_ROOT}/Resources"
+            -arch x86_64
+            -o "$<TARGET_BUNDLE_CONTENT_DIR:EdgeRepair>/Resources/EdgeRepair.rsrc"
+            "${PIPL_R}"
+        COMMENT "Compiling EdgeRepair PiPL with Rez"
+        VERBATIM)
+
+    # Deploy. Pass -DAE_PLUGINS_DIR=... if AE is not at the default location.
+    add_custom_command(TARGET EdgeRepair POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "$<TARGET_BUNDLE_DIR:EdgeRepair>"
+                "${AE_PLUGINS_DIR}/EdgeRepair.plugin"
+        COMMENT "Installing EdgeRepair.plugin -> ${AE_PLUGINS_DIR}"
+        VERBATIM)
+
+    message(STATUS "EdgeRepair.plugin (macOS bundle, CPU path) -> ${AE_PLUGINS_DIR}")
+
+else()
+    message(FATAL_ERROR "EdgeRepair targets Windows and macOS only.")
+endif()

@@ -65,6 +65,21 @@
     pre_render_data.
 */
 
+/* ---------------------------------------------------------------------------
+   PLATFORM FORK. Everything below is the WINDOWS GPU host: CUDA through the
+   nvcuda.dll shim. It is Windows-only by construction, and Metal is unwritten
+   (../../docs/gpu-kernel-rules.md §4), so on any other platform this file
+   compiles down to the DECLINE stubs at the bottom: PF_Err_NONE with null
+   gpu_data at device setup and MEB_GPUFrameworkSupported false, so PreRender
+   never raises GPU_RENDER_POSSIBLE and AE routes every frame to the CPU
+   reference — the always-correct path on both platforms.
+
+   The fork lives HERE, not at ModernEdgeBlur.cpp's call sites: the CPU render
+   pipeline is settled and this keeps every #ifdef out of it. Same shape as
+   MM_Qualify's QK_GPUDeviceSetup fallback (MM_Qualify/src/smart_render.cpp).
+   --------------------------------------------------------------------------- */
+#ifdef _WIN32
+
 #define NOMINMAX
 #include "ModernEdgeBlur.h"        // SDK includes, MEB_Params, MEB_* enums
 #include "ModernEdgeBlur_GPU.h"
@@ -1187,3 +1202,49 @@ PF_Err MEB_SmartRenderGPU(PF_InData *in_data, PF_OutData *out_data,
     return MEB_RenderCUDA(in_data, out_data, gpu_data,
                           src_world, out_world, prm);
 }
+
+#else   /* !_WIN32 — no GPU host on this platform yet */
+
+#include "ModernEdgeBlur.h"
+#include "ModernEdgeBlur_GPU.h"
+
+/*  Decline stubs — see the fork note at the top of this file. The behaviour
+    matches what the Windows host does for a framework it cannot render on:
+    accept setup, return no device data, let the CPU pipeline take the frame. */
+
+PF_Err MEB_GPUDeviceSetup(PF_InData *, PF_OutData *, PF_GPUDeviceSetupExtra *extra)
+{
+    extra->output->gpu_data = nullptr;
+    return PF_Err_NONE;
+}
+
+PF_Err MEB_GPUDeviceSetdown(PF_InData *, PF_OutData *, PF_GPUDeviceSetdownExtra *)
+{
+    return PF_Err_NONE;
+}
+
+bool MEB_GPUFrameworkSupported(PF_GPU_Framework) { return false; }
+
+/* TRUE, deliberately, and it is not a contradiction with the line above. The
+   budget gate's contract is that it may only return false for a frame it can
+   PROVE does not fit; withholding the flag out of ignorance is the deadlock
+   documented in AE_GPU_Effects.md §2.2-2.3. Nothing here can size a frame, so
+   nothing here may decline one — GPU_RENDER_POSSIBLE stays unraised because
+   MEB_GPUFrameworkSupported is false, which is the honest reason. */
+bool MEB_GPUBudgetAllows(PF_GPU_Framework, const void *, A_long, A_long,
+                         const MEB_Params &) { return true; }
+
+void MEB_GPULogPreRenderDecision(PF_GPU_Framework, const void *, bool,
+                                 int, int, int) {}
+void MEB_GPULogSmartRenderCPU(int, int, int, int) {}
+
+/* Unreachable while MEB_GPUFrameworkSupported is false; fail loudly rather
+   than silently returning a black frame if that ever stops holding. */
+PF_Err MEB_SmartRenderGPU(PF_InData *, PF_OutData *, PF_SmartRenderExtra *,
+                          PF_EffectWorld *, PF_EffectWorld *,
+                          const MEB_Params &)
+{
+    return PF_Err_INTERNAL_STRUCT_DAMAGED;
+}
+
+#endif  /* _WIN32 */

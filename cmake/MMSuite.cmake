@@ -18,8 +18,16 @@ include_guard(GLOBAL)
 # into making it a cache var, two had not.
 # ---------------------------------------------------------------------------
 function(mm_ae_plugins_dir)
-    set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins"
-        CACHE PATH "After Effects Plug-ins folder to deploy .aex files into")
+    if(APPLE)
+        # AE on macOS loads .plugin bundles from its own Plug-ins folder, the
+        # same relationship the Windows path has to the .aex. The MediaCore
+        # folder under /Library is Premiere's, exactly as it is on Windows.
+        set(AE_PLUGINS_DIR "/Applications/Adobe After Effects 2026/Plug-ins"
+            CACHE PATH "After Effects Plug-ins folder to deploy plugins into")
+    else()
+        set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins"
+            CACHE PATH "After Effects Plug-ins folder to deploy plugins into")
+    endif()
 endfunction()
 
 # ---------------------------------------------------------------------------
