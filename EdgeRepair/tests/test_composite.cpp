@@ -5,6 +5,7 @@
 
     Validates the Stage 4 gate properties analytically:
       - BlendWeight endpoints, midpoint, monotonicity, extend<=0 disable;
+      - the gap plateau / alpha-edge-anchored Extend / inward Softness feather;
       - ComposeBandRGB: w=0 returns orig EXACTLY for any detail (the
         "Detail 0 vs 100 differs only inside the blend band" property),
         w=1 endpoints, continuity approaching the band's outer edge;
@@ -108,37 +109,65 @@ int main()
         Check(worst < 1e-6, "grain-unbiased", d);
     }
 
-    // 4b. Inner-ease BlendWeight: w -> 0 at the core (d->0) AND at d>=extend,
-    //     rises in between, and peaks inside the band. This is what softens the
-    //     band/core handoff (the wide-light-wrap line). The 2-arg form must be
-    //     UNCHANGED (hard inner, w=1 at core).
+    // 4b. Gap plateau + alpha-edge-anchored Extend + the ORIGINAL inner ease.
+    //     Softness geometry is deliberately unchanged from v1.0.0.36 (two
+    //     re-anchorings were built and rejected in AE, 2026-08-24); the ONLY
+    //     change here is that Extend now measures from the alpha edge.
     {
         bool ok = true;
-        const float ext = 32.f, inner = 0.15f * ext;  // ~4.8px
-        ok &= er::BlendWeight(0.f, ext, inner) == 0.f;      // core: no replace now
-        ok &= er::BlendWeight(0.001f, ext, inner) < 0.05f;  // just outside: still low
-        ok &= er::BlendWeight(ext, ext, inner) == 0.f;      // outer edge: 0
-        // Rises then falls: sample a few points, peak strictly inside.
-        const float a = er::BlendWeight(inner, ext, inner);     // end of inner ease
-        const float b = er::BlendWeight(1.f, ext, inner);       // very inner
-        ok &= (a > b);                                          // eases up outward
-        ok &= (a > 0.5f);                                       // reaches strong replace
-        // 2-arg form unchanged (hard inner). Inside the inner-ease region the
-        // 3-arg weight is strictly lower (it's ramping up); at/after `inner`
-        // they coincide (innerW == 1), so compare at a point INSIDE the ease.
-        ok &= er::BlendWeight(0.f, ext) == 1.f;
-        ok &= er::BlendWeight(inner * 0.5f, ext) > er::BlendWeight(inner * 0.5f, ext, inner);
-        // inner<=0 recovers the hard curve.
-        ok &= er::BlendWeight(5.f, ext, 0.f) == er::BlendWeight(5.f, ext);
-        // Softness param contract (2026-07-22, disk ID 106): the Composited
-        // band feeds `inner = Softness px` (a FIXED PIXEL width) straight to
-        // BlendWeight. Softness 0 == hard inner; a px width behaves as the
-        // inner arg; a width >= Extend is still well-defined (very soft, w>0
-        // stays small but positive across the band, no divide issue).
-        ok &= er::BlendWeight(3.f, ext, 0.f) == er::BlendWeight(3.f, ext);    // 0 px = hard
-        ok &= er::BlendWeight(3.f, ext, 5.f) < er::BlendWeight(3.f, ext);     // 5 px eases the inner
-        ok &= er::BlendWeight(ext*0.5f, ext, 250.f) > 0.f;                    // width > extend: still valid
-        Check(ok, "blendweight-inner", "eases 0 at core, peaks in band");
+        const float ext = 32.f, gap = 10.f, inner = 0.15f * ext;  // ~4.8px
+
+        // --- inner ease, exactly as before: 0 at the core, rising outward ---
+        ok &= er::BlendWeight(0.f, 0.f, ext, inner) == 0.f;      // core: no replace
+        ok &= er::BlendWeight(0.001f, 0.f, ext, inner) < 0.05f;  // just outside: low
+        ok &= er::BlendWeight(ext, 0.f, ext, inner) == 0.f;      // outer edge: 0
+        {
+            const float a = er::BlendWeight(inner, 0.f, ext, inner);  // end of ease
+            const float b = er::BlendWeight(1.f,   0.f, ext, inner);  // very inner
+            ok &= (a > b);        // eases up outward
+            ok &= (a > 0.5f);     // reaches strong replacement
+        }
+        // Softness 0 == hard inner; a px width eases it; width > Extend is
+        // still well-defined (very soft, small but positive across the band).
+        ok &= er::BlendWeight(3.f, 0.f, ext, 0.f) == er::BlendWeight(3.f, ext);
+        ok &= er::BlendWeight(3.f, 0.f, ext, 5.f) <  er::BlendWeight(3.f, ext);
+        ok &= er::BlendWeight(ext * 0.5f, 0.f, ext, 250.f) > 0.f;
+        // Same shape with a gap present, just displaced by it.
+        ok &= er::BlendWeight(0.f,   gap, ext, inner) == 0.f;
+        ok &= er::BlendWeight(inner, gap, ext, inner) > 0.5f;
+
+        // --- Extend is measured from the ALPHA EDGE, not the core ----------
+        // The band ends gap+extend out from the core == extend out from the
+        // alpha edge, whatever the gap is. This is the "high Erode forces me to
+        // raise Extend" bug: before 2026-08-24 the band died at d == extend.
+        ok &= er::BlendWeight(gap + ext, gap, ext, 0.f) == 0.f;
+        ok &= er::BlendWeight(gap + ext - 0.01f, gap, ext, 0.f) > 0.f;
+        ok &= std::fabs(er::BlendWeight(gap + ext * 0.5f, gap, ext, 0.f) - 0.5f) < 1e-6f;
+        // The gap itself is a full-weight plateau (hard inner).
+        for (float d = 0.5f; d <= gap; d += 0.5f)
+            ok &= er::BlendWeight(d, gap, ext, 0.f) == 1.f;
+        // Same point relative to the alpha edge => same weight for ANY gap.
+        for (float g = 0.f; g <= 50.f; g += 5.f)
+            ok &= std::fabs(er::BlendWeight(g + 8.f, g, ext, 0.f) -
+                            er::BlendWeight(8.f,   0.f, ext, 0.f)) < 1e-6f;
+
+        // --- Extend 0 disables the band; the core is never touched ---------
+        ok &= er::BlendWeight(5.f,  gap, 0.f,  inner) == 0.f;
+        ok &= er::BlendWeight(5.f,  gap, -3.f, inner) == 0.f;
+        ok &= er::BlendWeight(0.f,  gap, ext,  inner) == 0.f;
+        ok &= er::BlendWeight(-1.f, gap, ext,  inner) == 0.f;
+
+        // --- gap 0 + inner 0 reduces EXACTLY to the 2-arg curve for d > 0 ---
+        for (float d = 0.5f; d < ext; d += 0.5f)
+            ok &= er::BlendWeight(d, 0.f, ext, 0.f) == er::BlendWeight(d, ext);
+        ok &= er::BlendWeight(0.f, ext) == 1.f;                // 2-arg unchanged
+        ok &= er::BlendWeight(32.f, ext) == 0.f;
+
+        // --- a negative gap (grown core, Erode < 0) is clamped to no gap ----
+        ok &= er::BlendWeight(5.f, -10.f, ext, 0.f) == er::BlendWeight(5.f, ext);
+
+        Check(ok, "blendweight-gap-extend",
+              "original inner ease; Extend measured from the alpha edge");
     }
 
     // 5. ChokeInAlpha: identity / ramp / zero, and profile preservation.

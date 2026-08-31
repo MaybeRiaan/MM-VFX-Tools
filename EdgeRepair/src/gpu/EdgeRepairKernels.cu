@@ -474,15 +474,20 @@ extern "C" __global__ void ER_Composite(
                      ? a
                      : ER_ApplyChoke(a, chokeField[i], p.choke, chokeOn);
 
-    /* Band weight — only strictly OUTSIDE the core (d > 0). */
+    /* Band weight — only strictly OUTSIDE the core (d > 0). The gap carries
+       full weight and Extend rolls off from the ALPHA EDGE, so the outward
+       reach past the matte is Erode-independent. */
     float w = 0.0f;
     ER_RGB ext = ER_MakeRGB(0.0f, 0.0f, 0.0f);
     if (band != 0) {
         /* Same discipline as the choke field: the distance field and the
            pull–push chain are read ONLY when the band is live, so a frame
            that never runs the fill needs neither allocated. */
+        /* p.erode carries the erode GAP width on this pass — the host applies
+           the same no-erode deadband BuildCoreMatte uses, so the plateau and
+           the real core boundary can never disagree. */
         const float d = dist[i];
-        if (d > 0.0f) w = ER_BlendWeight(d, p.extend, p.softness);
+        if (d > 0.0f) w = ER_BlendWeight(d, p.erode, p.extend, p.softness);
         const float* e = chain + (size_t)i * 4u;
         ext = ER_MakeRGB(e[0], e[1], e[2]);
     }
@@ -528,10 +533,15 @@ extern "C" __global__ void ER_ViewDist(
     const uint i = ER_PlaneIndex((uint)(x + p.srcOX), (uint)(y + p.srcOY),
                                  (uint)p.W);
 
+    /* No alpha edge anywhere (all-opaque or all-transparent frame) means there
+       is nothing to measure from, so the matte is black. Feeding 0 through
+       ER_DistViewValue instead would read as "right at the edge" and paint the
+       whole frame white — mirrors the CPU's haveEdge gate in ER_DistViewRow. */
     const bool haveEdge = (flags[ER_FLAG_INTERIOR] != 0u &&
                            flags[ER_FLAG_EXTERIOR] != 0u);
-    const float e = haveEdge ? edgeDist[i] : 0.0f;
-    const float v = ER_DistViewValue(e, interior[i], p.erode, p.softness);
+    const float v = haveEdge
+                  ? ER_DistViewValue(edgeDist[i], interior[i], p.erode, p.softness)
+                  : 0.0f;
 
     const uint d0 = ER_PixelFloatIndex((uint)x, (uint)y, (uint)p.dstPitchF);
     dst[d0 + 0u] = v; dst[d0 + 1u] = v; dst[d0 + 2u] = v; dst[d0 + 3u] = 1.0f;

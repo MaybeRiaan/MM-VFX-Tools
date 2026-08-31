@@ -124,17 +124,20 @@ int main()
         bool ok = true;
         Rng r(11);
         for (int i = 0; i < 20000; ++i) {
-            const float d      = r.range(-5.f, 520.f);
+            const float d      = r.range(-5.f, 560.f);
+            const float gap    = r.range(-5.f, 50.f);
             const float extend = r.range(0.f, 500.f);
             const float inner  = r.range(0.f, 250.f);
-            if (er::BlendWeight(d, extend, inner) !=
-                ER_BlendWeight(d, extend, inner)) { ok = false; break; }
+            if (er::BlendWeight(d, gap, extend, inner) !=
+                ER_BlendWeight(d, gap, extend, inner)) { ok = false; break; }
         }
         // Endpoints the Stage 4 gate leans on.
-        ok &= ER_BlendWeight(0.f, 32.f, 5.f) == 0.f;
-        ok &= ER_BlendWeight(32.f, 32.f, 5.f) == 0.f;
-        ok &= ER_BlendWeight(1e15f, 32.f, 5.f) == 0.f;   // unreachable distance
-        Check(ok, "blendweight", "bit-identical over 20k random triples");
+        ok &= ER_BlendWeight(0.f, 0.f, 32.f, 5.f) == 0.f;    // core: no replace
+        ok &= ER_BlendWeight(32.f, 0.f, 32.f, 5.f) == 0.f;   // band outer edge
+        ok &= ER_BlendWeight(42.f, 10.f, 32.f, 5.f) == 0.f;  // gap+extend out
+        ok &= ER_BlendWeight(5.f, 10.f, 32.f, 0.f) == 1.f;   // gap plateau
+        ok &= ER_BlendWeight(1e15f, 10.f, 32.f, 5.f) == 0.f; // unreachable
+        Check(ok, "blendweight", "bit-identical over 20k random quads");
     }
 
     // ---------------------------------------------------------------------

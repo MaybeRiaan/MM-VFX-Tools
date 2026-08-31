@@ -1190,6 +1190,13 @@ static PF_Err ER_RenderCUDA(PF_InData *in_data, PF_OutData *out_data,
                                        ER_FLAG_CHOKE, dChoke);
                     }
                     p = b;
+                    // p.erode carries the erode GAP width on this pass: the
+                    // full-weight plateau between the core boundary and the
+                    // original alpha edge. Same 0.01 deadband BuildCoreMatte /
+                    // coreMode use, so the plateau and the real core boundary
+                    // agree. Extend then rolls off from the ALPHA EDGE, which
+                    // makes the outward reach independent of Erode.
+                    p.erode = (prm.erodeF > 0.01) ? (float)prm.erodeF : 0.f;
                     void *a[] = { &dSrc, &dDist, &dChain, &dChoke,
                                   &dMisc, &dAmp, &dDst, &p };
                     lx.Launch2D(ER_K_COMPOSITE, outW, outH, a);

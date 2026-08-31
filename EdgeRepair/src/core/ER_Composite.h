@@ -5,14 +5,17 @@
     bit-for-bit-close or CPU/GPU parity dies. Every mapping is documented
     here precisely for that lockstep contract.
 
-    ── Blend weight ─────────────────────────────────────────────────────────
-        w(d) = 1 - smoothstep(0, extend, d)
-    d is the core distance field (0 inside the trusted core, growing
-    outward). w = 1 just outside the core (full low-frequency replacement,
-    where contamination lives), easing smoothly to 0 at d >= extend so the
-    band's outer boundary is invisible. The core itself (d <= 0) is NOT part
-    of the band — callers must passthrough there; BlendWeight returns 1 for
-    d <= 0 only as the mathematical limit.
+    ── Blend weight ──────────────────────────────────────────
+        outer  = d <= gap ? 1 : 1 - smoothstep(0, extend, d - gap)
+        innerW = smoothstep(0, inner, d)
+        w      = innerW * outer
+    `d` is the core distance field (0 inside the trusted core, growing
+    outward), `gap` the erode gap between the core boundary and the ORIGINAL
+    ALPHA EDGE. The gap carries full weight and Extend measures its roll-off
+    from the ALPHA EDGE, so the outward reach past the matte is Erode-
+    independent (fixed 2026-08-24). The inner ease is unchanged and anchored at
+    the core: w ramps 0 -> 1 over the first `inner` px out from it. The core
+    itself (d <= 0) is NOT part of the band — callers may passthrough there.
 
     ── In-band RGB composite (straight/unpremultiplied space) ───────────────
         base = lerp(origStraight, ext, w)
@@ -77,30 +80,53 @@ inline float ER_Smooth01(float t)
     return t * t * (3.f - 2.f * t);
 }
 
-// Distance-band weight with an INNER ease (2026-07-22):
-//   outer = 1 - smoothstep(0, extend, d)      // roll-off to 0 at d = extend
-//   innerW = smoothstep(0, inner, d)          // ease UP from 0 at the core
-//   w = innerW * outer
-// `inner` (px) is the inner-soft width — over the first `inner` px out from the
-// core, w ramps 0 -> 1 instead of snapping to full replacement at d -> 0. That
-// blends the recomposited band back into the REAL core colour rather than
-// leaving a hard line where band meets core (visible on wide light wraps). It
-// reshapes the WEIGHT only — the distance field and every sample point are
-// unchanged. inner <= 0 recovers the original hard-inner behaviour (w -> 1 at
-// the core). Both ends go to 0, so the band stays seamless top and bottom.
-inline float BlendWeight(float d, float extend, float inner)
+// Distance-band weight: a gap plateau, an Extend roll-off measured from the
+// ALPHA EDGE, and the original inner ease at the core.
+//
+//   d      core distance field: 0 inside the trusted core, growing outward
+//          through the erode gap, past the alpha edge, into the exterior.
+//   gap    erode gap width (px) — the untrusted rim between the core boundary
+//          (d = 0) and the ORIGINAL ALPHA EDGE (d = gap). Pass max(Erode, 0);
+//          a grown core (Erode < 0) has no gap.
+//   extend outward roll-off width (px), measured FROM THE ALPHA EDGE.
+//   inner  inner-ease width (px), measured outward from the core.
+//
+// EXTEND ANCHORING (fixed 2026-08-24). The gap carries full weight and the
+// roll-off starts at the alpha edge, so the reach past the matte is `extend` px
+// whatever Erode is. It used to start at the CORE, spending its first `Erode`
+// px just crossing the gap — Erode 10 + Extend 32 reached only 22 px past the
+// alpha edge, and raising Erode silently shortened the extension.
+//
+// INNER EASE — deliberately UNCHANGED. Over the first `inner` px out from the
+// core, w ramps 0 -> 1 instead of snapping to full replacement, blending the
+// band back into the real core colour rather than leaving a hard line where
+// band meets core (visible on wide light wraps). inner <= 0 recovers the hard
+// inner. Two alternative geometries were built and rejected in AE on
+// 2026-08-24 — a full-width feather running INWARD into the trusted core, and
+// a band-bounded feather CENTRED on the core boundary. Both changed the look
+// more than they helped and the inward one cost a second distance transform.
+// Do not "fix" this again without a look in AE first; see docs/EdgeRepair.md.
+inline float BlendWeight(float d, float gap, float extend, float inner)
 {
-    if (extend <= 0.f || d >= extend) return 0.f;
-    if (d <= 0.f) return 0.f;                 // ease starts AT the core now
-    const float s = d / extend;
-    const float outer = 1.f - s * s * (3.f - 2.f * s);
-    if (inner <= 0.f) return outer;           // original hard-inner behaviour
-    const float innerW = ER_Smooth01(d / inner);
-    return innerW * outer;
+    if (extend <= 0.f) return 0.f;            // Extend 0 disables the band
+    if (d <= 0.f) return 0.f;                 // the core is never recomposited
+    if (gap < 0.f) gap = 0.f;                 // grown core — no untrusted gap
+
+    // Outward: flat across the gap, then roll off from the ALPHA EDGE.
+    float outer = 1.f;
+    if (d > gap) {
+        const float s = (d - gap) / extend;
+        if (s >= 1.f) return 0.f;
+        outer = 1.f - s * s * (3.f - 2.f * s);
+    }
+
+    if (inner <= 0.f) return outer;           // hard inner
+    return ER_Smooth01(d / inner) * outer;    // ease up from the core
 }
 
-// Back-compat 2-arg form (hard inner) — kept so existing tests/GPU stubs that
-// don't pass an inner width still compile to the original curve.
+// Back-compat 2-arg form — the ORIGINAL core-anchored hard-inner curve, with
+// no gap plateau and no feather. Kept as the tests' reference shape and as the
+// exact thing BlendWeight(d, 0, extend, 0) must reduce to for d > 0.
 inline float BlendWeight(float d, float extend)
 {
     if (extend <= 0.f || d >= extend) return 0.f;

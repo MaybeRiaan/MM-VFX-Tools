@@ -41,7 +41,7 @@ typedef short int			int16;
 #define MINOR_VERSION	0
 #define BUG_VERSION		0
 #define STAGE_VERSION	PF_Stage_DEVELOP
-#define BUILD_VERSION	36
+#define BUILD_VERSION	39
 
 // ---------------------------------------------------------------------------
 // Parameter ranges and defaults. Originally five; Softness (disk ID 106) was
@@ -62,7 +62,12 @@ typedef short int			int16;
 #define ER_ERODE_MAX		 50.0
 #define ER_ERODE_DFLT		  2.0
 
-// Extend: how far (px) the extended colour is USED outward from the core.
+// Extend: how far (px) the extended colour is USED outward from the ORIGINAL
+// ALPHA EDGE. Re-anchored 2026-08-24: it used to measure from the eroded core,
+// so the band died Extend-Erode px past the alpha edge and raising Erode
+// silently shortened the reach (Erode 10 + Extend 32 got only 22 px out). The
+// erode gap now carries full weight and Extend is purely the roll-off beyond
+// the matte, so the two knobs are independent.
 // The pull–push fill itself runs effectively unlimited; this clamps the band.
 #define ER_EXTEND_MIN		  0.0
 #define ER_EXTEND_MAX		500.0
@@ -93,11 +98,20 @@ typedef short int			int16;
 //   • Distance Field matte: inward ramp width = Softness px (clamped to the
 //     erode gap) — how much of the gap is solid white vs. a white->black
 //     gradient toward the core.
+//
+// GEOMETRY DELIBERATELY UNCHANGED — do not "fix" it again without testing in
+// AE first. Two re-anchorings were built and rejected on 2026-08-24:
+// v1.0.0.37 ran the feather INWARD from the core boundary at full Softness
+// width ("doesn't just soften the inner edge, it extends it significantly",
+// and it cost a second distance transform); v1.0.0.38 centred a band-bounded
+// feather on that boundary ("doesn't feel right at all — we were closer
+// before"). Reverted to this, the pre-.37 behaviour, in v1.0.0.39. The Extend
+// re-anchoring from the same pass was KEPT — see ER_EXTEND_* above.
+// See docs/EdgeRepair.md for the full record.
 // History: a fixed 15%-of-Extend fraction through v1.0.0.18; a 0..50 % slider
 // v1.0.0.19-.21; switched to fixed PIXELS on user sign-off (px is predictable —
 // it doesn't rescale when Extend/Erode change). Default 5 px ≈ the old 15% of
-// the default Extend 32 (~4.8px), so the Composited look barely shifts (NOT
-// byte-identical anymore — 5 vs 4.8px). 0 = hard (Composited: snaps at core;
+// the default Extend 32 (~4.8px). 0 = hard (Composited: snaps at core;
 // Distance Field: solid-white gap, hard cut); max 250 px. Disk ID 106.
 #define ER_SOFT_MIN			  0.0
 #define ER_SOFT_MAX			250.0

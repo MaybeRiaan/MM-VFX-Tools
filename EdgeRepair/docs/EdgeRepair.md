@@ -151,14 +151,18 @@ shaping two things (see the View modes section for each mechanism):
 - In the **Distance Field** matte: the ramp width = **Softness px** (clamped to
   the band) — how much of the band is solid white vs. a white→black gradient.
 
-Range **0–250 px**, default **5 px** (≈ the old 15%-of-Extend-32 inner ease,
-~4.8px, so the Composited look barely shifts — no longer byte-identical, but
-visually indistinguishable). **0** = hard (Composited: snaps at core; Distance
-Field: solid band with a hard cut). Switched from a % to fixed px on user
-request 2026-07-22 — px is predictable, it doesn't rescale when Extend/Erode
-change. This is NOT edge-blur/feather softness (that is ModernEdgeBlur's job
-and remains a removed concept, below) — it reshapes distance-band WEIGHTS only;
-sample points and the distance field are unchanged.
+Range **0–250 px**, default **5 px**. **0** = hard (Composited: snaps at core;
+Distance Field: solid band with a hard cut). Fixed px rather than a % since
+2026-07-22 — px is predictable, it doesn't rescale when Extend/Erode change.
+This is NOT edge-blur/feather softness (that is ModernEdgeBlur's job and remains
+a removed concept, below) — it reshapes distance-band WEIGHTS only; sample
+points and the distance field are unchanged.
+
+> **This geometry is deliberately unchanged — do not re-anchor it again without
+> testing in AE first.** Two attempts were built and rejected on 2026-08-24
+> (v1.0.0.37 and .38); the reasoning and the measurements are recorded under
+> *Softness / Extend anchoring* below. The **Extend** re-anchoring from the same
+> pass was kept.
 
 **Erode shrinks the trusted core inward** by that many px (0–50). It was a
 signed −50..50 control through v1.0.0.22; **negative (dilate) was removed
@@ -248,7 +252,14 @@ functions in `EdgeRepair.cpp`.
     stays solid white, then smoothstep white→black over the remaining `Softness`
     px to the core (clamped to the gap). At Softness 0 the whole gap is solid
     white with a hard cut at the core; higher Softness lengthens the inward
-    fade. Exact Euclidean distance, identical across 8/16/32bpc.
+    fade. Exact Euclidean distance, identical across 8/16/32bpc. **Unchanged —
+    two re-anchorings were rejected in AE, see below.**
+  - **Degenerate frames.** A frame with NO alpha edge anywhere (all-opaque or
+    all-transparent across the inflated source) renders **black** — there is
+    nothing to measure from. Both `ER_DistViewRow` and `ER_ViewDist` gate on
+    that explicitly. Before 2026-08-24 they fed `edgeDist = 0` through the ramp
+    instead, which reads as "right at the edge" and painted an all-opaque frame
+    fully WHITE at any Erode > 0.
   - **NOTE — decoupled from the repair band.** Because it measures inward from
     the alpha edge (Erode-driven) rather than outward from the core, this matte
     is a STANDALONE light-wrap tool, NOT a bit-for-bit preview of the
@@ -268,6 +279,8 @@ Erode-driven edge matte, not the repair band):
   directly. **0 px** = hard inner (snaps at the core).
 - **Distance Field matte:** `Softness px` shapes the white→black ramp across the
   `|Erode|`-wide band. 0 px = solid band with a hard cut; higher = longer fade.
+
+(Both survived the 2026-08-24 anchoring pass unchanged — see below.)
 Range **0–250 px**, default **5 px**. It was first shipped as a 0–50 % slider
 (v1.0.0.19–.21) then switched to fixed px on user request — px is predictable
 (doesn't rescale with Extend/Erode). Default 5px ≈ the old 15%-of-Extend-32
@@ -507,6 +520,90 @@ before continuing. Keep every stage compiling and loadable in AE.
   form; the 2-arg form is unchanged for back-compat. Tests: `test_grain.cpp`
   (grain zero-mean/decorrelated/seamless/no-darkening), `test_composite.cpp`
   `blendweight-inner` (eases 0 at core, peaks in band).
+
+  **EXTEND RE-ANCHORED; SOFTNESS TRIED, REJECTED, REVERTED (2026-08-24,
+  v1.0.0.37 -> .39).** Two user reports from AE opened this: *"the softness
+  radius seems anchored on the original alpha edge, not the inward eroded edge —
+  higher values effectively shrink the erosion back to the original edge"*, and
+  *"if Erode goes to high values I have to increase Extend to reach beyond the
+  original alpha"*. The diagnosis was that everything was measured OUTWARD FROM
+  THE ERODED CORE, so the erode gap — the contaminated rim Erode exists to carve
+  off — was the first thing every other knob spent itself on. With `d` = the core
+  distance field (0 at the core boundary, alpha edge at `d = Erode`):
+
+  - *Extend spent itself crossing the gap.* `outer = 1 - smoothstep(0, Extend, d)`
+    started at the core, so the band died `Extend - Erode` px past the alpha
+    edge. Erode 10 + Extend 32 reached only **22 px** past the matte, and raising
+    Erode silently shortened the extension.
+  - *The inner ease ate the gap.* `innerW = smoothstep(0, Softness, d)` ramped up
+    going OUTWARD from the core, i.e. straight through the gap. At Erode 10 /
+    Extend 32, Softness 32 dropped the whole gap under `w = 0.18` and moved the
+    band's peak to `d = 16`, six px OUTSIDE the matte; at Softness >= Extend it
+    degenerated into a global "turn the effect down" knob.
+  - *The Distance Field matte could only lose coverage.* `plateau = gap -
+    Softness` carved the ramp OUT of the gap, reach pinned at Erode: Softness 0
+    -> 10 px of white, 5 -> 7.5, 10+ -> 5 and clamped.
+
+  **KEPT — the Extend fix.** `BlendWeight` gained a `gap` argument: the erode gap
+  is a full-weight plateau and the roll-off is measured from the ALPHA EDGE,
+  `outer = d <= gap ? 1 : 1 - smoothstep(0, Extend, d - gap)`. Outward reach past
+  the matte is now `Extend` px whatever Erode is, and the two knobs are
+  independent. Erode 0 is bit-identical to before (the gap term vanishes).
+
+  **REVERTED — the softness geometry, after two failed attempts.** Both were
+  built, tested in AE, and rejected:
+
+  1. **v1.0.0.37 — feather running INWARD from the core boundary** over the full
+     Softness width, on a SIGNED distance field (negative inside the core). It
+     kept the gap fully repaired, but pushed the repair up to 250 px into the
+     subject: *"this feels quite aggressive — the softness doesn't just soften
+     the inner edge, it extends it significantly"*. It also cost a second EDT:
+     measured at 4K, core+field went **396.6 -> 589.9 ms (1.49x)** — *"it also
+     seems to be very slow to respond"*. (That cost was avoidable: for Erode > 0
+     `BuildCoreMatte` already runs the exterior EDT and the core boundary is its
+     `Erode` level set, so the depth is `edgeDist - Erode`, an O(n) subtraction —
+     measured back down to **400.9 ms, 1.01x**. Recorded here in case a signed
+     field is ever wanted again; it is not in the tree.)
+  2. **v1.0.0.38 — ModernEdgeBlur's Blend Radius model**, from the user's own
+     framing: *"it should behave with the same kind of softness as the modern
+     edge blur, but the edge width is the erode amount"*. MEB blurs the eroded
+     mask symmetrically, 50% contour staying on the eroded edge, so the feather
+     was centred on the core boundary with width `min(Softness, Erode)` — softens
+     in place, cannot move or grow the edge, cannot exceed the band. Verdict:
+     *"this doesn't feel right at all. I feel like we were closer before we
+     started all this."*
+
+  **v1.0.0.39 restores the pre-.37 softness exactly** — inner ease anchored at
+  the core and measured outward, Distance Field ramp carved out of the gap —
+  with the Extend fix retained. Field cost is back to baseline (`ER_CoreMatte.h`
+  is byte-identical to its pre-pass state; no signed field is built anywhere).
+
+  **DO NOT re-anchor the softness again without testing in AE first.** Three
+  geometries have now been tried and the original won. The diagnosis above is
+  arguably still correct in the abstract — Softness genuinely does trade gap
+  coverage for smoothness — but it is what the look was tuned around, and every
+  "more correct" alternative read worse on real footage.
+
+  Also fixed in this pass and KEPT: a frame with no alpha edge at all
+  (all-opaque or all-transparent across the inflated source) used to render the
+  Distance Field view fully WHITE at any Erode > 0, because `edgeDist = 0` was
+  fed through the ramp and read as "right at the edge". Both `ER_DistViewRow`
+  and `ER_ViewDist` now gate on "this frame has an alpha edge at all" and render
+  black.
+
+  Touched: `ER_Composite.h` / `ER_KernelMath.h` (`BlendWeight` / `ER_BlendWeight`
+  are now 4-arg, `(d, gap, extend, inner)` — the 3-arg form is GONE so no call
+  site can silently keep the old Extend anchoring; the 2-arg hard curve stays as
+  the tests' reference shape), `EdgeRepair.cpp` (`ER_ResultRow` gap wiring,
+  `ER_DistViewRow` haveEdge gate), `EdgeRepair_GPU.cpp` (the composite pass
+  passes the gap in `p.erode`). Inflation is unchanged and still correct:
+  `Erode + Extend + |Choke| + blur` already covers the new outward reach.
+  Tests: `test_composite.cpp` `blendweight-gap-extend` (gap plateau at full
+  weight; band ends at `gap + extend`; equal weight at equal distance from the
+  alpha edge across gaps 0..50; original inner-ease shape preserved; Softness 0
+  reduces to the 2-arg curve), `test_gpuparity.cpp` `blendweight` and
+  `distance-field view`.
+
 
   NOTE for Stage 5: the Gaussian/EDT/fill run single-threaded and allocate
   per frame — Result at 4K float will be slow (seconds/frame); that is Stage

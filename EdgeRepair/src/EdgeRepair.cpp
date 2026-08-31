@@ -126,16 +126,13 @@ inline void ER_PerfLog(const char *fmt, ...) {
 // cannot separate wrap rims from same-scale motion-blur micro-detail).
 static const float ER_TEXTURE_BLUR_RADIUS = 4.0f;
 
-// Inner-band ease width as a FRACTION of Extend. Over the innermost
-// `softFrac * Extend` px out from the core, the blend weight ramps 0 -> 1
-// instead of snapping to full replacement at the core boundary — so the
-// recomposited band eases back into the REAL core colour rather than leaving a
-// hard line where band meets core (visible on wide light wraps). Resolution-
-// relative by construction (scales with Extend). Reshapes the weight only;
-// sample points are unchanged. This fraction was a fixed 0.15 constant through
-// v1.0.0.18; it is now the SOFTNESS PARAM (ER_SOFT, disk ID 106, % / 100),
-// default 15% == the old constant. Drives both the Composited band and the
-// Distance Field matte view. See ER_SOFT_DFLT in EdgeRepair.h.
+// Softness (ER_SOFT, disk ID 106) is a fixed-PIXEL width driving both the
+// Composited band and the Distance Field matte. It began life as a fixed 0.15
+// fraction of Extend (ER_INNER_SOFT_FRAC, through v1.0.0.18), then a 0..50 %
+// slider, then fixed px. Its GEOMETRY was re-anchored 2026-08-24: in both
+// places the softness ramp now grows AWAY from the erode gap instead of into
+// it, so raising it can never un-repair the untrusted rim. See BlendWeight in
+// core/ER_Composite.h and ER_DistViewRow below.
 
 // Tiling debug visualization. 1 = every View Mode renders the Stage 1 seam-
 // test pattern (see ER_TileDebugRow); 0 = the real pipeline/view modes run.
@@ -442,6 +439,7 @@ struct ER_DistViewRefcon {
     const uint8_t  *interior;   // srcW*srcH 1 = inside alpha (alpha>thresh)
     A_long          srcW;
     A_long          srcOX, srcOY;
+    bool            haveEdge;   // false = degenerate frame, no alpha edge at all
     float           gapWidth;   // erode gap width (px) = white→black reach
     float           innerSoft;  // softness ease width (px) for the ramp
     PF_EffectWorld *out_world;
@@ -510,8 +508,18 @@ ER_DistViewRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*ite
         //   then smoothstep white -> black over the remaining `ramp` px.
         // At Softness 0 the whole gap is solid white with a hard cut at the
         // core; higher Softness lengthens the inward fade.
+        //
+        // Two re-anchorings of this ramp were built and rejected in AE on
+        // 2026-08-24 (feather beyond the gap; feather centred on the core
+        // boundary) — see docs/EdgeRepair.md before changing it again.
+        //
+        // `haveEdge` is the one 2026-08-24 change kept: a frame with no alpha
+        // edge at all (all-opaque or all-transparent across the inflated
+        // source) has nothing to measure from, so it is black. `edgeDist` is
+        // meaningless there, not zero-distance-from-an-edge, and gating on the
+        // value alone painted an all-opaque frame fully WHITE at any Erode > 0.
         float v = 0.f;
-        if (gap > 0.f && intRow[ox]) {
+        if (rc->haveEdge && gap > 0.f && intRow[ox]) {
             const float e = edgeRow[ox];
             if (e < gap) {
                 const float ramp = rc->innerSoft < gap ? rc->innerSoft : gap;
@@ -572,6 +580,7 @@ struct ER_ResultRefcon {
     const float    *ext;        // straight extended colour (null = band off)
     const float    *chokeField; // alpha-edge EDT (null = choke off)
     float           extendF;
+    float           gapF;       // erode gap width (px) — full-weight plateau
     float           innerSoft;  // inner-ease width (px) for BlendWeight
     float           detail01;   // Detail param / 100
     float           grainAmp;   // synthetic-grain amplitude (from core estimate)
@@ -610,11 +619,14 @@ ER_ResultRow(void *refconPV, A_long /*thread_indexL*/, A_long oy, A_long /*itera
         }
 
         // Band weight — only strictly OUTSIDE the core (d > 0); the core is
-        // trusted and never recomposited.
+        // trusted and never recomposited. The gap carries full weight and
+        // Extend rolls off from the ALPHA EDGE, so the outward reach past the
+        // matte is Erode-independent; the inner ease is the original one.
         float w = 0.f;
         if (rc->dist) {
             const float d = rc->dist[i];
-            if (d > 0.f) w = er::BlendWeight(d, rc->extendF, rc->innerSoft);
+            if (d > 0.f) w = er::BlendWeight(d, rc->gapF, rc->extendF,
+                                             rc->innerSoft);
         }
 
         // STRAIGHT alpha throughout (AE's effect-world convention — see the
@@ -1082,7 +1094,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 // interior = alpha>0.5 (original silhouette, pre-Erode); seeds =
                 // the NON-interior (exterior) pixels the EDT measures from, so
                 // edgeDist = depth INSIDE the alpha edge (0 at edge, grows in).
-                bool anyIn = false, anyOut = false;
+                bool anyIn = false, anyOut = false;   // -> haveEdge
                 for (size_t i = 0; i < srcN; ++i) {
                     const bool in = alphaPlane[i] > 0.5f;
                     interior[i] = in ? 1 : 0;
@@ -1102,6 +1114,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 ER_DistViewRefcon rc;
                 rc.edgeDist = edgeDist.data(); rc.interior = interior.data();
                 rc.srcW = srcW; rc.srcOX = srcOX; rc.srcOY = srcOY;
+                rc.haveEdge  = (anyIn && anyOut);
                 rc.gapWidth  = gap;
                 // Softness is a fixed PIXEL ramp width from the white edge
                 // plateau toward the black core end; clamped to the gap by the
@@ -1260,9 +1273,14 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                 rc.ext        = doBand ? ext.data()  : nullptr;
                 rc.chokeField = haveChoke ? chokeField.data() : nullptr;
                 rc.extendF    = (float)p.extendF;
-                // Softness slider is a fixed PIXEL inner-ease width, fed
-                // straight to BlendWeight (clamped to the band by BlendWeight
-                // itself when innerSoft >= Extend).
+                // The erode gap gets FULL band weight, and Extend measures its
+                // roll-off from the ALPHA EDGE (d == gap) — so the outward
+                // reach past the matte is Extend px whatever Erode is set to.
+                // The 0.01 deadband matches BuildCoreMatte's own no-erode test,
+                // so `gap` and the real core boundary can never disagree.
+                rc.gapF       = (p.erodeF >= 0.01) ? (float)p.erodeF : 0.f;
+                // Softness is the fixed-PIXEL inner-ease width, fed straight to
+                // BlendWeight — the original behaviour.
                 rc.innerSoft  = (float)p.softF;
                 rc.detail01   = (float)(p.detailF / 100.0);
                 rc.grainAmp   = doBand ? grainAmp : 0.f;

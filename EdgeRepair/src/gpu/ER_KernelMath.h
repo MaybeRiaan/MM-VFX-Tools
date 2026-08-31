@@ -240,21 +240,32 @@ ER_FN float ER_Smooth01(float t)
     return t * t * (3.0f - 2.0f * t);
 }
 
-/* Distance-band weight with an inner ease. <- er::BlendWeight(d, extend, inner)
-       outer  = 1 - smoothstep(0, extend, d)
+/* Gap-plateau band weight with the original inner ease.
+   <- er::BlendWeight(d, gap, extend, inner)
+       outer  = d <= gap ? 1 : 1 - smoothstep(0, extend, d - gap)
        innerW = smoothstep(0, inner, d)
        w      = innerW * outer
-   Both ends go to 0, so the band is seamless top and bottom. inner <= 0
-   recovers the original hard-inner curve. */
-ER_FN float ER_BlendWeight(float d, float extend, float inner)
+   `d` is the core field (0 inside the trusted core, growing outward), `gap` the
+   erode gap between the core boundary and the original alpha edge. The gap
+   carries full weight and Extend rolls off from the ALPHA EDGE, so the reach
+   past the matte is Erode-independent (fixed 2026-08-24). The inner ease is
+   unchanged: w ramps 0 -> 1 over the first `inner` px out from the core, and
+   the core itself is never recomposited. */
+ER_FN float ER_BlendWeight(float d, float gap, float extend, float inner)
 {
-    if (extend <= 0.0f || d >= extend) return 0.0f;
-    if (d <= 0.0f) return 0.0f;                  /* ease starts AT the core */
-    const float s = d / extend;
-    const float outer = 1.0f - s * s * (3.0f - 2.0f * s);
+    if (extend <= 0.0f) return 0.0f;
+    if (d <= 0.0f) return 0.0f;
+    if (gap < 0.0f) gap = 0.0f;
+
+    float outer = 1.0f;
+    if (d > gap) {
+        const float s = (d - gap) / extend;
+        if (s >= 1.0f) return 0.0f;
+        outer = 1.0f - s * s * (3.0f - 2.0f * s);
+    }
+
     if (inner <= 0.0f) return outer;
-    const float innerW = ER_Smooth01(d / inner);
-    return innerW * outer;
+    return ER_Smooth01(d / inner) * outer;
 }
 
 /* base = lerp(orig, ext, w); out = base + w*detail01*grain (straight RGB).
@@ -468,9 +479,11 @@ ER_FN ER_RGB ER_PPUnpremult(float r, float g, float b, float cov)
    `soft` px of that band is the smoothstep ramp, the rest a solid plateau.
        edgeDist : Euclidean distance INWARD from the alpha edge
        interior : 1 inside the pre-erode silhouette
-   Callers pass edgeDist = 0 when the frame has no alpha edge at all (all
-   opaque or all transparent), which is exactly what the CPU does — keeping
-   the degenerate frames in lockstep too. */
+
+   A frame with NO alpha edge at all (all opaque or all transparent) has no
+   distance to measure: callers must return black directly rather than feeding
+   edgeDist = 0 through here, which would read as "right at the edge" and paint
+   the whole frame white. Both ER_ViewDist and ER_DistViewRow gate on that. */
 ER_FN float ER_DistViewValue(float edgeDist, float interior,
                              float gap, float soft)
 {
