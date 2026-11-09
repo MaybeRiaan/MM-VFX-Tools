@@ -182,6 +182,15 @@ under Rez with no complaints.
    their own headers included — failed with `unknown type name 'size_t'`.
    Fixed by including `<cstddef>` explicitly. No pixel code changed.
 
+5. **MM_Qualify's `Info.plist` was a copy of MM_FreqSep's** — executable,
+   identifier and bundle name all FreqSep's. The bundle built, the binary was
+   fine and signed, the PiPL was valid, and AE silently left it out of the
+   Effect menu: with `CFBundleExecutable` naming a file that is not in
+   `Contents/MacOS`, macOS treats the bundle as codeless (`codesign` reports
+   it "not signed at all"). Found on first load in AE 2026 — 4 of 5 present.
+   `tools/mac-install.sh` now refuses a bundle whose plist names any executable
+   but its own.
+
 Configure with `-DCMAKE_BUILD_TYPE=Release`: the two commands in §2 leave the
 build type empty under the Makefile generator, which means an unoptimised build
 — fine for checking that a plugin loads, far too slow to judge render speed.

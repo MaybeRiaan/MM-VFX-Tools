@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Info.plist for the macOS MM_FreqSep.plugin bundle. AE loads effect plugins
+  Info.plist for the macOS MM_Qualify.plugin bundle. AE loads effect plugins
   as bundles whose package type is 'eFKT' and whose Resources hold the
   Rez-compiled PiPL (see CMakeLists.txt APPLE branch). Cannot be built or
   verified on the Windows dev machine; present so a Mac build is self-contained.
@@ -11,13 +11,13 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>English</string>
     <key>CFBundleExecutable</key>
-    <string>MM_FreqSep</string>
+    <string>MM_Qualify</string>
     <key>CFBundleIdentifier</key>
-    <string>com.mm.MM-FreqSep</string>
+    <string>com.mm.MM-Qualify</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Skin Retouch</string>
+    <string>Qualify</string>
     <key>CFBundlePackageType</key>
     <string>eFKT</string>
     <key>CFBundleSignature</key>

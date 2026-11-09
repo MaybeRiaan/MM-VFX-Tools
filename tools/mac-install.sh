@@ -88,6 +88,15 @@ for p in "${WANTED[@]}"; do
     if [[ ! -f "$BUNDLE/Contents/Info.plist" ]]; then
         printf "  %-16s no Info.plist\n" "$p"; FAILED=1; continue
     fi
+    # The plist must name THIS bundle's executable. A copied plist naming
+    # another plugin's binary makes the bundle codeless: macOS reports it
+    # "not signed at all" and AE skips it with no error (MM_Qualify shipped
+    # FreqSep's plist this way - docs/MAC_BUILD.md SS5.5).
+    EXEC=$(plutil -extract CFBundleExecutable raw "$BUNDLE/Contents/Info.plist" 2>/dev/null)
+    if [[ "$EXEC" != "$p" ]]; then
+        printf "  %-16s Info.plist names executable '%s', not '%s' - AE would skip it\n" "$p" "$EXEC" "$p"
+        FAILED=1; continue
+    fi
     RSRC_SIZE=$(stat -f%z "$RSRC" 2>/dev/null || echo 0)
     if [[ "$RSRC_SIZE" -eq 0 ]]; then
         printf "  %-16s PiPL EMPTY or missing - AE would load it and show nothing\n" "$p"
