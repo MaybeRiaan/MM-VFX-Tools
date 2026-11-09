@@ -10,20 +10,21 @@ gets this context automatically.
 
 ---
 
-## Current priority (as of 2026-08-31)
+## Current priority (as of 2026-11-09)
 
-**Get all five plugins running on macOS.** Everything else is on hold.
+**Finish Grain Transfer completely, then the Metal port — in that order.** The
+user's decision: Metal adds a third backend that must match the CPU reference,
+so it is ported against a finished Grain Transfer, not a moving one.
 
-"Running on macOS" means **loads in AE and renders correctly on the CPU path** —
-it does **not** mean Metal. The CPU pipeline is the reference every GPU parity
-number in this suite is measured against, so a Mac CPU render is the correct
-render; Metal is a speed upgrade to add later, to plugins that already work. Do
-not treat the Metal port as a prerequisite for Mac support.
+**macOS support is done (CPU path).** All five plugins build (macOS 27, clang
+21, universal) and load in AE 2026 on the Mac, verified 2026-11-09. Renders
+looked reasonable on a first pass but were **not stress-tested**, and Grain
+Transfer has not yet rendered with a Grain Source on the Mac. What broke on
+the way is in [docs/MAC_BUILD.md](docs/MAC_BUILD.md) §5. "Running on macOS"
+means the CPU path — Metal is a speed upgrade, not a prerequisite.
 
-Groundwork is in (commit `bd46240`): Mac targets for all five, PiPL fixes,
-`Info.plist`s, GPU decline stubs. **None of it has been compiled on a Mac.**
-Start at [docs/MAC_BUILD.md](docs/MAC_BUILD.md) — §5 lists the likely first-build
-failures in the order they will hit.
+The build Mac is also the Resolve server — useful for producing the
+Resolve-grain CG test set described below.
 
 **Grain Transfer is the only plugin with live development work.** The other four
 are considered done for now. Their remaining backlog items are real and are
