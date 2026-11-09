@@ -54,7 +54,7 @@ else()
     # Standalone fallback, used only when this folder is built outside the
     # suite (cmake/MMSuite.cmake absent, so mm_ae_plugins_dir is undefined).
     if(APPLE)
-        set(AE_PLUGINS_DIR "/Applications/Adobe After Effects 2026/Plug-ins"
+        set(AE_PLUGINS_DIR "/Applications/Adobe After Effects 2025/Plug-ins"
             CACHE PATH "After Effects Plug-ins folder to deploy plugins into")
     else()
         set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins"
@@ -332,7 +332,10 @@ elseif(APPLE)
     # reads it to find the effect's name, category and entry point; without it
     # the bundle loads and does nothing.
     add_custom_command(TARGET ModernEdgeBlur POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_CONTENT_DIR:ModernEdgeBlur>/Resources"
         COMMAND ${REZ_TOOL}
+            -useDF
             -i "${AE_SDK_ROOT}/Headers"
             -i "${AE_SDK_ROOT}/Resources"
             -arch x86_64
@@ -343,9 +346,7 @@ elseif(APPLE)
 
     # Deploy. Pass -DAE_PLUGINS_DIR=... if AE is not at the default location.
     add_custom_command(TARGET ModernEdgeBlur POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "$<TARGET_BUNDLE_DIR:ModernEdgeBlur>"
-                "${AE_PLUGINS_DIR}/ModernEdgeBlur.plugin"
+        COMMAND sh -c "if [ -w \"${AE_PLUGINS_DIR}\" ]; then rm -rf \"${AE_PLUGINS_DIR}/ModernEdgeBlur.plugin\" && cp -R \"$<TARGET_BUNDLE_DIR:ModernEdgeBlur>\" \"${AE_PLUGINS_DIR}/ModernEdgeBlur.plugin\" && echo 'Deployed ModernEdgeBlur -> ${AE_PLUGINS_DIR}'; else echo 'AE plugins folder missing or not writable; skipping deploy (pass -DAE_PLUGINS_DIR=<writable dir>, or copy by hand)'; fi"
         COMMENT "Installing ModernEdgeBlur.plugin -> ${AE_PLUGINS_DIR}"
         VERBATIM)
 

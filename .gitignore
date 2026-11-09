@@ -2,5 +2,9 @@
 # Per-project build/ dirs are ignored by each project's own .gitignore.
 /build/
 
+# macOS build tree (docs/MAC_BUILD.md configures into here).
+/build-mac/
+
 # VS Code workspace file encodes local paths.
 *.code-workspace
+.DS_Store

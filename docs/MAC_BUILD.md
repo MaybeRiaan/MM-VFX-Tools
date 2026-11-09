@@ -7,11 +7,16 @@ is the correct render by definition. What it does not get you is GPU
 acceleration: there is no Metal host yet (`gpu-kernel-rules.md` §4), and CUDA is
 Windows/NVIDIA. Every plugin declines the device and takes the reference path.
 
-> **Nothing in this document has been executed on a Mac.** It was written from
-> the Windows side, against the SDK's own Xcode sample layout, after making the
-> five projects capable of producing a Mac target. Treat the first build as a
-> debugging session, not a formality — and see [First build: what to expect when
-> it breaks](#first-build-what-to-expect-when-it-breaks).
+> **Built clean on a Mac, 2026-08-31.** All five plugins compile and link, and
+> produce universal (`x86_64` + `arm64`) `.plugin` bundles carrying a valid
+> PiPL. It took three fixes to get there — two in the Rez invocation, one
+> genuine portability error — all now in the tree and recorded in
+> [§5](#5-first-build-what-actually-broke). Installing into AE needs write
+> access to its `Plug-ins` folder, which a normal account does not have (§3).
+>
+> **The in-AE half is still unverified.** No build from this document has yet
+> been loaded by After Effects, so §7 remains a plan, not a result. The machine
+> it was built on has AE 2023/2024/2025 and no 2026.
 
 ---
 
@@ -19,15 +24,17 @@ Windows/NVIDIA. Every plugin declines the device and takes the reference path.
 
 | | | |
 |---|---|---|
-| **Xcode** + command-line tools | `xcode-select --install` | Supplies clang and **Rez**, which compiles the PiPL resource. `Rez` must be on `PATH` — the CMake branch does `find_program(REZ_TOOL Rez REQUIRED)` and fails the configure if it is not. |
+| **Xcode command-line tools** | `xcode-select --install` | Supplies clang and **Rez**, which compiles the PiPL resource. **Full Xcode is not required** — the CLT alone carry `Rez`, and it lands on `PATH` at `/usr/bin/Rez`, satisfying the branch's `find_program(REZ_TOOL Rez REQUIRED)`. (A future Metal host would need full Xcode for the `metal` compiler; nothing in the CPU build does.) |
 | **CMake ≥ 3.20** | `brew install cmake` | Same minimum the Windows build uses. |
-| **After Effects SDK 25.6** (win/mac are the same download content) | Adobe developer site | Not in this repo — its licence prohibits redistribution. |
-| **After Effects 2026** | | The deploy target. |
+| **After Effects SDK 25.6** | Adobe developer site | Not in this repo — its licence prohibits redistribution. The macOS zip is a **separate download** from the Windows one and arrives with the SDK still packed as a zstd tarball: run its bundled `./extractzstd.sh` before pointing `AE_SDK_ROOT` anywhere. (Its `Resources/PiPLtool.exe` is the Windows binary and is not used here.) |
+| **After Effects** | | The deploy target. On macOS `AE_PLUGINS_DIR` defaults to **AE 2025** (`/Applications/Adobe After Effects 2025/Plug-ins`) — the Windows default stays 2026. Pass `-DAE_PLUGINS_DIR=...` for any other version. |
 
 The SDK path is a cache variable, exactly as on Windows:
 
 ```bash
-export AE_SDK_ROOT="$HOME/AE SDK/AfterEffectsSDK_25.6_61/Examples"
+# Note the doubled folder name and the inner ae*.AfterEffectsSDK dir - that is
+# what the mac zip actually unpacks to, once extractzstd.sh has run.
+export AE_SDK_ROOT="$HOME/AE SDK/AfterEffectsSDK_25.6_61_mac/AfterEffectsSDK_25.6_61_mac/ae25.6_61.64bit.AfterEffectsSDK/Examples"
 ```
 
 There is no CUDA toolkit requirement on the Mac — the nvcc step lives inside
@@ -62,8 +69,46 @@ first Mac session.
 Each project's `POST_BUILD` copies its `.plugin` bundle to:
 
 ```
-/Applications/Adobe After Effects 2026/Plug-ins
+/Applications/Adobe After Effects 2025/Plug-ins
 ```
+
+**2025, not 2026, and deliberately so:** the Mac this suite is built on is also
+the Resolve server, so its AE is pinned mid-project and cannot be upgraded on
+the suite's schedule. The plugins are expected to stay backward compatible
+across AE versions in any case. The Windows default is unchanged at 2026 — only
+the macOS branch of `mm_ae_plugins_dir()` moved.
+
+**The deploy is non-fatal, matching the Windows behaviour.** AE's `Plug-ins`
+folder under `/Applications` is `root:wheel`, so a normal user account cannot
+write to it — and a hard `copy_directory` there would fail the *build*, not just
+the install. The macOS branch therefore tests the folder first and prints
+
+```
+AE plugins folder missing or not writable; skipping deploy (pass -DAE_PLUGINS_DIR=<writable dir>, or copy by hand)
+```
+
+rather than failing. This mirrors why the Windows deploy is non-fatal (AE holds
+a file lock on a loaded `.aex`); the cause differs, the consequence does not.
+**A build that says "skipping deploy" succeeded** — check the message before
+assuming the plugin is in AE.
+
+To actually install, run `tools/mac-install.sh` after the build — one sudo
+prompt for the whole set:
+
+```bash
+./tools/mac-install.sh                 # all five, AE 2025, from build-mac/
+./tools/mac-install.sh EdgeRepair      # just one
+./tools/mac-install.sh --ae 2024       # a different AE version
+./tools/mac-install.sh --dry-run       # preflight only, no sudo
+```
+
+It preflights every bundle before asking for a password — executable present,
+`Info.plist` present, and **PiPL non-empty** — so a build that would load in AE
+and show nothing is caught before it is installed rather than after. It warns
+if AE is running (AE reads its plugin list at launch and will keep using the
+copy it already loaded), and re-checks the PiPL at the destination once the
+copy is done. The alternative remains pointing `-DAE_PLUGINS_DIR` at a writable
+folder and letting the build install itself.
 
 Override for every project at once, the same way the Windows build does:
 
@@ -87,32 +132,46 @@ copy the bundle by hand — the build itself is unaffected.
 Universal (`x86_64;arm64`) in every case, so one build serves Apple Silicon and
 Intel.
 
-## 5. First build: what to expect when it breaks
+## 5. First build: what actually broke
 
-The portable parts are genuinely portable and were audited before this document
-was written: **all threading goes through AE's own `iterate_generic`** (no
-`std::thread`, no OpenMP), there are **no SSE/AVX intrinsics anywhere**, and no
-MSVC-only pragmas in the render paths. The pixel code should compile.
+**The portability audit held.** All threading goes through AE's own
+`iterate_generic` (no `std::thread`, no OpenMP), there are no SSE/AVX
+intrinsics anywhere, and no MSVC-only pragmas in the render paths — and the
+pixel code duly compiled. Predicted problems 2–4 below (`fopen_s`,
+signed/unsigned width, case-sensitive includes) **did not materialise at all**:
+the first build produced two errors in one file and four cosmetic
+`'/*' within block comment` warnings, nothing else.
 
-What is most likely to bite, in the order it will bite:
+Three things did break, none of them in the algorithms.
 
-1. **`Rez` not found, or the PiPL failing to compile.** The three PiPLs that
-   were Windows-only until now (`EdgeRepairPiPL.r`, `ModernEdgeBlurPiPL.r`,
-   `GrainTransferPiPL.r`) used to force-define `AE_OS_WIN`, which would have
-   emitted a Windows-only code descriptor and produced a bundle AE loads and
-   ignores. They now follow the SDK's own `SmartyPantsPiPL.r` pattern, like
-   MM_FreqSep and MM_Qualify always did. If a plugin builds but never appears
-   in the Effect menu, this is the first suspect — check that
-   `Contents/Resources/<Target>.rsrc` exists inside the bundle and is non-empty.
-2. **`fopen_s` / `_wfopen_s` / `GetTempPathA`.** All the remaining ones live in
-   the Windows-only GPU hosts, which are not compiled on the Mac. Grain
-   Transfer's diagnostic log was the one in a CPU path and now branches on
-   `TMPDIR` (`GrainTransfer_diag.log` lands in `$TMPDIR`, not `%TEMP%`).
-3. **Signed/unsigned and `long` width.** MSVC and clang disagree about enough
-   of this to produce a page of warnings; treat warnings as noise on the first
-   pass and only chase errors.
-4. **Case-sensitive `#include` paths.** Windows does not care; a case-mismatched
-   include that has worked for a year fails here.
+1. **Rez could not create its output directory.** CMake's bundle generator
+   makes `Contents/MacOS` and `Contents/Info.plist` but **not**
+   `Contents/Resources`, and Rez will not create its own output dir — it dies
+   with `### Rez - fnfErr (-43) during create of ".../<Target>.rsrc"`, which
+   reads like a missing *input*. Every plugin that linked hit this. Fixed by a
+   `${CMAKE_COMMAND} -E make_directory` command ahead of the Rez call.
+2. **Rez wrote the PiPL to the resource fork, and exited 0 doing it.** This is
+   the dangerous one: with the directory fixed, Rez succeeds, and leaves a
+   **0-byte** `.rsrc` whose 634 bytes are in the `com.apple.ResourceFork`
+   xattr. `copy_directory` does not carry that xattr, so the deployed bundle
+   would load and never appear in the Effect menu — with a clean build log and
+   an `.rsrc` file sitting right where it belongs. **`-useDF` is mandatory**,
+   not a preference; it puts the resource in the data fork where AE reads it.
+   Verify with `stat -f%z <bundle>/Contents/Resources/<Target>.rsrc` — a real
+   PiPL is ~630 bytes, and `strings` on it shows `eFKT`, the effect name and
+   `EffectMain`.
+3. **`static_cast` from `PF_Handle`'s dereference (Grain Transfer, 2 sites).**
+   `*(in_data->global_data)` is `void*` on Windows but `Ptr` (`char*`) on the
+   Mac, and `static_cast` between unrelated object pointers is illegal —
+   `error: static_cast from 'Ptr' (aka 'char *') to 'GT_GlobalData *' is not
+   allowed`. `reinterpret_cast` is correct on both platforms and is the SDK's
+   own idiom. Only the `*(handle)` form is affected: the sites that cast the
+   `void*` from `host_lock_handle()` are fine as they are.
+
+The PiPL work done on the Windows side was sound — dropping the forced
+`AE_OS_WIN` from `EdgeRepairPiPL.r`, `ModernEdgeBlurPiPL.r` and
+`GrainTransferPiPL.r` was necessary and sufficient; all five `.r` files compile
+under Rez with no complaints.
 
 ## 6. What is NOT wired up yet
 

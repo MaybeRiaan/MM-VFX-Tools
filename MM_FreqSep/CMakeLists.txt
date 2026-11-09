@@ -339,7 +339,10 @@ elseif(APPLE)
     # the SDK headers supply the resource type definitions.
     set(PIPL_RSRC "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.rsrc")
     add_custom_command(TARGET ${TARGET} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET}>/Resources"
         COMMAND ${REZ_TOOL}
+            -useDF
             -i "${SDK_ROOT}/Headers"
             -i "${SDK_ROOT}/Resources"
             -arch x86_64
@@ -348,7 +351,13 @@ elseif(APPLE)
         COMMENT "Compiling ${TARGET} PiPL with Rez"
         VERBATIM)
 
-    message(STATUS "${TARGET}.plugin (macOS bundle)")
+    # Deploy. Pass -DAE_PLUGINS_DIR=... if AE is not at the default location.
+    add_custom_command(TARGET ${TARGET} POST_BUILD
+        COMMAND sh -c "if [ -w \"${AE_PLUGINS_DIR}\" ]; then rm -rf \"${AE_PLUGINS_DIR}/${TARGET}.plugin\" && cp -R \"$<TARGET_BUNDLE_DIR:${TARGET}>\" \"${AE_PLUGINS_DIR}/${TARGET}.plugin\" && echo 'Deployed ${TARGET} -> ${AE_PLUGINS_DIR}'; else echo 'AE plugins folder missing or not writable; skipping deploy (pass -DAE_PLUGINS_DIR=<writable dir>, or copy by hand)'; fi"
+        COMMENT "Installing ${TARGET}.plugin -> ${AE_PLUGINS_DIR}"
+        VERBATIM)
+
+    message(STATUS "${TARGET}.plugin (macOS bundle, CPU path) -> ${AE_PLUGINS_DIR}")
 
 else()
     message(FATAL_ERROR "MM_FreqSep targets Windows and macOS only.")

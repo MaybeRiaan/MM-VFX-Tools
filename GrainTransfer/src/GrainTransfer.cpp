@@ -724,7 +724,7 @@ PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderExtra *extra)
     GT_GlobalData *g = nullptr;
     AEGP_SuiteHandler suites(in_data->pica_basicP);
     if (in_data->global_data)
-        g = static_cast<GT_GlobalData*>(*(in_data->global_data));
+        g = reinterpret_cast<GT_GlobalData*>(*(in_data->global_data));
 
     // Resolve the apply space once per render.
     gt::Encode enc = gt::Encode::Display;
@@ -987,7 +987,7 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
 
         GT_GlobalData *g = nullptr;
         if (in_data->global_data)
-            g = static_cast<GT_GlobalData*>(*(in_data->global_data));
+            g = reinterpret_cast<GT_GlobalData*>(*(in_data->global_data));
 
         // ------------------------------------------------------------------
         // Analysis product. THE COST MODEL LIVES HERE: probe the cache by

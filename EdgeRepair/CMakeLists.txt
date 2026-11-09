@@ -63,7 +63,7 @@ else()
     # Standalone fallback, used only when this folder is built outside the
     # suite (cmake/MMSuite.cmake absent, so mm_ae_plugins_dir is undefined).
     if(APPLE)
-        set(AE_PLUGINS_DIR "/Applications/Adobe After Effects 2026/Plug-ins"
+        set(AE_PLUGINS_DIR "/Applications/Adobe After Effects 2025/Plug-ins"
             CACHE PATH "After Effects Plug-ins folder to deploy plugins into")
     else()
         set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins"
@@ -401,7 +401,10 @@ elseif(APPLE)
     # reads it to find the effect's name, category and entry point; without it
     # the bundle loads and does nothing.
     add_custom_command(TARGET EdgeRepair POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_CONTENT_DIR:EdgeRepair>/Resources"
         COMMAND ${REZ_TOOL}
+            -useDF
             -i "${AE_SDK_ROOT}/Headers"
             -i "${AE_SDK_ROOT}/Resources"
             -arch x86_64
@@ -412,9 +415,7 @@ elseif(APPLE)
 
     # Deploy. Pass -DAE_PLUGINS_DIR=... if AE is not at the default location.
     add_custom_command(TARGET EdgeRepair POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "$<TARGET_BUNDLE_DIR:EdgeRepair>"
-                "${AE_PLUGINS_DIR}/EdgeRepair.plugin"
+        COMMAND sh -c "if [ -w \"${AE_PLUGINS_DIR}\" ]; then rm -rf \"${AE_PLUGINS_DIR}/EdgeRepair.plugin\" && cp -R \"$<TARGET_BUNDLE_DIR:EdgeRepair>\" \"${AE_PLUGINS_DIR}/EdgeRepair.plugin\" && echo 'Deployed EdgeRepair -> ${AE_PLUGINS_DIR}'; else echo 'AE plugins folder missing or not writable; skipping deploy (pass -DAE_PLUGINS_DIR=<writable dir>, or copy by hand)'; fi"
         COMMENT "Installing EdgeRepair.plugin -> ${AE_PLUGINS_DIR}"
         VERBATIM)
 
