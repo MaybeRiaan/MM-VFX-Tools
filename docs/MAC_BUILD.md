@@ -191,6 +191,15 @@ under Rez with no complaints.
    `tools/mac-install.sh` now refuses a bundle whose plist names any executable
    but its own.
 
+6. **Grain Transfer: `global outflags2 mismatch` (25::16), code 0x08201400 vs
+   PiPL 0x2A201400.** Its GlobalSetup declares the GPU pair
+   (`SUPPORTS_GPU_RENDER_F32 | SUPPORTS_DIRECTX_RENDERING`) only under
+   `_WIN32`, because its CUDA host is Windows-only — but the PiPL claimed them
+   on every platform. The PiPL now branches on `AE_OS_WIN` too, so on macOS
+   Grain Transfer advertises no GPU support at all. (EdgeRepair and Modern Edge
+   Blur take the other route — declare everywhere, decline the device in a
+   Mac stub — which is why they did not hit this.)
+
 Configure with `-DCMAKE_BUILD_TYPE=Release`: the two commands in §2 leave the
 build type empty under the Makefile generator, which means an unoptimised build
 — fine for checking that a plugin loads, far too slow to judge render speed.

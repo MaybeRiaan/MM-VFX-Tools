@@ -72,8 +72,17 @@ resource 'PiPL' (16000) {
 		//            | SUPPORTS_GPU_RENDER_F32 | SUPPORTS_DIRECTX_RENDERING
 		//            = 0x1000 | 0x400 | 0x08000000 | 0x00200000
 		//            | 0x02000000 | 0x20000000 = 0x2A201400
+		// The two GPU bits are Windows-only, matching the #ifdef _WIN32 around
+		// them in GlobalSetup: the CUDA host is the only GPU host, and on macOS
+		// the effect does not advertise GPU at all, so AE never offers it a
+		// Metal device. Mac value: 0x2A201400 & ~0x22000000 = 0x08201400.
+		// When a Metal host lands, both sides change together.
 		AE_Effect_Global_OutFlags_2 {
+#ifdef AE_OS_WIN
 		0x2A201400
+#else
+		0x08201400
+#endif
 		},
 		/* [11] */
 		AE_Effect_Match_Name {

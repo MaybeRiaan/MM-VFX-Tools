@@ -570,6 +570,8 @@ GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerD
     //   out_flags  = 0x02000000 | 0x400 | 0x40 | 0x4               = 0x02000444
     //   out_flags2 = 0x400 | 0x1000 | 0x00200000 | 0x02000000
     //              | 0x08000000 | 0x20000000                       = 0x2A201400
+    // The GPU pair (0x22000000) is Windows-only on BOTH sides — the PiPL
+    // branches on AE_OS_WIN — so macOS is 0x08201400 (AE error 25::16 if not).
     out_data->out_flags  = PF_OutFlag_DEEP_COLOR_AWARE |
                            PF_OutFlag_PIX_INDEPENDENT  |
                            PF_OutFlag_USE_OUTPUT_EXTENT |
