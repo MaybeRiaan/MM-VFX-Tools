@@ -46,6 +46,9 @@
 #include "AEFX_SuiteHelper.h"
 
 #include "gt_gpu_host.h"
+
+// Build provenance (see common/mm_build_id.h).
+#include "../../../common/mm_build_id.h"
 #include "gt_cuda_shim.h"
 #include "cuda/gt_kernel_args.h"   // the launch structs, compiled FROM the kernel
 
@@ -201,6 +204,15 @@ PF_Err GT_CudaDeviceSetup(PF_InData *in_data, PF_OutData *out_data,
 	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
 	extra->output->gpu_data = nullptr;
 
+	// Provenance in THIS log too. The diag log and this one are read
+	// independently (CLAUDE.md: the GPU verdict splits across both), so each
+	// must be self-identifying. Uncapped on purpose: GT_GPU_LOG_FIRST would
+	// drop it after a device re-setup, which is exactly when it matters.
+	{
+		char bline[1200];
+		GT_GPU_LOGF("%s\n", mmbuild::FormatLine(bline, sizeof(bline),
+			"GrainTransfer", "see diag log"));
+	}
 	GT_GPU_LOGF("[GrainTransfer] DEVICE_SETUP what_gpu=%d device_index=%u\n",
 		(int)extra->input->what_gpu, (unsigned)extra->input->device_index);
 

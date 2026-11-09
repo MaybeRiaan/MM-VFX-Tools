@@ -49,6 +49,11 @@
 #include "gpu/gt_gpu_host.h"
 #endif
 
+// Build provenance. Identifies the .aex AE actually LOADED, which neither the
+// version quad nor anything derived from the source can do — a build that ran
+// while AE held the file lock reports the right version from the wrong binary.
+#include "../../common/mm_build_id.h"
+
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -561,6 +566,25 @@ static PF_Err
 GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerDef *)
 {
     PF_Err err = PF_Err_NONE;
+
+    // Build provenance: one line per load into the suite build log. This ships
+    // and is deliberately NOT behind GT_DIAG_LOG - on a bug report the first
+    // question is which binary ran. See common/mm_build_id.h.
+    mmbuild::Announce("GrainTransfer", MAJOR_VERSION, MINOR_VERSION,
+                      BUG_VERSION, BUILD_VERSION);
+
+#if GT_DIAG_LOG
+    // The same line into the diag log, so that file is self-identifying when
+    // read alone and the harness can tie its uncapped [render] lines - the only
+    // reliable render count in the suite - to a specific binary.
+    {
+        char vbuf[32], bline[1200];
+        std::snprintf(vbuf, sizeof(vbuf), "%d.%d.%d.%d", MAJOR_VERSION,
+                      MINOR_VERSION, BUG_VERSION, BUILD_VERSION);
+        GT_Log("%s", mmbuild::FormatLine(bline, sizeof(bline),
+                                         "GrainTransfer", vbuf));
+    }
+#endif
 
     out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION,
                                       STAGE_VERSION, BUILD_VERSION);
@@ -1144,7 +1168,8 @@ SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRenderExtra *extra
                               analysis->resp.valid && prd;
 
 #if GT_DIAG_LOG
-        GT_Log("[render] frame=%d cache=%s depth=%dbpc ds=%.2f fullRes=%d enc=%d %dx%d canStamp=%d hasSource=%d",
+        GT_Log("[render] id=%08x frame=%d cache=%s depth=%dbpc ds=%.2f fullRes=%d enc=%d %dx%d canStamp=%d hasSource=%d",
+               mmbuild::ShortId(),
                prd ? (int)prd->frame : -1,
                diagCacheHit ? "HIT" : "MISS",
                GT_DiagDepthBits(fmt), dsx, (int)isFullRes,

@@ -67,6 +67,9 @@
 #include <vector>
 #include <new>
 
+// Build provenance - identifies the binary AE actually loaded.
+#include "../../common/mm_build_id.h"
+
 // ---------------------------------------------------------------------------
 // Stage 5 perf instrumentation. Set ER_PERF_LOG to 1 to append one line per
 // Result-mode frame to %TEMP%\EdgeRepair_perf.log with wall-clock timings for
@@ -82,6 +85,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdarg>
+
 namespace {
 using ER_Clock = std::chrono::high_resolution_clock;
 inline double ER_ms(ER_Clock::time_point a, ER_Clock::time_point b) {
@@ -700,6 +704,13 @@ About(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerDef *)
 static PF_Err
 GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerDef *)
 {
+    // Build provenance: one line per load into the suite build log, so the
+    // first question on any bug report - which binary was running - is
+    // answered by one file rather than by a version the user read off a UI.
+    // Unconditional by design: this ships. See common/mm_build_id.h.
+    mmbuild::Announce("EdgeRepair", MAJOR_VERSION, MINOR_VERSION,
+                      BUG_VERSION, BUILD_VERSION);
+
     out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION,
                                       STAGE_VERSION, BUILD_VERSION);
     // Must match resources/EdgeRepairPiPL.r literals exactly or AE rejects

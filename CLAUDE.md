@@ -10,6 +10,46 @@ gets this context automatically.
 
 ---
 
+## Next session starts here (written 2026-11-09)
+
+A test-automation programme is now underway: the user guides intent and
+setup, Claude runs the tedious matrix and reports numbers, and human review
+happens at roughly 90% confidence rather than per-case. The whole plan, the
+division of labour, and what it deliberately does not attempt are in
+[docs/TEST_AUTOMATION.md](docs/TEST_AUTOMATION.md) — read that before
+resuming, especially §4 (Grain Transfer's blocker as an automation problem)
+and §9 (ordered work list).
+
+**Landed:** the provenance layer. `common/mm_build_id.h` + 
+`tools/verify-build-id.ps1` identify the binary AE actually *loaded*, which
+turns both silent-false-pass traps (stale binary, cache-served render) into
+assertions. Wired into all five plugins, unconditional because the suite
+ships. Verified end-to-end.
+
+**Do next:** the minimal AE case driver, via `afterfx.exe -r` against the
+running instance. Start by resolving the post-hard-kill crash-recovery modal
+deliberately — hard kills are an accepted part of the loop, so that dialog is
+the most likely thing to silently kill an unattended overnight run. Better
+found while someone is watching. It is also needed early for a reason that is
+not obvious: the accuracy target is AE's own Match Grain, whose reference
+renders can only come out of AE.
+
+**Blocked, waiting on the user:** the corpus runner needs the sample bank and
+the new shared location for collected assets. Both were promised, neither has
+arrived. Do not resume the `MeasureGrainSpectrumRes` fix against the three
+existing clips — that is a standing decision, not an oversight.
+
+**Still true:** do not open work on the other four plugins unasked.
+
+Quick use of the new tool, before and after an in-AE case:
+
+```powershell
+.\tools\verify-build-id.ps1 -Reset
+# ... run the AE case ...
+.\tools\verify-build-id.ps1 -MinRenders 3 -ExpectAex build\GrainTransfer\GrainTransfer.aex
+```
+---
+
 ## Current priority (as of 2026-11-09)
 
 **Finish Grain Transfer completely, then the Metal port — in that order.** The
@@ -95,6 +135,7 @@ one — read the relevant entry before designing a test, not after.
 | In-AE GPU validation, per-plugin traps | `docs/gpu-validation-checklist.md` (§0 = live status) |
 | Row-by-row validation evidence | `docs/gpu-validation-tracker.xlsx`, via `tools/gpu-validation/read-tracker.ps1` and `write-tracker.ps1` — the only live copy |
 | macOS build | `docs/MAC_BUILD.md` |
+| Test automation plan, provenance layer | `docs/TEST_AUTOMATION.md` |
 | Grain Transfer's open blocker | `GrainTransfer/docs/GrainTransfer.md`, *Cross-channel colour-grain fidelity* and *Luminance response* |
 
 A user-facing documentation mirror exists in Notion (User + Developer sets under

@@ -68,6 +68,9 @@
 #include <chrono>
 #include <new>
 
+// Build provenance - identifies the binary AE actually loaded.
+#include "../../common/mm_build_id.h"
+
 // MEB_CoreMath.h spells A_long as its own MEB_Long so it can stay free of the
 // AE SDK. If a future SDK ever widened one of them, every index in the shared
 // math would silently truncate.
@@ -841,6 +844,13 @@ About(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerDef *)
 static PF_Err
 GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *[], PF_LayerDef *)
 {
+    // Build provenance: one line per load into the suite build log, so the
+    // first question on any bug report - which binary was running - is
+    // answered by one file rather than by a version the user read off a UI.
+    // Unconditional by design: this ships. See common/mm_build_id.h.
+    mmbuild::Announce("ModernEdgeBlur", MAJOR_VERSION, MINOR_VERSION,
+                      BUG_VERSION, BUILD_VERSION);
+
     out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION,
                                       STAGE_VERSION, BUILD_VERSION);
 
