@@ -47,7 +47,7 @@ else()
     # Standalone fallback, used only when this folder is built outside the
     # suite (cmake/MMSuite.cmake absent, so mm_ae_plugins_dir is undefined).
     if(APPLE)
-        set(AE_PLUGINS_DIR "/Applications/Adobe After Effects 2025/Plug-ins")
+        set(AE_PLUGINS_DIR "/Applications/Adobe After Effects 2026/Plug-ins")
     else()
         set(AE_PLUGINS_DIR "C:/Program Files/Adobe/Adobe After Effects 2026/Support Files/Plug-ins")
     endif()

@@ -16,7 +16,8 @@ Windows/NVIDIA. Every plugin declines the device and takes the reference path.
 >
 > **The in-AE half is still unverified.** No build from this document has yet
 > been loaded by After Effects, so §7 remains a plan, not a result. The machine
-> it was built on has AE 2023/2024/2025 and no 2026.
+> it was built on had AE 2023/2024/2025 at the time; AE 2026 was installed
+> 2026-11-09 and is now the deploy target.
 
 ---
 
@@ -27,7 +28,7 @@ Windows/NVIDIA. Every plugin declines the device and takes the reference path.
 | **Xcode command-line tools** | `xcode-select --install` | Supplies clang and **Rez**, which compiles the PiPL resource. **Full Xcode is not required** — the CLT alone carry `Rez`, and it lands on `PATH` at `/usr/bin/Rez`, satisfying the branch's `find_program(REZ_TOOL Rez REQUIRED)`. (A future Metal host would need full Xcode for the `metal` compiler; nothing in the CPU build does.) |
 | **CMake ≥ 3.20** | `brew install cmake` | Same minimum the Windows build uses. |
 | **After Effects SDK 25.6** | Adobe developer site | Not in this repo — its licence prohibits redistribution. The macOS zip is a **separate download** from the Windows one and arrives with the SDK still packed as a zstd tarball: run its bundled `./extractzstd.sh` before pointing `AE_SDK_ROOT` anywhere. (Its `Resources/PiPLtool.exe` is the Windows binary and is not used here.) |
-| **After Effects** | | The deploy target. On macOS `AE_PLUGINS_DIR` defaults to **AE 2025** (`/Applications/Adobe After Effects 2025/Plug-ins`) — the Windows default stays 2026. Pass `-DAE_PLUGINS_DIR=...` for any other version. |
+| **After Effects** | | The deploy target. `AE_PLUGINS_DIR` defaults to **AE 2026** on both platforms (`/Applications/Adobe After Effects 2026/Plug-ins` on macOS). Pass `-DAE_PLUGINS_DIR=...` for any other version. |
 
 The SDK path is a cache variable, exactly as on Windows:
 
@@ -45,7 +46,7 @@ the Windows branch of each `CMakeLists.txt`.
 Whole suite, from the repo root:
 
 ```bash
-cmake -S . -B build-mac -DAE_SDK_ROOT="$AE_SDK_ROOT"
+cmake -S . -B build-mac -DAE_SDK_ROOT="$AE_SDK_ROOT" -DCMAKE_BUILD_TYPE=Release
 cmake --build build-mac -j
 ```
 
@@ -69,14 +70,14 @@ first Mac session.
 Each project's `POST_BUILD` copies its `.plugin` bundle to:
 
 ```
-/Applications/Adobe After Effects 2025/Plug-ins
+/Applications/Adobe After Effects 2026/Plug-ins
 ```
 
-**2025, not 2026, and deliberately so:** the Mac this suite is built on is also
-the Resolve server, so its AE is pinned mid-project and cannot be upgraded on
-the suite's schedule. The plugins are expected to stay backward compatible
-across AE versions in any case. The Windows default is unchanged at 2026 — only
-the macOS branch of `mm_ae_plugins_dir()` moved.
+The macOS default was briefly AE 2025 (the build Mac's AE was pinned while it
+served as the Resolve server); it returned to 2026 on 2026-11-09 once that
+machine was upgraded. The plugins are expected to stay backward compatible
+across AE versions — install into an older AE with `--ae 2025` or
+`-DAE_PLUGINS_DIR=...`.
 
 **The deploy is non-fatal, matching the Windows behaviour.** AE's `Plug-ins`
 folder under `/Applications` is `root:wheel`, so a normal user account cannot
@@ -96,7 +97,7 @@ To actually install, run `tools/mac-install.sh` after the build — one sudo
 prompt for the whole set:
 
 ```bash
-./tools/mac-install.sh                 # all five, AE 2025, from build-mac/
+./tools/mac-install.sh                 # all five, AE 2026, from build-mac/
 ./tools/mac-install.sh EdgeRepair      # just one
 ./tools/mac-install.sh --ae 2024       # a different AE version
 ./tools/mac-install.sh --dry-run       # preflight only, no sudo
@@ -172,6 +173,18 @@ The PiPL work done on the Windows side was sound — dropping the forced
 `AE_OS_WIN` from `EdgeRepairPiPL.r`, `ModernEdgeBlurPiPL.r` and
 `GrainTransferPiPL.r` was necessary and sufficient; all five `.r` files compile
 under Rez with no complaints.
+
+### Rebuild after the macOS 27 / clang 21 update (2026-11-09)
+
+4. **`size_t` no longer arrives transitively.** Apple clang 21's libc++ trimmed
+   its internal includes, so `MM_FreqSep/src/matte.cpp` and
+   `MM_Qualify/src/garbage.cpp` — which used `size_t` with only `<cmath>` or
+   their own headers included — failed with `unknown type name 'size_t'`.
+   Fixed by including `<cstddef>` explicitly. No pixel code changed.
+
+Configure with `-DCMAKE_BUILD_TYPE=Release`: the two commands in §2 leave the
+build type empty under the Makefile generator, which means an unoptimised build
+— fine for checking that a plugin loads, far too slow to judge render speed.
 
 ## 6. What is NOT wired up yet
 

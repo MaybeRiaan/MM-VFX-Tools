@@ -9,6 +9,8 @@
 #include "qk_core.h"
 #include "garbage.h"
 
+#include <cstddef>
+
 namespace qk {
 
 float SampleGarbage(const QK_GarbageField &f, int ox, int oy)

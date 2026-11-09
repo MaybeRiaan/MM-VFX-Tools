@@ -6,6 +6,7 @@
 #include "matte.h"
 
 #include <cmath>
+#include <cstddef>
 
 namespace fs {
 

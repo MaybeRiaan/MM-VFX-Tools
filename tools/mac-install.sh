@@ -7,13 +7,13 @@
 # the other half - run it after a build to actually install, with one sudo
 # prompt for the whole set.
 #
-#   ./tools/mac-install.sh                    # all five, AE 2025, build-mac/
+#   ./tools/mac-install.sh                    # all five, AE 2026, build-mac/
 #   ./tools/mac-install.sh EdgeRepair         # just one (repeatable)
 #   ./tools/mac-install.sh --ae 2024          # a different AE version
 #   ./tools/mac-install.sh --dry-run          # preflight only, no sudo, no copy
 #
 #   --build <dir>   build tree to install from   (default: build-mac)
-#   --ae <ver|path> AE version or a full path    (default: 2025)
+#   --ae <ver|path> AE version or a full path    (default: 2026)
 #
 # Preflight refuses to install a bundle that would load and do nothing. The
 # PiPL check is the important one: Rez without -useDF exits 0 and leaves a
@@ -24,7 +24,7 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$REPO/build-mac"
-AE="2025"
+AE="2026"
 DRY_RUN=0
 ALL_PLUGINS=(EdgeRepair GrainTransfer ModernEdgeBlur MM_Qualify MM_FreqSep)
 WANTED=()
